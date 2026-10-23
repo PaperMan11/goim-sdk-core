@@ -77,18 +77,18 @@ func NewClient(cfg *ClientConfig) Client {
 	}
 
 	params := transport.ConnectParams{
-		PlatformID:  cfg.DefaultPlatformID,
+		PlatformID:  convert.ToInt(cfg.DefaultPlatformID),
 		DeviceID:    cfg.DefaultDeviceID,
 		SDKVersion:  cfg.DefaultSDKVersion,
 		Compression: cfg.DefaultCompression,
-		OperationID: uuid4(),
+		OperationID: uuidx.New(),
 	}
 
 	var ws transport.MessageTransport
-	if cfg.WS != nil {
-		ws = cfg.WS
+	if cfg.Transport != nil {
+		ws = cfg.Transport
 	} else {
-		ws = transport.NewWSClient(cfg.WSURL, params, l)
+		ws = transport.NewWSClient(cfg.Endpoint, params, l)
 	}
 
 	// 2. Manager 构造
@@ -571,10 +571,4 @@ func extractNotificationDetail(content string) string {
 		return content
 	}
 	return elem.Detail
-}
-
-// === UUID helpers ===
-
-func uuid4() string {
-	return uuidx.New()
 }

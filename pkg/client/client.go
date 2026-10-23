@@ -80,16 +80,19 @@ type Client interface {
 type ClientConfig struct {
 	// HTTP API 基础地址（如 https://api.goim.io/api/v1）
 	BaseURL string
-	// WS 连接地址（如 ws://api.goim.io:10001/ws）
-	WSURL string
+	// 传输层连接目标（如 ws://api.goim.io:10001/ws 或 wss://...）
+	// 当前默认传输层是 WebSocket，scheme 为 ws/wss；未来 TCP 实现复用同一字段（tcp://host:port）。
+	// 使用自定义 Transport 注入时此字段被忽略。
+	Endpoint string
 
 	// 认证默认参数（WS Connect 用，Login 时 userID/token 会动态替换）
-	DefaultPlatformID  int
+	// DefaultPlatformID 仅在未 Login、直接 Connect 的场景作兜底；类型与 Login 的 platformID 对齐
+	DefaultPlatformID  int32
 	DefaultDeviceID    string
 	DefaultSDKVersion  string
 	DefaultCompression string
 
 	// 依赖注入（可用于单元测试 mock；nil 时 DefaultClient 内部构造）
-	HTTP transport.HTTPClient
-	WS   transport.MessageTransport
+	HTTP      transport.HTTPClient
+	Transport transport.MessageTransport
 }

@@ -67,7 +67,7 @@ func waitForSubscribe(t *testing.T, done <-chan struct{}) {
 func newTestClient(t *testing.T) (*DefaultClient, *mockTransport) {
 	t.Helper()
 	m := newMockTransport()
-	cli := NewClient(&ClientConfig{WS: m})
+	cli := NewClient(&ClientConfig{Transport: m})
 	return cli.(*DefaultClient), m
 }
 
