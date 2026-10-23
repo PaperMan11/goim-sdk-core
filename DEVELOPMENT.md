@@ -25,19 +25,25 @@
 
 | 组件 | 选型 | 版本 | 选型理由 |
 |---|---|---|---|
-| 语言 | Go | 1.22+ | gomobile / cgo / wasm 均原生支持 |
-| HTTP | `net/http` + `http.RoundTripper` 接口 | 标准库 | 无外部依赖、Transport 可插拔便于 mock 和中间件（重试、token 刷新） |
+| 语言 | Go | 1.26+ (自动升级) | gomobile / cgo / wasm 均原生支持 |
+| HTTP | `net/http` | 标准库 | 无外部依赖，重试 / token 刷新逻辑内嵌 HTTPClient |
 | JSON | `encoding/json` | 标准库 | gomobile 对标准库 json 支持好 |
 | WebSocket | `github.com/gorilla/websocket` | v1.x | 成熟稳定、API 完善、gomobile 社区广泛验证过 |
-| UUID | `github.com/google/uuid` | v1.x | clientMsgID 生成、operationID 生成 |
-| Token 存储 | `sync.RWMutex` + 接口抽象 | 标准库 | 多 platformID 并发安全、可 mock |
-| 错误模型 | 自定义 `SDKError{Code, Msg, OperationID}` | — | 剥离 rpc/grpc 前缀，直接返回原始业务错误 |
+| UUID | `pkg/utils/uuidx` (封装 `google/uuid`) | v1.x | 统一封装，所有 UUID 生成走 `uuidx.New()` |
+| 并发模型 | `pkg/utils/run` (actor-runner) | — | 替代手动 stopCh + WaitGroup，任一 actor 退出自动 interrupt 其余 |
+| 对象池 | **不使用 sync.Pool** | — | 客户端单连接消息量小，池化收益为零，反而引入 use-after-free 风险；Request/Response 由 GC 管理 |
+| 错误模型 | 自定义 `SDKError{Code, Msg, OperationID}` | — | **剥离 rpc/grpc 前缀**，`Error()` 直接返回原始 Msg |
+| 日志 | `pkg/logger` 接口 + zap 适配器 | — | printf 风格（`Debugf/Infof/Warnf/Errorf`），方便替换 |
+| 日志实现 | `go.uber.org/zap` | v1.x | 高性能，`SugaredLogger` 天然适配 printf 风格 |
+| Token 存储 | `sync.RWMutex` + 接口抽象 | 标准库 | 按 `(userID, platformID)` 存储，Get 过期分支写锁内复查避免竞态 |
+| 传输层编解码 | `pkg/transport/encoder` 工厂 | — | json / gob 等，按 SDKType 选 |
+| 传输层压缩 | `pkg/transport/compressor` 工厂 | — | none / gzip / zlib，两端对齐 |
+| 通用 Pub/Sub | `pkg/utils/eventbus` | — | 完全通用的 channel-based pub/sub，未来 manager/client 内部复用 |
 | 本地存储 ORM | `gorm.io/gorm` | v1.x | 表结构少（seq/version 等），gorm 省 CRUD 代码、迁移方便 |
-| 本地存储驱动 | `github.com/glebarez/sqlite` | v1.x | **pure-Go** SQLite 驱动，基于 modernc，实现了 `database/sql`，gomobile 和 wasm 均可用 |
-| 日志 | `go.uber.org/zap` | v1.x | 高性能结构化日志、支持动态级别、`zap.L()` 全局 Logger 便捷调用 |
+| 本地存储驱动 | `github.com/glebarez/sqlite` | v1.x | **pure-Go** SQLite 驱动，基于 modernc，gomobile 和 wasm 均可用 |
 
 > **gorm + sqlite 注意事项**：
-> - gomobile 不支持 Go 泛型，gorm v2 的泛型 API（`gorm.G[T]` 等）不能用，全部用非泛型 API（`db.Where().Find()` 等）即可
+> - gomobile 不支持 Go 泛型，gorm v2 的泛型 API（`gorm.G[T]` 等）不能用，全部用非泛型 API
 > - wasm 场景下 sqlite 不可用，storage 接口的 IndexedDB 实现独立于 gorm
 > - 单元测试可直接用 `gorm.io/driver/sqlite` 的内存模式（`file::memory:?cache=shared`）
 
@@ -47,7 +53,7 @@
 |---|---|---|
 | 不支持跨语言 channel | event dispatch 无法直接暴露 channel | 封装层做 channel → 原生回调桥接（iOS block / Android lambda） |
 | 回调签名限制 | gomobile 只支持基本类型参数 | 事件 payload 序列化为 JSON string 传递 |
-| 不支持泛型 | Go 1.18+ 泛型在 gomobile 下不可用 | 全部用具体类型 + interface{} 兜底 |
+| 不支持泛型 | Go 1.18+ 泛型在 gomobile 下不可用 | 全部用具体类型 + interface{} 兜底（eventbus 未使用泛型） |
 
 ---
 
@@ -66,13 +72,32 @@
 │  · seq 同步引擎  · 增量/全量同步策略  · 本地状态缓存           │
 ├─────────────────────────────────────────────────────────────┤
 │                     pkg/transport                            │
-│  HTTPClient 接口 (+ 默认实现)   │   WSClient 接口 (+ 默认实现) │
-│  · 自动 token/operationID 注入  │   · 自动重连  · 心跳保活    │
-│  · 错误码解析  · Token 过期刷新  │   · 事件分发器             │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │ MessageTransport 接口                               │     │
+│  │   Connect / Disconnect / IsConnected / Status       │     │
+│  │   SendRequest / SendRequestAndWait / Router        │     │
+│  │                                                    │     │
+│  │ baseTransport (嵌入基类)                            │     │
+│  │   run.Group actor 管理 / 重连循环 / 状态机          │     │
+│  │                                                    │     │
+│  │ DefaultWSClient     (未来: DefaultTCPClient)        │     │
+│  │   WS 读写分离 · encoder/compressor · 双向心跳       │     │
+│  └────────────────────────────────────────────────────┘     │
+│  HTTPClient  (+ 默认实现)  ·  MessageRouter  ·  TokenStore  │
+│  encoder 工厂 · compressor 工厂 · protocol (Request/Response)│
 ├─────────────────────────────────────────────────────────────┤
 │                      pkg/model                               │
 │  DTO + 枚举常量 + 错误码 + SDKError                          │
 └─────────────────────────────────────────────────────────────┘
+
+辅助包：
+  pkg/events        EventType 枚举 + Event 结构（WS 推送事件类型定义）
+  pkg/logger        Logger 接口 + zap 适配器（printf 风格）
+  pkg/utils/run     actor-runner 并发模型（baseTransport 用）
+  pkg/utils/eventbus 通用 channel-based pub/sub（未来 manager/client 复用）
+  pkg/utils/uuidx   UUID 统一封装
+  pkg/transport/encoder   传输层编解码工厂
+  pkg/transport/compressor 传输层压缩工厂
 ```
 
 ### 3.2 依赖方向（严格单向）
@@ -80,49 +105,76 @@
 ```
 client → manager → transport → model
                  ↓
-              pkg/events   (事件类型定义，WS 推送也依赖这里)
+              pkg/events   (事件类型定义)
                  ↓
               model
 ```
 
-- `model` 是最底层，**零依赖**（除 proto 包）
-- `transport` 依赖 `model` 和 `events`
-- `manager` 依赖 `transport`、`model`、`events`
+- `model` 是最底层，**零业务依赖**
+- `transport` 依赖 `model`、`logger`、`utils/run`、`utils/uuidx`、`transport/encoder`、`transport/compressor`
+- `manager` 依赖 `transport`、`model`、`events`、`logger`
 - `client` 依赖所有层
 - 所有层**不反向依赖**，同层之间不互相依赖
 
 ### 3.3 核心子系统
 
-#### A. HTTP Client 中间件链
+#### A. HTTPClient
 
 ```
-HTTPClient.Post(path, body, resp)
+HTTPClient.Post(ctx, path, body, resp)
     │
-    ├─ 1. OperationID 自动生成 (sdk:{uuid})
-    ├─ 2. Token 注入 Header
-    ├─ 3. 发送请求
-    ├─ 4. 解析响应 code
-    │      ├─ code == 0 → 返回 data
+    ├─ 1. operationID 自动生成 ("sdk:" + uuidx.New())
+    ├─ 2. Token 注入 Header（从 TokenStore.Get 取）
+    ├─ 3. 发送 POST，统一解析 {code, msg, data}
+    │      ├─ code == 0 → Unmarshal data → 返回
     │      ├─ code in [1501, 1504] → Token 过期 → 刷新 → 重试一次
     │      └─ code != 0 → 返回 SDKError
-    └─ 5. 重试（指数退避，网络层）
+    └─ 4. 网络层重试（指数退避 + jitter，最多 3 次）
 ```
 
-#### B. WebSocket 连接流程
+#### B. WebSocket 协议链路（完全对齐服务端）
 
 ```
-1. 获取 User Token (HTTP)
-2. WS Handshake
-   Header: token, userID, platformID
-3. 认证成功 → OnConnectSuccess 事件
-4. 启动心跳保活 (ping/pong)
-5. 消息循环
-   ├─ 收消息 → 反序列化 → EventDispatcher.Dispatch()
-   ├─ 连接断开 → 自动重连（指数退避） → 重连成功后触发全量 Sync
-   └─ OnConnectSuccess → 触发 SeqSyncEngine.FullSync()
+写流程:
+  proto.Marshal(业务对象)
+    → Request.Data (bytes)
+    → encoder.Marshal(Request)
+    → compressor.Compress
+    → sendCh 投递
+    → writeLoop goroutine 串行消费
+    → conn.WriteMessage(BinaryMessage, ...)
+
+读流程（完全对称）:
+  conn.ReadMessage(BinaryMessage, ...)
+    → compressor.Decompress
+    → encoder.Unmarshal(Response)
+    → MessageRouter.Route(resp)
+        ├─ OperationID 命中 pending → SendRequestAndWait 等待方
+        └─ ReqIdentifier 命中 PushHandler → 同步调用 handler
 ```
 
-#### C. Seq 同步引擎
+#### C. WebSocket 连接 & 重连
+
+```
+Connect(ctx):
+  1. 参数校验 → 默认值填充 (SDKType=go, Compression=none, OperationID=uuid)
+  2. url.Parse + encodeQuery → wsURL 拼接认证参数
+     (userID, token, platformID, deviceID, operationID, sendResponse,
+      isBackground, compression, sdkType, sdkVersion)
+  3. dialWS → gorilla/websocket.DialContext
+  4. setState(Connected) → startActors(readLoop, writeLoop)
+
+连接断开（被动）:
+  readLoop / writeLoop 任一退出 → run.Group.interrupt → 全部 actor 退出
+  → actorsExited() → failAllPending() → 指数退避重连 (1s→30s)
+  → 重连成功 setState(Connected) → startActors + OnReconnected 回调
+
+心跳（双向）:
+  客户端→服务端: writeLoop 里 30s PingMessage
+  服务端→客户端: SetPingHandler 自动回复 Pong + 续 read deadline
+```
+
+#### D. Seq 同步引擎（待实现）
 
 ```
 启动时:
@@ -130,23 +182,25 @@ HTTPClient.Post(path, body, resp)
   pull_msg_by_seq([minSeq, maxSeq]) → 全量补齐
 
 运行时增量:
-  WS 推送新消息 → OnNewMessage() 更新 maxSeq → 通知上层
+  WS 推送新消息 → PushHandler(2001) → 触发本地 seq 更新
 
 重连后:
-  丢弃本地缓存 → 重新执行启动流程
-
-已读上报:
-  mark_conversation_as_read(conversationID, hasReadSeq)
+  丢弃本地缓存 → OnReconnected → 重新执行启动流程
 ```
 
-#### D. 增量/全量同步策略
+#### E. 同步请求-响应（MessageRouter）
 
-适用于 Group / Friend / Conversation 关系型数据：
-
-| 场景 | 接口 | 输入 | 触发条件 |
-|---|---|---|---|
-| 常规同步 | `get_incremental_*` | version + versionID | App 前台定期、WS 推送变更后 |
-| 冷启动 / 版本回退 | `get_full_*` | idHash 对比 | 无 version、服务端返回 `full=true` |
+```
+SendRequestAndWait(ctx, req):
+  1. 生成 OperationID (uuid)，注册到 router.waitResponse
+  2. SendRequest(ctx, req) 发出
+  3. select {
+       case resp := <-ch:     → ErrCode==0 返回 resp，否则转 SDKError
+       case <-ctx.Done():     → router.cancelWait → 返回 ctx.Err
+       case <-15s 超时:       → router.cancelWait → 返回 timeout
+     }
+  4. Connection 断开 → failAllPending → 所有等待方收到 nil → notConnectedError
+```
 
 ---
 
@@ -155,114 +209,123 @@ HTTPClient.Post(path, body, resp)
 ```
 goim-sdk-core/
 ├── DEVELOPMENT.md               # 本文档
-├── README.md                    # 项目简介
 ├── go.mod                       # module: github.com/PaperMan11/goim-sdk-core
 ├── go.sum
-├── Makefile                     # build / test / generate 入口
 │
 ├── pkg/
-│   ├── model/                   # DTO + 枚举 + 错误码 + SDKError
-│   │   ├── user.go              # UserInfo, PublicUserInfo
-│   │   ├── group.go             # GroupInfo, GroupMemberFullInfo, GroupRequest...
-│   │   ├── msg.go               # MsgData, OfflinePushInfo, ChatLog...
-│   │   ├── conversation.go      # Conversation, MsgInfo, ConversationElem...
+│   ├── model/                   # ✅ 已完成 — DTO + 枚举 + 错误码 + SDKError
+│   │   ├── user.go              # UserInfo, PublicUserInfo, OnlineStatus...
+│   │   ├── group.go             # GroupInfo, GroupMemberFullInfo...
+│   │   ├── msg.go               # MsgData, ChatLog, PullMsgsResult...
+│   │   ├── conversation.go      # Conversation, MsgInfo, SeqInfo...
 │   │   ├── relation.go          # FriendInfo, BlackInfo, FriendRequest...
-│   │   ├── error.go             # SDKError + 错误码常量
+│   │   ├── common.go            # RequestPagination, DeleteSyncOpt...
+│   │   ├── error.go             # SDKError + 全部错误码常量
 │   │   └── const.go             # 枚举常量 (sessionType, msgFrom, recvMsgOpt, roleLevel...)
 │   │
-│   ├── events/                  # WS 推送事件类型定义（单独包避免循环依赖）
+│   ├── events/                  # ✅ 已完成 — WS 推送事件类型定义
 │   │   ├── event.go             # EventType 枚举 + Event 通用结构
-│   │   ├── msg.go               # MsgData, RevokeMsgTips, MarkAsReadTips...
+│   │   ├── msg.go               # RevokeMsgTips, MarkAsReadTips...
 │   │   ├── group.go             # GroupCreatedTips, MemberEnterTips...
 │   │   ├── relation.go          # FriendAddedTips, BlackAddedTips...
-│   │   └── conversation.go      # ConversationUpdateTips...
+│   │   ├── conversation.go      # ConversationUpdateTips...
+│   │   └── user.go              # UserInfoUpdatedTips...
 │   │
-│   ├── transport/               # HTTP + WS + Auth 接口与默认实现
-│   │   ├── http.go              # HTTPClient 接口 + 默认实现（token/opID 注入 + 错误解析 + 重试）
-│   │   ├── http_middleware.go   # RoundTripper 实现：TokenRefresh, Retry, Logging
-│   │   ├── ws.go                # WSClient 接口 + 默认实现（自动重连 + 心跳 + 事件分发）
-│   │   ├── auth.go              # TokenStore 接口 + 默认实现（RWMutex 保护 + 多 platform 支持）
-│   │   └── dispatcher.go        # EventDispatcher（channel-based pub/sub）
+│   ├── logger/                  # ✅ 已完成 — 通用日志接口
+│   │   ├── logger.go            # Logger 接口 (printf 风格) + NopLogger
+│   │   └── zap.go               # zap 适配器 (ZapLogger)
 │   │
-│   ├── manager/                 # 六个业务 Manager 接口 + 默认实现
-│   │   ├── auth.go              # AuthMgr: GetAdminToken, GetUserToken, ParseToken, ForceLogout
-│   │   ├── user.go              # UserMgr: 注册/更新/查询/在线状态/客户端配置
-│   │   ├── msg.go               # MsgMgr: 发送/拉取/撤回/已读/搜索/删除
-│   │   ├── group.go             # GroupMgr: CRUD/成员/申请/转让/禁言/增量同步
-│   │   ├── relation.go          # RelMgr: 好友/黑名单/申请/备注/增量同步
-│   │   ├── conversation.go      # ConvMgr: 列表/属性/增量同步
-│   │   └── sync.go              # SeqSyncEngine: FullSync / IncrementalSync
+│   ├── transport/               # ✅ Phase 1 核心 — HTTP + WS + Router + Auth
+│   │   ├── transport.go         # MessageTransport 接口 + baseTransport 嵌入基类
+│   │   ├── protocol.go          # Request/Response (对齐服务端) + WS 协议常量
+│   │   ├── router.go            # MessageRouter (按 ReqIdentifier/OperationID 路由)
+│   │   ├── ws.go                # DefaultWSClient (读写分离 + encoder/compressor + 双向心跳)
+│   │   ├── http.go              # DefaultHTTPClient (token/opID 注入 + 错误解析 + 重试)
+│   │   ├── auth.go              # TokenStore 接口 + 默认实现 (Get 过期写锁内复查)
+│   │   ├── encoder/             # 传输层编解码工厂 (json/gob)
+│   │   ├── compressor/          # 传输层压缩工厂 (none/gzip/zlib)
+│   │   └── *_test.go            # 单元测试 (5 文件, 33 用例)
 │   │
-│   ├── client/                  # Facade 顶层 Client
-│   │   └── client.go            # Client 接口 + 默认实现（聚合六个 Manager + 生命周期）
+│   ├── utils/
+│   │   ├── run/                 # actor-runner (baseTransport 并发模型)
+│   │   ├── eventbus/            # 通用 channel-based pub/sub
+│   │   ├── uuidx/               # UUID 统一封装
+│   │   ├── httpclient/          # 函数式 HTTP 客户端 (独立库，sdk 暂未直接用)
+│   │   └── ...                  # hash, bcrypt, convert, timex 等工具
 │   │
-│   └── storage/                 # 本地存储抽象（SQLite / IndexedDB）
-│       ├── storage.go           # Storage 接口 + 内存实现（测试用）
-│       ├── sqlite.go            # SQLite 实现（桌面/iOS/Android）
-│       └── wasm_indexeddb.go    # IndexedDB 实现（Web）
+│   ├── manager/                 # ⏳ 待实现 — 六个业务 Manager
+│   │   ├── auth.go
+│   │   ├── user.go
+│   │   ├── msg.go
+│   │   ├── group.go
+│   │   ├── relation.go
+│   │   ├── conversation.go
+│   │   └── sync.go              # SeqSyncEngine
+│   │
+│   ├── client/                  # ⏳ 待实现 — Facade 顶层 Client
+│   │   └── client.go
+│   │
+│   └── storage/                 # ⏳ 待实现 — 本地存储抽象
+│       ├── storage.go
+│       ├── sqlite.go
+│       └── wasm_indexeddb.go
 │
-├── internal/
-│   ├── uuid.go                  # clientMsgID / operationID 生成
-│   ├── retry.go                 # 指数退避重试
-│   └── backoff.go               # 退避策略
-│
-├── wasm/                        # Web 端入口（后续实现）
-│   ├── cmd/main.go              # wasm 入口
-│   └── indexdb/                 # IndexedDB 封装
-│
-└── tests/                       # 集成测试
-    └── integration_test.go      # 完整流程测试（用 mock 服务）
+├── internal/                    # utils 已吸收所有功能，internal 暂空
+├── wasm/                        # Phase 5 目标
+└── tests/                       # 集成测试 (Phase 4 目标)
 ```
 
 ---
 
 ## 5. 开发阶段与步骤
 
-### Phase 1: 基础层（model + events + transport）
+### Phase 1: 基础层 ✅ **已完成**
 
-> 优先级最高，后续所有层依赖这些定义。
+**1.1 初始化项目** ✅
+- module: `github.com/PaperMan11/goim-sdk-core`
+- `go.mod tidy` 拉齐依赖，toolchain 自动升级到 `go1.26.10`
 
-**步骤 1.1 — 初始化项目**
-- `go mod init github.com/PaperMan11/goim-sdk-core`
-- 引入 proto 依赖 `github.com/PaperMan11/goim/pkg/protocol`
-- 引入第三方依赖：`google/uuid`, `gorilla/websocket`, `gorm.io/gorm`, `glebarez/sqlite`, `go.uber.org/zap`
+**1.2 pkg/model** ✅
+- 8 文件全部 DTO struct（纯 JSON tag）
+- `SDKError{Code, Msg, OperationID}`：`Error()` 直接返回 Msg
+- 错误码常量覆盖文档全部 30+ 个
+- 枚举常量：sessionType / msgFrom / recvMsgOpt / roleLevel / PullOrder / TokenStatus
 
-**步骤 1.2 — pkg/model**
-- 按文档第 6 章定义所有 DTO struct（纯 JSON tag，先不加 proto 字段，按需再加）
-- `error.go`：定义 `SDKError` 类型，实现 `error` 接口，`Error()` 方法剥离 rpc/grpc 前缀
-- 错误码常量（文档 5.2 节全部 30+ 错误码）
-- `const.go`：所有枚举常量（sessionType / msgFrom / recvMsgOpt / roleLevel / PullOrder / TokenStatus ...）
+**1.3 pkg/events** ✅
+- EventType 枚举（iota+1，30 个值）
+- Event 结构：`{Type, Payload, RawPayload, Timestamp}`
+- 5 文件各 Tip payload 结构体
 
-**步骤 1.3 — pkg/events**
-- 定义 `EventType` 枚举（24 种 WS 推送事件）
-- 定义各 Tip 结构体（直接从 proto 对应字段镜像过来）
-- 定义通用 `Event` 结构：`{ Type EventType, Payload interface{}, Timestamp int64 }`
+**1.4 pkg/transport** ✅ （实际做的远超原计划）
 
-**步骤 1.4 — pkg/transport**
-- `http.go`：HTTPClient 接口定义（Post/Get + 自动注入 token/opID + 统一错误解析）
-- `http_middleware.go`：RoundTripper 中间件链实现
-  - TokenRefresh：code 1501/1504 触发刷新后重试一次
-  - Retry：指数退避，最多 3 次
-  - Logging：debug 级别请求/响应日志
-- `auth.go`：TokenStore 接口（按 `(userID, platformID)` 存储）+ RWMutex 默认实现
-- `ws.go`：WSClient 接口（Connect / Disconnect / IsConnected / SendMessage）+ 默认实现
-  - 自动重连（指数退避，最大 30s）
-  - 心跳保活（30s ping）
-  - 连接状态回调（OnConnect / OnDisconnect / OnError）
-- `dispatcher.go`：EventDispatcher（channel-based pub/sub）
-  - `Subscribe(etype EventType) (<-chan Event, UnsubscribeFunc)`
-  - 内部用 `map[EventType][]chan<- Event`，每个订阅者独立 channel，buffer=64
-  - 派发时用 `select` 防止慢消费者阻塞整个分发
+| 原计划 | 实际实现 |
+|--------|---------|
+| `WSClient` 单体接口 | `MessageTransport` 通用接口 + `baseTransport` 嵌入基类，支持未来 TCP |
+| EventDispatcher（EventType pub/sub） | MessageRouter（按 ReqIdentifier/OperationID 路由），pending 请求同步匹配 |
+| 心跳 loop（单向 ping） | 双向心跳：SetPingHandler 自动回复 pong，SetPongHandler 续期 read deadline |
+| 单 actor（混合读写） | 读写分离：readLoop + writeLoop 独立 goroutine，writeLoop 串行消费 sendCh |
+| 无编解码/压缩 | encoder + compressor 工厂，WriteMessage(BinaryMessage, compressed) 完全对齐服务端 |
+| Header 认证 | URL query 认证（10 字段，服务端统一定义） |
+| `sync.Pool` 对象池 | **已移除**：客户端池化收益为零，引入所有权/use-after-free 风险 |
+| 手动 stopCh + WaitGroup | run.Group actor-runner，任一退出自动 interrupt 其余 |
+| 无 SendRequestAndWait | 同步请求-响应：注册 pending → 发送 → 等响应/ctx/超时，断连时 failAllPending 唤醒 |
+| HTTP middleware 链 | 重试/刷新内嵌 HTTPClient（3 次指数退避 + jitter，Token 过期刷新后重试一次） |
 
-**完成标准**：model 编译通过 + events 编译通过 + transport 编译通过 + `go test ./pkg/...` 能跑通 transport 的 mock 测试。
+**1.5 pkg/logger** ✅
+- 独立 Logger 接口（printf 风格）+ NopLogger + zap 适配器
+- transport 层零 zap import
+
+**1.6 单元测试** ✅
+- 5 测试文件，33 用例全部通过（3.27s）
+- 覆盖：MessageRouter 路由逻辑、TokenStore 过期删除竞态、HTTPClient 错误解析/重试/token header、WS 端到端（httptest 起真服务端）、ConnectParams 默认值、baseTransport actor 生命周期、重连
 
 ---
 
-### Phase 2: Manager 接口骨架（先接口后实现）
+### Phase 2: Manager 接口骨架 ✅ **已完成**
 
-> 先把六个 Manager 的 interface 全部定义完，锁定边界，再逐个填充实现。
+> 六个 Manager interface 全部定义完毕，`go build ./pkg/manager/...` 通过。
 
-**步骤 2.1 — pkg/manager/auth.go**
+**步骤 2.1 — manager/auth.go**
 
 ```go
 type AuthMgr interface {
@@ -273,7 +336,7 @@ type AuthMgr interface {
 }
 ```
 
-**步骤 2.2 — pkg/manager/user.go**
+**步骤 2.2 — manager/user.go**
 
 ```go
 type UserMgr interface {
@@ -294,7 +357,7 @@ type UserMgr interface {
 }
 ```
 
-**步骤 2.3 — pkg/manager/msg.go**
+**步骤 2.3 — manager/msg.go**
 
 ```go
 type MsgMgr interface {
@@ -316,7 +379,7 @@ type MsgMgr interface {
 }
 ```
 
-**步骤 2.4 — pkg/manager/group.go**
+**步骤 2.4 — manager/group.go**
 
 ```go
 type GroupMgr interface {
@@ -326,7 +389,7 @@ type GroupMgr interface {
     JoinGroup(ctx context.Context, groupID, reqMessage string, joinSource int32, inviterUserID, ex string) error
     QuitGroup(ctx context.Context, groupID, userID string) error
     GroupApplicationResponse(ctx context.Context, groupID, fromUserID, handledMsg string, handleResult int32) error
-    TransferGroup(ctx context.Context, groupID, oldOwnerUserID, newOwnerUserID string) error
+    TransferGroup(ctx context.Context, groupID string, oldOwnerUserID, newOwnerUserID string) error
     GetGroupsInfo(ctx context.Context, groupIDs []string) ([]*model.GroupInfo, error)
     KickGroup(ctx context.Context, groupID string, kickedUserIDs []string, reason string, sendMessage *bool) error
     GetGroupMembersInfo(ctx context.Context, groupID string, userIDs []string) ([]*model.GroupMemberFullInfo, error)
@@ -346,7 +409,7 @@ type GroupMgr interface {
 }
 ```
 
-**步骤 2.5 — pkg/manager/relation.go**
+**步骤 2.5 — manager/relation.go**
 
 ```go
 type RelMgr interface {
@@ -368,7 +431,7 @@ type RelMgr interface {
 }
 ```
 
-**步骤 2.6 — pkg/manager/conversation.go**
+**步骤 2.6 — manager/conversation.go**
 
 ```go
 type ConvMgr interface {
@@ -384,76 +447,184 @@ type ConvMgr interface {
 }
 ```
 
-**完成标准**：六个 Manager 接口全部定义完毕，无实现代码，`go build ./pkg/manager/...` 通过（interface-only 包可以编译通过）。
+**完成标准**：六个 Manager 接口全部定义完毕，`go build ./pkg/manager/...` 通过。
 
 ---
 
-### Phase 3: Manager 实现（逐个填充）
+### Phase 2.5: Client 接口骨架 + 回调监听体系 ⏳ **下一步**
+
+> Manager 接口锁定后，先把 Client 层统一入口和事件监听 API 定义出来。
+> 后续 Manager 实现时就知道要派发哪些事件，避免边写边改监听接口。
+
+**步骤 2.5.1 — pkg/client/client.go 接口骨架**
+
+```go
+type Client interface {
+    // —— 生命周期 ——
+    Login(ctx context.Context, userID string, platformID int32) error
+    Logout() error
+    Connect(ctx context.Context) error
+    Disconnect() error
+    Status() transport.TransportStatus
+
+    // —— Manager 聚合 ——
+    Auth() manager.AuthMgr
+    User() manager.UserMgr
+    Msg() manager.MsgMgr
+    Group() manager.GroupMgr
+    Rel() manager.RelMgr
+    Conv() manager.ConvMgr
+
+    // —— 事件订阅（统一走 eventbus）——
+    Subscribe(eventType events.EventType) (<-chan events.Event, eventbus.UnsubscribeFunc)
+    SubscribeAll() (<-chan events.Event, eventbus.UnsubscribeFunc)
+
+    // —— 便捷生命周期 Handler ——
+    OnConnect(h func())                 // WS 连接成功
+    OnDisconnect(h func(err error))     // WS 连接断开（被动）
+    OnReconnect(h func())               // 自动重连成功
+    OnLoginSuccess(h func())
+    OnLoginFailed(h func(err error))
+    OnForceLogout(h func())             // WSKickOnlineMsg / WSLogoutMsg 触发
+}
+```
+
+**步骤 2.5.2 — 统一事件总线架构**
+
+事件来源分四类，全部汇聚到 `pkg/utils/eventbus`：
+
+| 事件来源 | 触发方式 | 接入点 |
+|---|---|---|
+| **WS 推送** | MessageRouter.PushHandler 注册 → proto.Unmarshal → Publish | DefaultClient 构造时集中注册 |
+| **传输层状态** | transport 回调（OnReconnected / actorsExited） | 同 Phase 3 实现 DefaultClient 时注入 |
+| **Manager 操作** | Manager 实现里 Publish（操作成功/失败） | Phase 3 逐个 Manager 实现里加 |
+| **系统事件** | Storage / TokenStore / SeqSync 内部 | Phase 4 |
+
+WS 推送 → EventType 映射（DefaultClient 构造函数里集中注册）：
+
+```go
+router.RegisterPush(WSPushMsg=2001,       → proto.Unmarshal → EventNewMsg)
+router.RegisterPush(WSKickOnlineMsg=2002, → EventForceLogout)
+router.RegisterPush(WSLogoutMsg=2003,     → EventForceLogout)
+router.RegisterPush(WSSetBackgroundStatus=2004, → EventBackgroundStatusChanged)
+router.RegisterPush(WSSubUserOnlineStatus=2005, → EventUserStatusChange)
+```
+
+**步骤 2.5.3 — EventType 扩展（events/event.go）**
+
+现有 30 个 WS 推送事件外，补充 Client 层专用事件类型：
+
+```go
+// 传输层 / 生命周期
+EventConnect              // WS 连接成功
+EventDisconnect           // WS 连接断开
+EventReconnect            // 重连成功
+EventLoginSuccess         // 登录成功（Token 获取 + WS 连接 + Seq 同步）
+EventLoginFailed          // 登录失败
+EventTokenRefreshed       // Token 刷新成功
+EventSeqSynced            // 全量同步完成
+```
+
+**完成标准**：`Client` 接口骨架编译通过 + EventType 枚举完整 + eventbus 订阅示例验证。
+
+---
+
+### Phase 3: Manager 实现（逐个填充）⏳
 
 > 按依赖顺序实现，从底层向上：Auth → User → Msg → Relation → Group → Conversation
 
 **步骤 3.1 — manager/auth.go 实现**
 - 直接对应 4 个 /auth HTTP 接口
 - TokenStore 联动：GetUserToken 成功后自动存入 TokenStore
+- GetUserToken 成功 → eventbus.Publish(EventLoginSuccess)
+- Refresh token 成功 → eventbus.Publish(EventTokenRefreshed)
+- ForceLogout 成功 → MessageRouter 标记连接需要清理
 
 **步骤 3.2 — manager/user.go 实现**
-- 14 个 /user HTTP 接口
-- 无复杂同步逻辑，纯 CRUD
+- 14 个 /user HTTP 接口，纯 CRUD
+- SubscribeUsersStatus / GetUsersOnlineStatus 需配合 WS（WSSubUserOnlineStatus / WSSetBackgroundStatus）
+- WS 推送 UserStatusChange → eventbus.Publish(EventUserStatusChange)
 
 **步骤 3.3 — manager/msg.go 实现 + sync.go**
-- 最复杂的 Manager，核心是 `SeqSyncEngine`
-- SeqSyncEngine 需要本地状态存储（依赖 storage 包）
-- WS 推送 → OnNewMessage → 触发增量更新本地 seq
-- 实现 `sync.go`：
-  - `FullSync()`: newest_seq → pull_msg_by_seq → 写本地存储
-  - `IncrementalSync()`: 对比本地 seq 与服务端，补齐缺口
-  - 重连后自动触发 FullSync
+- 最复杂的 Manager，核心是 SeqSyncEngine
+- SendMsg / SendSimpleMsg / BatchSendMsg → WS (WSSendMsg) + SendRequestAndWait
+- PullMsgBySeq / NewestSeq → WS (WSPullMsg / WSGetNewestSeq)
+- **PushHandler(2001) 注册**：proto.Unmarshal → 映射 EventType → eventbus.Publish
+  - 映射表在 DefaultClient 构造时定义，Manager 实现只负责解析和转事件
+- SendMsg 成功 → eventbus.Publish(EventMsgSent)
+- RevokeMsg 成功 → eventbus.Publish(EventMsgRevoked)（WS 也会推 EventRevokeMsg，两处都发）
+- SeqSyncEngine → OnReconnected 触发 FullSync → 完成后 eventbus.Publish(EventSeqSynced)
+- SeqSyncEngine 需要本地 Storage 配合（Phase 4 实现，Phase 3 先留接口）
 
 **步骤 3.4 — manager/relation.go 实现**
 - 15 个 /relation HTTP 接口
-- 增量同步：get_incremental_friends / get_incremental_blacks
+- GetIncrementalFriends / GetIncrementalBlacks 需本地 versionID 配合
+- AddFriendResponse 成功 → eventbus.Publish(EventFriendAdded)
+- DeleteFriend 成功 → eventbus.Publish(EventFriendDeleted)
 
 **步骤 3.5 — manager/group.go 实现**
-- 22 个 /group HTTP 接口，最多的一个
-- 增量同步：get_incremental_join_groups / get_incremental_group_members
+- 22 个 /group HTTP 接口
+- GetIncrementalJoinGroups / GetIncrementalGroupMembers 需本地 versionID 配合
+- CreateGroup 成功 → eventbus.Publish(EventGroupCreated)
+- KickGroup 成功 → eventbus.Publish(EventGroupMemberKicked)
 
 **步骤 3.6 — manager/conversation.go 实现**
-- 13 个 /conversation HTTP 接口
-- 增量同步：get_incremental_conversations
-
-**完成标准**：六个 Manager 全部有可用实现，transport 层 mock 测试覆盖每个 Manager 的核心路径。
+- 9 个 /conversation HTTP 接口
+- GetIncrementalConversations 需本地 versionID 配合
+- SetConversations 成功 → eventbus.Publish(EventConversationCreated)
+- DeleteConversations 成功 → eventbus.Publish(EventConversationDeleted)
 
 ---
 
-### Phase 4: Client Facade + Storage + Events 桥接
+### Phase 4: Storage + DefaultClient 完整实现 ⏳
 
 **步骤 4.1 — pkg/storage**
-- `storage.go`: Storage 接口（定义本地持久化抽象，供 SeqSyncEngine 和本地缓存使用）
-- `sqlite.go`: SQLite 实现（gorm + glebarez/sqlite，pure-Go 驱动）
-- `wasm_indexeddb.go`: IndexedDB 实现（后续 wasm 阶段补充）
+- Storage 接口（seq / version / idHash / 消息缓存 / 会话缓存）
+- SQLite 实现（gorm + glebarez/sqlite）
+- 内存实现（测试用）
 
-**步骤 4.2 — pkg/client/client.go**
-- `Client` 接口：聚合六个 Manager
-- 默认实现：`DefaultClient` 持有 `HTTPClient`, `WSClient`, `TokenStore`, 六个 Manager, `Storage`
-- 生命周期：
+**步骤 4.2 — pkg/client/client.go 完整实现**
+- DefaultClient 聚合：HTTPClient、MessageTransport、TokenStore、六个 Manager、Storage、eventbus
+- 构造时注册全部事件源：
+  - MessageRouter.PushHandler × 5 个 WS 推送 → eventbus.Publish
+  - baseTransport.OnReconnected → eventbus.Publish(EventReconnect)
+  - actorsExited failAllPending → EventDisconnect
+- 生命周期实现：
   ```
-  NewClient(cfg *Config) → 构造
-  Init()                 → 获取 Admin Token → 初始化状态
-  Login(userID, platformID) → 获取 User Token → 启动 WS 连接 → SeqSyncEngine.FullSync()
-  Logout()               → WS Disconnect → 清理本地状态
+  NewClient(cfg)      → 构造 transport + manager 依赖
+  Login(userID, pid)  → Auth.GetUserToken → TokenStore.Set → WS Connect → SeqSyncEngine.FullSync
+                      → 成功 eventbus.Publish(EventLoginSuccess)
+  Logout()            → MessageTransport.Disconnect → TokenStore.Delete → Storage.Clear
+                      → eventbus.Publish(EventForceLogout)
+  Subscribe(et)       → eventbus.Subscribe(et)
+  OnConnect(h)        → eventbus.Subscribe(EventConnect) → 回调
   ```
-- `Config` 结构：baseURL, wsURL, adminUserID, adminSecret, logLevel, storageDir
+- **OnConnect 触发时机**：WS `connect.OnConnected` 回调里 Publish，而非 transport.connect 方法成功返回。
+  原因：SendRequestAndWait / PushHandler 注册后才能保证事件链完整。
 
-**步骤 4.3 — Events 桥接层**
-- 将 WS EventDispatcher 的 channel 输出桥接到 Client 层的事件订阅 API
-- `client.go` 暴露 `Subscribe(EventType) (<-chan Event, UnsubscribeFunc)`
-- gomobile 封装层后续把 channel 适配为原生回调
+**步骤 4.3 — Events 桥接层（Phase 3 已部分完成）**
+- Manager 实现里操作成功 → eventbus.Publish（Phase 3 已嵌入）
+- MessageRouter.PushHandler → proto.Unmarshal → EventType → eventbus.Publish
+  - PushHandler 在 DefaultClient 构造函数里集中注册，映射表清晰可维护
+- Subscribe / SubscribeAll 暴露给上层业务调用
+- lifecycle handler（OnConnect/OnDisconnect 等）是 Subscribe 的语法糖
 
-**完成标准**：`NewClient(cfg).Init().Login()` 完整跑通，WS 连接 + Seq 全量同步 + 消息推送。
+**Phase 4 完成判定**：
+
+```
+NewClient(cfg).Login(userID, platformID)
+  → Auth.GetUserToken → TokenStore.Set → WS Connect → SeqSync → EventLoginSuccess
+  
+WS 推送消息
+  → MessageRouter.Route → PushHandler(2001) → proto.Unmarshal → EventNewMsg → eventbus.Publish
+  
+上层业务
+  → client.Subscribe(EventNewMsg) → 收到 chan 事件 → 业务处理
+```
 
 ---
 
-### Phase 5: 封装编译（暂缓）
+### Phase 5: 封装编译（暂缓）⏳
 
 > 等 Phase 1-4 全部完成且测试充分后再动手。
 
@@ -462,15 +633,13 @@ type ConvMgr interface {
 | iOS | — | .framework | `gomobile bind -target=ios ./pkg/client` |
 | Android | — | .aar | `gomobile bind -target=android -o goim-sdk.aar ./pkg/client` |
 | Windows | — | .dll | CGO 编译 + 导出 C 函数 |
-| macOS | — | .dylib | 同上 |
-| Linux | — | .so | 同上 |
 | Web | `wasm/cmd/main.go` | .wasm | `GOOS=js GOARCH=wasm go build -o goim.wasm ./wasm/cmd` |
 
 ---
 
 ## 6. SDKError 错误模型
 
-遵循你的偏好：**剥离 rpc/grpc 前缀，直接返回原始业务错误**。
+遵循用户偏好：**剥离 rpc/grpc 前缀，直接返回原始业务错误**。
 
 ```go
 type SDKError struct {
@@ -479,13 +648,7 @@ type SDKError struct {
     OperationID string  // 请求追踪 ID
 }
 
-func (e *SDKError) Error() string {
-    // 直接返回 Msg，不添加 "rpc error: ..." 前缀
-    return e.Msg
-}
-
-// Unwrap 支持 errors.Is / errors.As
-func (e *SDKError) Unwrap() error { return nil }
+func (e *SDKError) Error() string { return e.Msg }
 ```
 
 **错误码常量**（文档 5.2 节全部覆盖）：
@@ -508,96 +671,85 @@ func (e *SDKError) Unwrap() error { return nil }
 ## 7. 通用枚举常量
 
 ```go
-// SessionType
 const (
-    SessionTypeC2C  = 1  // 单聊
+    SessionTypeC2C   = 1  // 单聊
     SessionTypeGroup = 2  // 群聊
-)
 
-// MsgFrom
-const (
     MsgFromUser   = 100  // 用户消息
     MsgFromSystem = 200  // 系统通知
-)
 
-// RecvMsgOpt / GlobalRecvMsgOpt
-const (
-    RecvMsg           = 0  // 接收
-    NotRecvMsg        = 1  // 不接收
-    RecvMsgNotNotify  = 2  // 接收不推送
-)
+    RecvMsg          = 0  // 接收
+    NotRecvMsg       = 1  // 不接收
+    RecvMsgNotNotify = 2  // 接收不推送
 
-// RoleLevel (群成员角色)
-const (
-    RoleMember      = 10
-    RoleAdmin       = 20
-    RoleOwner       = 50
-)
+    RoleMember = 10  // 群成员
+    RoleAdmin  = 20  // 管理员
+    RoleOwner  = 50  // 群主
 
-// PullOrder
-const (
     PullOrderAsc  = 0  // 升序
     PullOrderDesc = 1  // 降序
-)
 
-// TokenStatus
-const (
-    NormalToken    = 0
-    InValidToken   = 1
-    KickedToken    = 2
-    ExpiredToken   = 3
+    NormalToken  = 0
+    InValidToken = 1
+    KickedToken  = 2
+    ExpiredToken = 3
 )
 ```
 
 ---
 
-## 8. EventType 枚举（WS 推送）
+## 8. WebSocket 协议常量（transport/protocol.go）
 
-完整覆盖文档 10.2 节的 24 种事件：
-
-| EventType | Proto 消息 | 触发时机 |
-|---|---|---|
-| `NewMsg` | MsgData | 收到新消息 |
-| `RevokeMsg` | RevokeMsgTips | 消息被撤回 |
-| `DeleteMsgs` | DeleteMsgsTips | 消息被删除 |
-| `MarkAsRead` | MarkAsReadTips | 对端标记已读 |
-| `ConversationUpdate` | ConversationUpdateTips | 会话属性变更 |
-| `ConversationDelete` | ConversationDeleteTips | 会话被删除 |
-| `FriendApplication` | FriendApplicationTips | 好友申请 |
-| `FriendAdded` | FriendAddedTips | 好友关系建立 |
-| `FriendDeleted` | FriendDeletedTips | 好友关系解除 |
-| `FriendInfoChanged` | FriendInfoChangedTips | 好友备注/置顶变更 |
-| `BlackAdded` | BlackAddedTips | 被加入黑名单 |
-| `BlackDeleted` | BlackDeletedTips | 被移出黑名单 |
-| `GroupCreated` | GroupCreatedTips | 群组创建 |
-| `GroupInfoSet` | GroupInfoSetTips | 群名称/公告变更 |
-| `JoinGroupApplication` | JoinGroupApplicationTips | 入群申请 |
-| `GroupApplicationAccepted` | — | 入群申请通过 |
-| `GroupApplicationRejected` | — | 入群申请拒绝 |
-| `MemberEnter` | MemberEnterTips | 成员主动加入 |
-| `MemberInvited` | MemberInvitedTips | 被邀请入群 |
-| `MemberQuit` | MemberQuitTips | 成员主动退出 |
-| `MemberKicked` | MemberKickedTips | 成员被踢出 |
-| `GroupOwnerTransferred` | GroupOwnerTransferredTips | 群主转让 |
-| `GroupDismissed` | GroupDismissedTips | 群组解散 |
-| `GroupMemberMuted` | GroupMemberMutedTips | 成员禁言 |
-| `GroupMemberCancelMuted` | GroupMemberCancelMutedTips | 成员解禁 |
-| `GroupMuted` | GroupMutedTips | 全员禁言 |
-| `GroupCancelMuted` | GroupCancelMutedTips | 取消全员禁言 |
-| `UserInfoUpdated` | UserInfoUpdatedTips | 用户资料变更 |
-| `UserStatusChange` | UserStatusChangeTips | 订阅用户上下线 |
-| `ForceLogout` | — | Token 被踢下线（code=1506） |
+```go
+const (
+    WSGetNewestSeq     = 1001  // 获取最新序列号
+    WSPullMsgBySeqList = 1002  // 按序列号拉消息
+    WSSendMsg          = 1003  // 发送消息
+    WSSendSignalMsg    = 1004  // 发送信号消息
+    WSPullMsg          = 1005  // 拉取消息
+    WSGetConvMaxReadSeq = 1006 // 会话已读 seq
+    WsPullConvLastMessage = 1007 // 会话最后一条消息
+    WSPushMsg          = 2001  // 推送消息（服务端主动）
+    WSKickOnlineMsg    = 2002  // 踢下线
+    WSLogoutMsg        = 2003  // 登出
+    WSSetBackgroundStatus = 2004
+    WSSubUserOnlineStatus = 2005
+    WSDataError        = 3001
+)
+```
 
 ---
 
-## 9. 本地存储设计（storage 包）
+## 9. EventType 枚举（events/event.go）
 
-### 为什么需要本地存储
+覆盖文档 10.2 节全部推送事件，与 transport 解耦（transport 只负责路由到 PushHandler，EventType 判定由 handler 内 proto.Unmarshal 完成）。
 
-Seq 同步引擎和增量/全量同步需要本地持久化：
-- 本地已知的最大 seq → 决定从哪里开始拉
-- 本地 version / versionID → 决定增量同步起点
-- 本地 idHash → 决定是否触发全量同步
+---
+
+## 10. ConnectParams（transport/transport.go）
+
+WS / TCP 等所有连接类型共用的认证参数（服务端统一定义）：
+
+```go
+type ConnectParams struct {
+    UserID       string
+    Token        string
+    PlatformID   int
+    DeviceID     string
+    OperationID  string  // 空值自动 uuid
+    SDKType      string  // 空默认 "go"
+    SDKVersion   string
+    Compression  string  // 空默认 "none"
+    SendResponse bool
+    IsBackground bool
+}
+```
+
+WS 场景拼到 URL query（encodeQuery），TCP 场景放在握手包中。
+
+---
+
+## 11. 本地存储设计（Phase 4）
 
 ### Storage 接口
 
@@ -606,24 +758,14 @@ type Storage interface {
     // Seq 相关
     SaveLocalMaxSeq(conversationID string, seq int64) error
     GetLocalMaxSeq(conversationID string) (int64, error)
-    GetAllLocalMaxSeqs() (map[string]int64, error)
 
     // 版本相关
     SaveVersion(storageKey, versionID string, version uint64) error
     GetVersion(storageKey string) (versionID string, version uint64, err error)
 
-    // ID Hash 相关
+    // ID Hash
     SaveIDHash(storageKey string, idHash uint64) error
     GetIDHash(storageKey string) (uint64, error)
-
-    // 全量消息缓存（可选，用于消息去重）
-    SaveMsg(conversationID string, msg *model.MsgData) error
-    GetMsg(conversationID, clientMsgID string) (*model.MsgData, error)
-    HasMsg(clientMsgID string) (bool, error)
-
-    // 会话/好友/群的本地缓存（可选）
-    SaveConversation(conv *model.Conversation) error
-    GetConversation(conversationID string) (*model.Conversation, error)
 
     // 生命周期
     Close() error
@@ -631,87 +773,57 @@ type Storage interface {
 }
 ```
 
-### 存储实现选择
+---
 
-| 平台 | 实现 | 理由 |
+## 12. 测试策略
+
+| 测试类型 | 工具 | 状态 |
 |---|---|---|
-| iOS/Android/桌面 | `gorm` + `glebarez/sqlite` | ORM 省代码，底层 pure-Go sqlite，gomobile 直接可用 |
-| Web/wasm | IndexedDB | wasm 下 SQLite 不可用，IndexedDB 是浏览器原生 |
-| 单元测试 | 内存实现 | 零依赖、快速 |
+| 单元测试 | `testing` | ✅ transport 33 用例通过 |
+| 接口测试 | httptest / websocket upgarde | ✅ WS 端到端（真服务端 echo） |
+| 竞态交错 | 3000 次迭代 stress | ✅ TokenStore 过期删除竞态已修复 |
+| 集成测试 | mock 服务 | ⏳ Phase 4 目标 |
+| 平台编译 | gomobile + wasm | ⏳ Phase 5 目标 |
+
+### 已覆盖的测试点
+
+| 文件 | 覆盖 |
+|------|------|
+| router_test.go | Push 注册/注销/路由、pending 命中/一次性交付/failAllPending、nil 防护、并发 Route+Register |
+| transport_test.go | ConnectParams 默认值、TransportStatus String、baseTransport actor 退出联动、stopActors 生命周期、断连唤醒 pending |
+| auth_test.go | Token 存取/过期清理/多用户隔离/删除/Refresh 注入、**并发竞态（3000 次交错）** |
+| http_test.go | POST/GET 成功解析、业务错误→SDKError、token header 注入、ctx 超时取消、token 过期重试一次 |
+| ws_test.go | 端到端：认证 query 校验、请求-响应 echo、服务端 push 路由、未连接/断开后发送报错、**自动重连**、断开唤醒 SendRequestAndWait |
 
 ---
 
-## 10. 测试策略
-
-| 测试类型 | 工具 | 覆盖目标 |
-|---|---|---|
-| 单元测试 | `testing` + `testify/mock` | model 序列化、transport 中间件、dispatcher、seq 引擎 |
-| 接口测试 | httptest / net/http/httptest | HTTPClient 的 mock 服务测试 |
-| 集成测试 | 本地 mock 服务 | Client 完整生命周期：Init → Login → WS → SeqSync → SendMsg → Logout |
-| 平台编译 | gomobile build + wasm build | Phase 5 阶段验证编译通过 |
-
-### Mock 策略
-
-```go
-// HTTPClient mock
-type MockHTTPClient struct { ... }
-func (m *MockHTTPClient) Post(ctx context.Context, path string, body, resp interface{}) error {
-    // 根据 path 返回预定义的响应或错误
-}
-
-// WSClient mock
-type MockWSClient struct { ... }
-func (m *MockWSClient) Connect(ctx context.Context, url string, headers map[string]string) error {
-    // 连接成功后，从预设队列推送事件到 dispatcher
-}
-
-// Storage mock (内存实现)
-type MemoryStorage struct { ... }
-```
-
----
-
-## 11. Makefile 目标
-
-```makefile
-.PHONY: build test lint vet clean
-
-build:      # go build ./...
-test:       # go test ./pkg/... -v -race
-lint:       # staticcheck ./...
-vet:        # go vet ./...
-clean:      # rm -f *.wasm *.a *.so *.dylib *.dll
-
-# Phase 5 目标（后续启用）
-gomobile-ios:       # gomobile bind -target=ios ./pkg/client
-gomobile-android:    # gomobile bind -target=android ./pkg/client
-wasm:                # GOOS=js GOARCH=wasm go build -o goim.wasm ./wasm/cmd
-```
-
----
-
-## 12. 依赖清单
+## 13. 依赖清单
 
 ```
-github.com/google/uuid           # clientMsgID / operationID 生成
-github.com/gorilla/websocket     # WebSocket
-gorm.io/gorm                     # ORM
-github.com/glebarez/sqlite       # pure-Go SQLite 驱动（gomobile/wasm 均可用）
-go.uber.org/zap                  # 日志（高性能结构化）
+github.com/gorilla/websocket         # WebSocket
+github.com/google/uuid               # 通过 uuidx 封装间接依赖
+go.uber.org/zap                      # 日志（通过 logger 接口间接依赖）
+gorm.io/gorm                         # ORM (Phase 4)
+github.com/glebarez/sqlite           # pure-Go SQLite 驱动 (Phase 4)
 github.com/PaperMan11/goim/pkg/protocol  # proto 定义（镜像）
-github.com/stretchr/testify      # 测试 mock + assert（仅 test 依赖）
+golang.org/x/crypto                  # utils/bcrypt 依赖
+github.com/pkg/errors                # utils/hash 依赖
+github.com/golang-jwt/jwt/v4         # utils/jwtx 依赖
+github.com/PaperMan11/goim/pkg/utils/convert  # utils/convert 依赖
+github.com/PaperMan11/goim/pkg/utils/timex     # utils/timex 依赖
 ```
 
 ---
 
-## 13. 开发顺序总览
+## 14. 开发进度总览
 
 ```
-Phase 1  model → events → transport     (基础层，零 Manager 代码)
-Phase 2  六个 Manager interface 骨架     (接口先行，锁定边界)
-Phase 3  逐个实现 Manager               (Auth→User→Msg→Relation→Group→Conv)
-Phase 4  Storage → Client Facade → Events 桥接   (打通全链路)
-Phase 5  gomobile / cgo / wasm 编译输出  (暂缓)
+✅ Phase 1  model → events → logger → transport (33 单元测试)
+✅ Phase 2  六个 Manager interface 骨架
+⏳ Phase 2.5 Client interface 骨架 + 统一事件总线架构       ← 下一步
+⏳ Phase 3  逐个实现 Manager（操作结果派发 event）
+⏳ Phase 4  Storage → DefaultClient 完整实现 → Events 桥接
+⏳ Phase 5  gomobile / cgo / wasm 编译输出（暂缓）
 ```
 
 **每个 Phase 的完成判定**：编译通过 + 对应单元测试覆盖核心路径 + `go vet` 无告警。

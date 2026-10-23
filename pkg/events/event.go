@@ -1,9 +1,15 @@
 package events
 
-// EventType WS 推送事件类型
+// EventType 事件类型
+//
+// 三类事件共用这个枚举：
+//  1. WS 推送（30 个，由 MessageRouter.PushHandler → Publish）
+//  2. 传输层生命周期（EventConnect / EventDisconnect / EventReconnect）
+//  3. Manager 操作结果（EventLoginSuccess / EventMsgSent / EventGroupCreated ...）
 type EventType int32
 
 const (
+	// —— WS 推送 ——
 	EventNewMsg                   EventType = iota + 1 // 新消息
 	EventRevokeMsg                                     // 消息撤回
 	EventDeleteMsgs                                    // 消息删除
@@ -34,15 +40,37 @@ const (
 	EventUserInfoUpdated                               // 用户信息更新
 	EventUserStatusChange                              // 在线状态变更
 	EventForceLogout                                   // Token 被踢下线
+	EventBackgroundStatusChanged                       // 前后台状态变更
+
+	// —— 传输层生命周期 ——
+	EventConnect    // WS 连接成功
+	EventDisconnect // WS 连接断开（被动，含重连前）
+	EventReconnect  // 自动重连成功
+
+	// —— 认证 ——
+	EventLoginSuccess   // 登录成功（Token 获取 + WS 连接）
+	EventLoginFailed    // 登录失败
+	EventTokenRefreshed // Token 刷新成功
+
+	// —— 同步引擎 ——
+	EventSeqSynced // 全量同步完成
+
+	// —— Manager 操作结果 ——
+	EventMsgSent             // 消息发送成功
+	EventMsgRevoked          // 撤回操作成功
+	EventGroupMemberInvited  // 邀请入群成功
+	EventConversationCreated // 会话创建成功
 )
 
 // Event WS 事件通用封装
 //
-// 完整的三层链路：
-//  ProtoResp.Data（proto bytes） → ProtoResolver 判定 EventType → SDK 分发
+// 完整链路：
+//
+//	ProtoResp.Data (proto bytes) → PushHandler 里 Unmarshal → eventbus.Publish(EventType, Event)
+//	Subscribe(EventType) → chan Event → 上层业务处理
 type Event struct {
 	Type       EventType   `json:"type"`
-	Payload    interface{} `json:"-"`       // 可选：已反序列化的 proto.Message（上层注入 resolver 后可自动填）
-	RawPayload []byte      `json:"payload"` // 原始 proto bytes（Response.Data 内容）
+	Payload    interface{} `json:"-"`       // 可选：已反序列化的 proto.Message（PushHandler 里填充）
+	RawPayload []byte      `json:"payload"` // 原始 proto bytes（Response.Data 内容，WS 推送有值）
 	Timestamp  int64       `json:"timestamp"`
 }
