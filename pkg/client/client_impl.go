@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
+	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
@@ -17,6 +19,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/uuidx"
 
+	pbconstant "github.com/PaperMan11/goim/pkg/protocol/constant"
 	pbsdk "github.com/PaperMan11/goim/pkg/protocol/sdkws"
 )
 
@@ -24,12 +27,12 @@ import (
 type DefaultClient struct {
 	cfg *ClientConfig
 
-	http    transport.HTTPClient
-	ws      transport.MessageTransport
-	tokens  transport.TokenStore
-	storage storage.Storage
-	bus     *eventbus.EventBus
-	logger  logger.Logger
+	http      transport.HTTPClient
+	transport transport.MessageTransport
+	tokens    transport.TokenStore
+	storage   storage.Storage
+	bus       *eventbus.EventBus
+	logger    logger.Logger
 
 	params transport.ConnectParams // WS 连接参数（构造时填默认，Login 时覆盖 userID/token）
 
@@ -97,23 +100,29 @@ func NewClient(cfg *ClientConfig) Client {
 	convMgr := manager.NewConvMgr(http, bus, l)
 
 	c := &DefaultClient{
-		cfg:     cfg,
-		http:    http,
-		ws:      ws,
-		tokens:  tokens,
-		storage: stor,
-		bus:     bus,
-		logger:  l,
-		params:  params,
-		auth:    authMgr,
-		user:    userMgr,
-		msg:     msgMgr,
-		group:   groupMgr,
-		rel:     relMgr,
-		conv:    convMgr,
+		cfg:       cfg,
+		http:      http,
+		transport: ws,
+		tokens:    tokens,
+		storage:   stor,
+		bus:       bus,
+		logger:    l,
+		params:    params,
+		auth:      authMgr,
+		user:      userMgr,
+		msg:       msgMgr,
+		group:     groupMgr,
+		rel:       relMgr,
+		conv:      convMgr,
 	}
 
 	// 3. 传输层生命周期钩子（通过 MessageTransport interface setter 注入）
+	ws.SetOnConnecting(func() {
+		bus.Publish(events.EventConnecting, events.Event{
+			Type:      events.EventConnecting,
+			Timestamp: timex.UnixMilli(),
+		})
+	})
 	ws.SetOnReconnected(func(ctx context.Context) {
 		bus.Publish(events.EventReconnect, events.Event{
 			Type:      events.EventReconnect,
@@ -158,7 +167,7 @@ func (c *DefaultClient) Login(ctx context.Context, userID string, platformID int
 	c.params.OperationID = uuidx.New()
 
 	// 同步到 WS transport
-	c.ws.SetConnectParams(c.params)
+	c.transport.SetConnectParams(c.params)
 
 	// 3. WS Connect
 	if err := c.Connect(ctx); err != nil {
@@ -213,11 +222,11 @@ func (c *DefaultClient) Logout() error {
 }
 
 func (c *DefaultClient) Connect(ctx context.Context) error {
-	if c.ws.IsConnected() {
+	if c.transport.IsConnected() {
 		return nil
 	}
 
-	if err := c.ws.Connect(ctx); err != nil {
+	if err := c.transport.Connect(ctx); err != nil {
 		return err
 	}
 
@@ -234,11 +243,11 @@ func (c *DefaultClient) Disconnect() error {
 		c.connectCancel()
 		c.connectCancel = nil
 	}
-	return c.ws.Disconnect()
+	return c.transport.Disconnect()
 }
 
 func (c *DefaultClient) Status() transport.TransportStatus {
-	return c.ws.Status()
+	return c.transport.Status()
 }
 
 // === Manager 聚合 ===
@@ -310,6 +319,9 @@ func (c *DefaultClient) SubscribeAll() (<-chan events.Event, eventbus.Unsubscrib
 func (c *DefaultClient) OnConnect(h func()) {
 	c.onEvent(events.EventConnect, func(events.Event) { h() })
 }
+func (c *DefaultClient) OnConnecting(h func()) {
+	c.onEvent(events.EventConnecting, func(events.Event) { h() })
+}
 func (c *DefaultClient) OnDisconnect(h func(err error)) {
 	c.onEvent(events.EventDisconnect, func(ev events.Event) {
 		if err, _ := ev.Payload.(error); err != nil {
@@ -346,6 +358,31 @@ func (c *DefaultClient) onEvent(et events.EventType, fn func(events.Event)) {
 			fn(ev)
 		}
 	}()
+}
+
+// === 高频业务回调（Subscribe 语法糖，payload 做好类型断言后回调） ===
+
+// OnNewMessage 收到新消息（EventNewMsg payload: *pbsdk.MsgData → *model.MsgData）
+func (c *DefaultClient) OnNewMessage(h func(msg *model.MsgData)) {
+	c.onEvent(events.EventNewMsg, func(ev events.Event) {
+		if pm, ok := ev.Payload.(*pbsdk.MsgData); ok {
+			h(manager.ConvProtoMsgData(pm))
+		}
+	})
+}
+
+// OnConversationChanged 会话变更（会话列表 UI 刷新信号）
+func (c *DefaultClient) OnConversationChanged(h func()) {
+	c.onEvent(events.EventConversationUpdate, func(events.Event) { h() })
+}
+
+// OnMessageRevoked 消息被撤回（EventRevokeMsg payload: *pbsdk.RevokeMsgTips，回调取 ClientMsgID）
+func (c *DefaultClient) OnMessageRevoked(h func(clientMsgID string)) {
+	c.onEvent(events.EventRevokeMsg, func(ev events.Event) {
+		if tip, ok := ev.Payload.(*pbsdk.RevokeMsgTips); ok {
+			h(tip.ClientMsgID)
+		}
+	})
 }
 
 // === WS PushHandler 实现 ===
@@ -392,132 +429,148 @@ func (c *DefaultClient) handleUserStatusChange(resp *transport.Response) {
 
 // handleMessagePush 处理消息类推送（WSPushMsg=2001）
 //
-// WSPushMsg 推的内容不固定，type probe 依次尝试 Unmarshal 到可能的 proto 类型：
+// 协议事实（对齐服务端 pkg/msgdispatcher.SendNotification / im-rpc msg notification.go）：
 //
-//  1. sdkws.MsgData           → EventNewMsg
-//  2. sdkws.RevokeMsgTips     → EventRevokeMsg
-//  3. sdkws.DeleteMsgsTips    → EventDeleteMsgs
-//  4. sdkws.MarkAsReadTips    → EventMarkAsRead
-//  5. sdkws.UserInfoUpdatedTips → EventUserInfoUpdated
-//  6. sdkws.GroupCreatedTips  → EventGroupCreated
-//  7. sdkws.FriendApplicationTips → EventFriendApplication
-//     ... 等等（覆盖所有可能通过 2001 推的 Tips 类型）
+//	2001 推送的唯一形态是 sdkws.MsgData。普通消息与全部系统通知共用这一个信封：
+//	- 普通消息：ContentType ∈ [100, 999]（101 文本 / 102 图片 / 203 自定义通知...）→ EventNewMsg
+//	- 系统通知：ContentType ≥ 1000（NotificationBegin），Tips 本体序列化在
+//	  Content = JSON(NotificationElem{Detail: JSON(tips)})，按 ContentType 分流到对应事件
+//	  （2101 撤回 / 2102 删除 / 2200 已读 / 1201-1210 好友 / 1300-1308 用户会话 / 1501-1520 群组）
 //
-// 未知类型 → 只 Publish 到 SubscribeAll，不丢数据。
+// 不再做 multi-type probe（proto 字段编号互串，RevokeMsgTips 会被误判成 MsgData）。
 func (c *DefaultClient) handleMessagePush(resp *transport.Response) {
 	data := resp.Data
 	timestamp := timex.UnixMilli()
 
-	// 1. 新消息（MsgData）
 	msgData := &pbsdk.MsgData{}
-	if err := proto.Unmarshal(data, msgData); err == nil && msgData.RecvID != "" {
-		c.bus.Publish(events.EventNewMsg, events.Event{
-			Type:       events.EventNewMsg,
-			Payload:    msgData,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
+	if err := proto.Unmarshal(data, msgData); err != nil {
+		c.logger.Warnf("handleMessagePush: unmarshal MsgData failed, reqIdentifier=%d, error=%v",
+			resp.ReqIdentifier, err.Error())
 		return
 	}
 
-	// 2. 撤回消息
-	revokeTip := &pbsdk.RevokeMsgTips{}
-	if err := proto.Unmarshal(data, revokeTip); err == nil {
-		c.bus.Publish(events.EventRevokeMsg, events.Event{
-			Type:       events.EventRevokeMsg,
-			Payload:    revokeTip,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
+	// 系统通知：NotificationElem 两段 JSON 解出 tips，按 ContentType 分流
+	if msgData.ContentType >= pbconstant.NotificationBegin {
+		c.dispatchNotification(msgData, timestamp)
 		return
 	}
 
-	// 3. 删除消息
-	deleteTip := &pbsdk.DeleteMsgsTips{}
-	if err := proto.Unmarshal(data, deleteTip); err == nil {
-		c.bus.Publish(events.EventDeleteMsgs, events.Event{
-			Type:       events.EventDeleteMsgs,
-			Payload:    deleteTip,
+	// 普通消息 → EventNewMsg
+	c.bus.Publish(events.EventNewMsg, events.Event{
+		Type:       events.EventNewMsg,
+		Payload:    msgData,
+		RawPayload: data,
+		Timestamp:  timestamp,
+	})
+}
+
+// dispatchNotification 按 ContentType 分流系统通知
+//
+// tips 解码策略：核心高频通知解码为具体 proto 类型；其余 payload 为 Detail JSON string，
+// RawPayload 始终保留 MsgData 原始 bytes，上层可自行解析。
+func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, timestamp int64) {
+	detail := extractNotificationDetail(msgData.Content)
+	data := convert.ToBytes(msgData.Content)
+
+	publish := func(et events.EventType, payload interface{}) {
+		c.bus.Publish(et, events.Event{
+			Type:       et,
+			Payload:    payload,
 			RawPayload: data,
 			Timestamp:  timestamp,
 		})
-		return
+	}
+	decodeTip := func(et events.EventType, tip proto.Message) {
+		if err := json.Unmarshal([]byte(detail), tip); err != nil {
+			c.logger.Warnf("dispatchNotification: unmarshal tips failed, contentType=%d, error=%v",
+				msgData.ContentType, err.Error())
+		}
+		publish(et, tip)
 	}
 
-	// 4. 已读回执
-	readTip := &pbsdk.MarkAsReadTips{}
-	if err := proto.Unmarshal(data, readTip); err == nil {
-		c.bus.Publish(events.EventMarkAsRead, events.Event{
-			Type:       events.EventMarkAsRead,
-			Payload:    readTip,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
-		return
-	}
+	switch msgData.ContentType {
+	// —— 消息类通知（tips 类型确定）——
+	case pbconstant.MsgRevokeNotification: // 2101
+		decodeTip(events.EventRevokeMsg, &pbsdk.RevokeMsgTips{})
+	case pbconstant.DeleteMsgsNotification: // 2102
+		decodeTip(events.EventDeleteMsgs, &pbsdk.DeleteMsgsTips{})
+	case pbconstant.HasReadReceipt: // 2200
+		decodeTip(events.EventMarkAsRead, &pbsdk.MarkAsReadTips{})
 
-	// 5. 用户信息更新
-	userTip := &pbsdk.UserInfoUpdatedTips{}
-	if err := proto.Unmarshal(data, userTip); err == nil {
-		c.bus.Publish(events.EventUserInfoUpdated, events.Event{
-			Type:       events.EventUserInfoUpdated,
-			Payload:    userTip,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
-		return
-	}
+	// —— 用户 / 状态 ——
+	case pbconstant.UserInfoUpdatedNotification: // 1303
+		decodeTip(events.EventUserInfoUpdated, &pbsdk.UserInfoUpdatedTips{})
+	case pbconstant.UserStatusChangeNotification: // 1304
+		decodeTip(events.EventUserStatusChange, &pbsdk.UserStatusChangeTips{})
 
-	// 6. 在线状态变更
-	statusTip := &pbsdk.UserStatusChangeTips{}
-	if err := proto.Unmarshal(data, statusTip); err == nil {
-		c.bus.Publish(events.EventUserStatusChange, events.Event{
-			Type:       events.EventUserStatusChange,
-			Payload:    statusTip,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
-		return
-	}
+	// —— 好友 ——
+	case pbconstant.FriendApplicationNotification,
+		pbconstant.FriendApplicationApprovedNotification,
+		pbconstant.FriendApplicationRejectedNotification: // 1203 / 1201 / 1202
+		decodeTip(events.EventFriendApplication, &pbsdk.FriendApplicationTips{})
+	case pbconstant.FriendAddedNotification: // 1204
+		publish(events.EventFriendAdded, detail)
+	case pbconstant.FriendDeletedNotification: // 1205
+		publish(events.EventFriendDeleted, detail)
+	case pbconstant.FriendRemarkSetNotification,
+		pbconstant.FriendInfoUpdatedNotification,
+		pbconstant.FriendsInfoUpdateNotification: // 1206 / 1209 / 1210
+		publish(events.EventFriendInfoChanged, detail)
+	case pbconstant.BlackAddedNotification: // 1207
+		publish(events.EventBlackAdded, detail)
+	case pbconstant.BlackDeletedNotification: // 1208
+		publish(events.EventBlackDeleted, detail)
 
-	// 7. 群组创建
-	groupCreated := &pbsdk.GroupCreatedTips{}
-	if err := proto.Unmarshal(data, groupCreated); err == nil {
-		c.bus.Publish(events.EventGroupCreated, events.Event{
-			Type:       events.EventGroupCreated,
-			Payload:    groupCreated,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
-		return
-	}
+	// —— 会话 ——
+	case pbconstant.ConversationChangeNotification: // 1300
+		publish(events.EventConversationUpdate, detail)
 
-	// 8. 群组信息变更
-	groupInfoSet := &pbsdk.GroupInfoSetTips{}
-	if err := proto.Unmarshal(data, groupInfoSet); err == nil {
-		c.bus.Publish(events.EventGroupInfoSet, events.Event{
-			Type:       events.EventGroupInfoSet,
-			Payload:    groupInfoSet,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
-		return
-	}
+	// —— 群组 ——
+	case pbconstant.GroupCreatedNotification: // 1501
+		decodeTip(events.EventGroupCreated, &pbsdk.GroupCreatedTips{})
+	case pbconstant.GroupInfoSetNotification: // 1502
+		decodeTip(events.EventGroupInfoSet, &pbsdk.GroupInfoSetTips{})
+	case pbconstant.JoinGroupApplicationNotification: // 1503
+		publish(events.EventJoinGroupApplication, detail)
+	case pbconstant.GroupApplicationAcceptedNotification: // 1505
+		publish(events.EventGroupApplicationAccepted, detail)
+	case pbconstant.GroupApplicationRejectedNotification: // 1506
+		publish(events.EventGroupApplicationRejected, detail)
+	case pbconstant.GroupOwnerTransferredNotification: // 1507
+		publish(events.EventGroupOwnerTransferred, detail)
+	case pbconstant.MemberKickedNotification: // 1508
+		publish(events.EventMemberKicked, detail)
+	case pbconstant.MemberInvitedNotification: // 1509
+		publish(events.EventMemberInvited, detail)
+	case pbconstant.MemberEnterNotification: // 1510
+		publish(events.EventMemberEnter, detail)
+	case pbconstant.MemberQuitNotification: // 1504
+		publish(events.EventMemberQuit, detail)
+	case pbconstant.GroupDismissedNotification: // 1511
+		publish(events.EventGroupDismissed, detail)
+	case pbconstant.GroupMemberMutedNotification: // 1512
+		publish(events.EventGroupMemberMuted, detail)
+	case pbconstant.GroupMemberCancelMutedNotification: // 1513
+		publish(events.EventGroupMemberCancelMuted, detail)
+	case pbconstant.GroupMutedNotification: // 1514
+		publish(events.EventGroupMuted, detail)
+	case pbconstant.GroupCancelMutedNotification: // 1515
+		publish(events.EventGroupCancelMuted, detail)
 
-	// 9. 好友申请
-	friendApp := &pbsdk.FriendApplicationTips{}
-	if err := proto.Unmarshal(data, friendApp); err == nil {
-		c.bus.Publish(events.EventFriendApplication, events.Event{
-			Type:       events.EventFriendApplication,
-			Payload:    friendApp,
-			RawPayload: data,
-			Timestamp:  timestamp,
-		})
-		return
+	default:
+		c.logger.Warnf("dispatchNotification: unmapped contentType=%d, clientMsgID=%s",
+			msgData.ContentType, msgData.ClientMsgID)
 	}
+}
 
-	// 10. 未知类型 — 兜底：只 publish 原始 payload
-	c.logger.Warnf("unknown WS push type, reqIdentifier=%d, dataLen=%d", resp.ReqIdentifier, len(data))
+// extractNotificationDetail 解出通知 Detail：Content = JSON(NotificationElem{Detail: JSON(tips)})
+func extractNotificationDetail(content string) string {
+	elem := &pbsdk.NotificationElem{}
+	if err := json.Unmarshal([]byte(content), elem); err != nil {
+		// 非 NotificationElem 包装（防御：直接把 Content 当 Detail）
+		return content
+	}
+	return elem.Detail
 }
 
 // === UUID helpers ===

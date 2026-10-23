@@ -456,7 +456,7 @@ type ConvMgr interface {
 
 ---
 
-### Phase 2.5: Client 接口骨架 + 回调监听体系 ⏳ **下一步**
+### Phase 2.5: Client 接口骨架 + 回调监听体系 ✅ **已完成**
 
 > Manager 接口锁定后，先把 Client 层统一入口和事件监听 API 定义出来。
 > 后续 Manager 实现时就知道要派发哪些事件，避免边写边改监听接口。
@@ -493,6 +493,9 @@ type Client interface {
     OnForceLogout(h func())             // WSKickOnlineMsg / WSLogoutMsg 触发
 }
 ```
+
+> ⏳ **Phase 4.0b 扩展**：便捷回调从 6 个扩至 10 个（补 OnNewMessage / OnConversationChanged / OnMessageRevoked / OnConnecting，见 Phase 4.0b）。
+> 原则：On* 只是高频路径语法糖，不扩成全量 42 个；完整能力始终由 Subscribe / SubscribeAll 承担。
 
 **步骤 2.5.2 — 统一事件总线架构**
 
@@ -534,7 +537,7 @@ EventSeqSynced            // 全量同步完成
 
 ---
 
-### Phase 3: Manager 实现（逐个填充）⏳
+### Phase 3: Manager 实现（逐个填充）✅ **已完成**
 
 > 按依赖顺序实现，从底层向上：Auth → User → Msg → Relation → Group → Conversation
 
@@ -581,7 +584,7 @@ EventSeqSynced            // 全量同步完成
 
 ---
 
-### Phase 4: Storage + DefaultClient 完整实现 ⏳
+### Phase 4: Storage + DefaultClient 完整实现 ✅ **已完成**
 
 **步骤 4.1 — pkg/storage（已完成基础，业务数据部分 → Phase 4.5）**
 - ✅ Storage 接口（GetMaxSeqs/SetMaxSeqs、GetVersion/SetVersion、Clear）+ MemoryStorage
@@ -605,6 +608,8 @@ EventSeqSynced            // 全量同步完成
   ```
 - **OnConnect 触发时机**：WS `connect.OnConnected` 回调里 Publish，而非 transport.connect 方法成功返回。
   原因：SendRequestAndWait / PushHandler 注册后才能保证事件链完整。
+- ⚠️ **EventLoginSuccess 发布时机 → Phase 4.5 调整**：当前 Login 在 WS Connect 后立即发布（代码现状）；
+  Phase 4.5 落地同步引擎后，改为 SeqSync + 五类 EntitySync 全部完成后才发布，届时需移除 Login 内的过早发布。
 
 **步骤 4.3 — Events 桥接层（Phase 3 已部分完成）**
 - Manager 实现里操作成功 → eventbus.Publish（Phase 3 已嵌入）
@@ -625,6 +630,47 @@ WS 推送消息
 上层业务
   → client.Subscribe(EventNewMsg) → 收到 chan 事件 → 业务处理
 ```
+
+---
+
+### Phase 4.0b: 高频便捷回调补齐 ✅ **已完成**
+
+> **评估结论**（2026-10）：不扩成全量 42 个 On*（接口爆炸、与 Subscribe 语义重复），只补 IM 客户端 80% 场景必用的 4 个高频回调；
+> 跨语言的"callback 全量契约"放到 Phase 5 的 call 层用单方法 dispatcher 解决（gomobile 不支持 Native 实现 Go 多方法 interface）。
+
+> ⚠️ **实现中发现并修复的设计缺陷**（重要协议事实）：
+> 原 handleMessagePush 用 multi-type probe（依次尝试 Unmarshal 到 10 种 proto 类型）——这是错的：
+> proto 按字段编号解码，RevokeMsgTips 与 MsgData 前两个字段都是 string，Unmarshal 互串（撤回通知被误判成新消息）。
+> 服务端真实协议（对齐 pkg/msgdispatcher / im-rpc msg notification.go）：**2001 推送唯一形态是 sdkws.MsgData**，
+> 普通消息 ContentType ∈ [100,999]；系统通知 ContentType ≥ 1000，Tips 本体在
+> `Content = JSON(NotificationElem{Detail: JSON(tips)})`。
+> 已重写为 MsgData 信封解析 + ContentType 分流（24 种通知映射，对齐 goim pkg/protocol/constant），
+> 高频 tips（撤回/删除/已读/用户状态/群创建/群信息/好友申请/用户信息）解码为具体 proto 类型，
+> 其余 payload = Detail JSON string，RawPayload 保留原始 bytes。
+
+**基建（transport 层 + events 层）**：
+
+| 改动 | 说明 |
+|------|------|
+| events/event.go 加 `EventConnecting` | 连接中间态（connect 进行中 / 重连循环进入 dial 前），UI 可显示"连接中" |
+| MessageTransport 加 `SetOnConnecting(func())` | 与 SetOnDisconnected / SetOnReconnected 同构；baseTransport 在 setState(Connecting) 处触发（锁外回调，避免与 Status() 互锁） |
+| 传输层零 events import 约束不变 | client 层负责把钩子转成 eventbus.Publish |
+
+**Client interface 新增 4 个便捷回调**：
+
+| 方法 | 底层 | 说明 |
+|------|------|------|
+| `OnNewMessage(h func(msg *model.MsgData))` | Subscribe(EventNewMsg) | IM 最高频，manager.ConvProtoMsgData 做类型转换 |
+| `OnConversationChanged(h func())` | Subscribe(EventConversationUpdate) | 会话列表 UI 刷新信号 |
+| `OnMessageRevoked(h func(clientMsgID string))` | Subscribe(EventRevokeMsg) | 2101 通知 tips 解码后取 ClientMsgID |
+| `OnConnecting(h func())` | Subscribe(EventConnecting) | 依赖上面的 EventConnecting 基建 |
+
+**明确不做**：
+- ❌ 全量 42 个 On* 清单 —— Subscribe/SubscribeAll 已是完整能力
+- ❌ 多方法 Callback interface —— Phase 5 无法跨语言，改用单方法 dispatcher（见 Phase 5.3）
+
+**完成判定**：✅ client 包 7 测试 PASS（OnConnecting/OnConnect/OnNewMessage/OnMessageRevoked/NotificationUnmapped 等，
+mock transport 走真实 MessageRouter + 服务端真实推送形态构造）；`go build/vet ./pkg/...` 通过。
 
 ---
 
@@ -897,6 +943,25 @@ type EventPayload struct {
 ```
 
 call 层内部做 `Event → EventPayload → JSON string`，跨语言边界只传 string。
+
+**Native 侧注册形态 —— 单方法 CallBack dispatcher**（gomobile 硬约束：Native 无法实现 Go 多方法 interface，
+所以不给 Native 暴露 42 个 On*，也不暴露多方法 Callback，而是一条注册通道覆盖全部事件）：
+
+```go
+// call/callback.go —— 唯一的跨语言回调契约（gomobile 可绑定：单方法 + 纯 string 参数）
+type CallBack interface {
+    // OnEvent 全部事件经此分发
+    //   eventType: events.EventType 的字符串形式（如 "EventNewMsg"）
+    //   payloadJSON: EventPayload 序列化结果（空串表示无载荷）
+    OnEvent(eventType string, payloadJSON string)
+}
+
+// call 层暴露的注册 API
+func (d *Dispatcher) RegisterCallback(cb CallBack) // 内部 = SubscribeAll → range → JSON → cb.OnEvent
+```
+
+iOS / Android 侧实现 CallBack 代理对象（Java interface / OC protocol）注册一次即可收全量事件；
+按 eventType 字符串自行分发到各 UI 处理器。区分事件的枚举值清单随 SDK 文档生成。
 
 #### 5.4 四平台桥接
 
@@ -1212,8 +1277,9 @@ github.com/PaperMan11/goim/pkg/utils/timex     # utils/timex 依赖
 ✅ Phase 2    六个 Manager interface 骨架
 ✅ Phase 2.5  Client interface 骨架 + EventType 扩展（42 枚举）
 ✅ Phase 3    六个 Manager 实现（WS 链路 + 事件派发）
-✅ Phase 4    Storage 接口 + DefaultClient 完整实现（生命周期钩子入 interface、type probe 推送路由）
+✅ Phase 4    Storage 接口 + DefaultClient 完整实现（生命周期钩子入 interface、推送路由）
 ✅ Phase 4.0a time → timex 全量替换（26 文件）+ 业务转换统一走 utils/convert（7 文件）
+✅ Phase 4.0b 高频便捷回调补齐（10 个 On* + EventConnecting + 推送路由重写为 MsgData 信封 + ContentType 分流）
 ⏳ Phase 4.5  本地存储落地（SQLite 8 表）+ 数据同步引擎（SeqSyncEngine + EntitySyncEngine）  ← 下一步
 ⏳ Phase 5    gomobile / cgo / wasm 编译输出（暂缓）
 ```

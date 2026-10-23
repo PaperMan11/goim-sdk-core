@@ -18,6 +18,7 @@ import (
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
+	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
 )
@@ -53,6 +54,8 @@ type Client interface {
 	// —— 便捷生命周期 Handler ——
 	// OnConnect WS 连接成功（首次 + 重连都会触发）
 	OnConnect(h func())
+	// OnConnecting WS 连接中（首次连接 / 重连循环每次 dial 前，UI 可显示"连接中"）
+	OnConnecting(h func())
 	// OnDisconnect WS 连接断开（被动断开会触发，主动 Disconnect 不触发）
 	OnDisconnect(h func(err error))
 	// OnReconnect 自动重连成功
@@ -63,6 +66,14 @@ type Client interface {
 	OnLoginFailed(h func(err error))
 	// OnForceLogout 被踢下线（WSKickOnlineMsg / WSLogoutMsg 推送触发）
 	OnForceLogout(h func())
+
+	// —— 高频业务回调 ——
+	// OnNewMessage 收到新消息（WSPushMsg 2001 推送，payload 已转为 model.MsgData）
+	OnNewMessage(h func(msg *model.MsgData))
+	// OnConversationChanged 会话变更（会话列表 UI 刷新信号）
+	OnConversationChanged(h func())
+	// OnMessageRevoked 消息被撤回（回调参数为被撤回消息的 ClientMsgID）
+	OnMessageRevoked(h func(clientMsgID string))
 }
 
 // ClientConfig Client 构造配置

@@ -44,6 +44,7 @@ const (
 
 	// —— 传输层生命周期 ——
 	EventConnect    // WS 连接成功
+	EventConnecting // WS 连接中（首次连接 / 重连循环 dial 前）
 	EventDisconnect // WS 连接断开（被动，含重连前）
 	EventReconnect  // 自动重连成功
 

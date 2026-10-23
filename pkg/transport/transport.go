@@ -81,6 +81,8 @@ type MessageTransport interface {
 
 	// SetConnectParams 更新连接参数（Login 时覆盖 userID/token 后同步；建议在 Connect 之前调用）
 	SetConnectParams(p ConnectParams)
+	// SetOnConnecting 注册连接中回调（首次 Connect 进行中 / 重连循环每次 dial 前触发）
+	SetOnConnecting(func())
 	// SetOnReconnected 注册重连成功回调（被动断开后自动重连成功时触发）
 	SetOnReconnected(func(ctx context.Context))
 	// SetOnDisconnected 注册被动断开回调（非主动 Disconnect，如网络波动 / 对端关闭；在重连循环启动前触发一次）
@@ -124,6 +126,9 @@ type baseTransport struct {
 	// 重连成功回调（上层注入，如触发 SeqSync）
 	OnReconnected func(ctx context.Context)
 
+	// OnConnecting 连接中回调（首次 Connect / 重连循环每次 dial 前触发）
+	OnConnecting func()
+
 	// OnDisconnected 被动断开回调（非主动 Disconnect，如网络波动 / 对端关闭）
 	// 在 actorsExited 里、runReconnectLoop 之前触发一次
 	OnDisconnected func()
@@ -152,6 +157,11 @@ func (b *baseTransport) IsConnected() bool {
 	return b.Status() == TransportStatusConnected
 }
 
+// SetOnConnecting 实现 MessageTransport 接口
+func (b *baseTransport) SetOnConnecting(fn func()) {
+	b.OnConnecting = fn
+}
+
 // SetOnReconnected 实现 MessageTransport 接口
 func (b *baseTransport) SetOnReconnected(fn func(ctx context.Context)) {
 	b.OnReconnected = fn
@@ -164,8 +174,14 @@ func (b *baseTransport) SetOnDisconnected(fn func()) {
 
 func (b *baseTransport) setState(s TransportStatus) {
 	b.mu.Lock()
+	prev := b.status
 	b.status = s
 	b.mu.Unlock()
+
+	// 锁外回调，避免回调里调 Status() 等接口造成 RLock 死锁
+	if s == TransportStatusConnecting && prev != TransportStatusConnecting && b.OnConnecting != nil {
+		b.OnConnecting()
+	}
 }
 
 // startActors 启动并发 actor（WS 场景为读循环 + 写循环，TCP 场景可只传一个）

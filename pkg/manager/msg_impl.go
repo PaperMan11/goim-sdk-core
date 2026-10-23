@@ -377,3 +377,8 @@ func fromProtoMsgList(pbMsgs []*pbsdk.MsgData) []*model.MsgData {
 	}
 	return msgs
 }
+
+// ConvProtoMsgData 供 client 层便捷回调使用（EventNewMsg payload → model.MsgData）
+func ConvProtoMsgData(pm *pbsdk.MsgData) *model.MsgData {
+	return fromProtoMsgData(pm)
+}
