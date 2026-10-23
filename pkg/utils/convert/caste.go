@@ -8,55 +8,56 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 var errNegativeNotAllowed = errors.New("unable to cast negative value")
 
 // ToTimeE casts an interface to a time.Time type.
-func ToTimeE(i interface{}) (tim time.Time, err error) {
+func ToTimeE(i interface{}) (tim timex.Time, err error) {
 	i = indirect(i)
 
 	switch v := i.(type) {
-	case time.Time:
+	case timex.Time:
 		return v, nil
 	case string:
 		return StringToDate(v)
 	case int:
-		return time.Unix(int64(v), 0), nil
+		return timex.ParseUnix(int64(v)), nil
 	case int64:
-		return time.Unix(v, 0), nil
+		return timex.ParseUnix(v), nil
 	case int32:
-		return time.Unix(int64(v), 0), nil
+		return timex.ParseUnix(int64(v)), nil
 	case uint:
-		return time.Unix(int64(v), 0), nil
+		return timex.ParseUnix(int64(v)), nil
 	case uint64:
-		return time.Unix(int64(v), 0), nil
+		return timex.ParseUnix(int64(v)), nil
 	case uint32:
-		return time.Unix(int64(v), 0), nil
+		return timex.ParseUnix(int64(v)), nil
 	default:
-		return time.Time{}, fmt.Errorf("unable to cast %#v of type %T to Time", i, i)
+		return timex.Time{}, fmt.Errorf("unable to cast %#v of type %T to Time", i, i)
 	}
 }
 
 // ToDurationE casts an interface to a time.Duration type.
-func ToDurationE(i interface{}) (d time.Duration, err error) {
+func ToDurationE(i interface{}) (d timex.Duration, err error) {
 	i = indirect(i)
 
 	switch s := i.(type) {
-	case time.Duration:
+	case timex.Duration:
 		return s, nil
 	case int, int64, int32, int16, int8, uint, uint64, uint32, uint16, uint8:
-		d = time.Duration(ToInt64(s))
+		d = timex.Duration(ToInt64(s))
 		return
 	case float32, float64:
-		d = time.Duration(ToFloat64(s))
+		d = timex.Duration(ToFloat64(s))
 		return
 	case string:
 		if strings.ContainsAny(s, "nsuµmh") {
-			d, err = time.ParseDuration(s)
+			d, err = timex.ParseDuration(s)
 		} else {
-			d, err = time.ParseDuration(s + "ns")
+			d, err = timex.ParseDuration(s + "ns")
 		}
 		return
 	default:
@@ -204,6 +205,8 @@ func ToInt64E(i interface{}) (int64, error) {
 	case float64:
 		return int64(s), nil
 	case float32:
+		return int64(s), nil
+	case timex.Duration:
 		return int64(s), nil
 	case string:
 		v, err := strconv.ParseInt(s, 0, 0)
@@ -1167,13 +1170,13 @@ func ToIntSliceE(i interface{}) ([]int, error) {
 }
 
 // ToDurationSliceE casts an interface to a []time.Duration type.
-func ToDurationSliceE(i interface{}) ([]time.Duration, error) {
+func ToDurationSliceE(i interface{}) ([]timex.Duration, error) {
 	if i == nil {
-		return []time.Duration{}, fmt.Errorf("unable to cast %#v of type %T to []time.Duration", i, i)
+		return []timex.Duration{}, fmt.Errorf("unable to cast %#v of type %T to []time.Duration", i, i)
 	}
 
 	switch v := i.(type) {
-	case []time.Duration:
+	case []timex.Duration:
 		return v, nil
 	}
 
@@ -1181,35 +1184,35 @@ func ToDurationSliceE(i interface{}) ([]time.Duration, error) {
 	switch kind {
 	case reflect.Slice, reflect.Array:
 		s := reflect.ValueOf(i)
-		a := make([]time.Duration, s.Len())
+		a := make([]timex.Duration, s.Len())
 		for j := 0; j < s.Len(); j++ {
 			val, err := ToDurationE(s.Index(j).Interface())
 			if err != nil {
-				return []time.Duration{}, fmt.Errorf("unable to cast %#v of type %T to []time.Duration", i, i)
+				return []timex.Duration{}, fmt.Errorf("unable to cast %#v of type %T to []time.Duration", i, i)
 			}
 			a[j] = val
 		}
 		return a, nil
 	default:
-		return []time.Duration{}, fmt.Errorf("unable to cast %#v of type %T to []time.Duration", i, i)
+		return []timex.Duration{}, fmt.Errorf("unable to cast %#v of type %T to []time.Duration", i, i)
 	}
 }
 
 // StringToDate attempts to parse a string into a time.Time type using a
 // predefined list of formats.  If no suitable format is found, an error is
 // returned.
-func StringToDate(s string) (time.Time, error) {
+func StringToDate(s string) (timex.Time, error) {
 	return parseDateWith(s, []string{
-		time.RFC3339,
+		timex.RFC3339,
 		"2006-01-02T15:04:05", // iso8601 without timezone
-		time.RFC1123Z,
-		time.RFC1123,
-		time.RFC822Z,
-		time.RFC822,
-		time.RFC850,
-		time.ANSIC,
-		time.UnixDate,
-		time.RubyDate,
+		timex.RFC1123Z,
+		timex.RFC1123,
+		timex.RFC822Z,
+		timex.RFC822,
+		timex.RFC850,
+		timex.ANSIC,
+		timex.UnixDate,
+		timex.RubyDate,
 		"2006-01-02 15:04:05.999999999 -0700 MST", // Time.String()
 		"2006-01-02",
 		"02 Jan 2006",
@@ -1219,17 +1222,17 @@ func StringToDate(s string) (time.Time, error) {
 		"2006-01-02 15:04:05Z07:00", // RFC3339 without T
 		"2006-01-02 15:04:05Z0700",  // RFC3339 without T or timezone hh:mm colon
 		"2006-01-02 15:04:05",
-		time.Kitchen,
-		time.Stamp,
-		time.StampMilli,
-		time.StampMicro,
-		time.StampNano,
+		timex.Kitchen,
+		timex.Stamp,
+		timex.StampMilli,
+		timex.StampMicro,
+		timex.StampNano,
 	})
 }
 
-func parseDateWith(s string, dates []string) (d time.Time, e error) {
+func parseDateWith(s string, dates []string) (d timex.Time, e error) {
 	for _, dateType := range dates {
-		if d, e = time.Parse(dateType, s); e == nil {
+		if d, e = timex.Parse(dateType, s); e == nil {
 			return
 		}
 	}
@@ -1241,4 +1244,48 @@ func parseDateWith(s string, dates []string) (d time.Time, e error) {
 func jsonStringToObject(s string, v interface{}) error {
 	data := []byte(s)
 	return json.Unmarshal(data, v)
+}
+
+// ToBytesE casts an interface to a []byte type.
+func ToBytesE(i interface{}) ([]byte, error) {
+	i = indirect(i)
+
+	switch s := i.(type) {
+	case []byte:
+		return s, nil
+	case string:
+		return []byte(s), nil
+	case bool:
+		return []byte(strconv.FormatBool(s)), nil
+	case float64:
+		return []byte(strconv.FormatFloat(s, 'f', -1, 64)), nil
+	case float32:
+		return []byte(strconv.FormatFloat(float64(s), 'f', -1, 32)), nil
+	case int:
+		return []byte(strconv.Itoa(s)), nil
+	case int64:
+		return []byte(strconv.FormatInt(s, 10)), nil
+	case int32:
+		return []byte(strconv.FormatInt(int64(s), 10)), nil
+	case int16:
+		return []byte(strconv.FormatInt(int64(s), 10)), nil
+	case int8:
+		return []byte(strconv.FormatInt(int64(s), 10)), nil
+	case uint:
+		return []byte(strconv.FormatUint(uint64(s), 10)), nil
+	case uint64:
+		return []byte(strconv.FormatUint(s, 10)), nil
+	case uint32:
+		return []byte(strconv.FormatUint(uint64(s), 10)), nil
+	case uint16:
+		return []byte(strconv.FormatUint(uint64(s), 10)), nil
+	case uint8:
+		return []byte(strconv.FormatUint(uint64(s), 10)), nil
+	case timex.Duration:
+		return []byte(s.String()), nil
+	case nil:
+		return []byte{}, nil
+	default:
+		return []byte(""), fmt.Errorf("unable to cast %#v of type %T to []byte", i, i)
+	}
 }

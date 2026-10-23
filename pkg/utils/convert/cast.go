@@ -1,6 +1,8 @@
 package convert
 
-import "time"
+import (
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
+)
 
 // ToBool casts an interface to a bool type.
 func ToBool(i interface{}) bool {
@@ -9,13 +11,13 @@ func ToBool(i interface{}) bool {
 }
 
 // ToTime casts an interface to a time.Time type.
-func ToTime(i interface{}) time.Time {
+func ToTime(i interface{}) timex.Time {
 	v, _ := ToTimeE(i)
 	return v
 }
 
 // ToDuration casts an interface to a time.Duration type.
-func ToDuration(i interface{}) time.Duration {
+func ToDuration(i interface{}) timex.Duration {
 	v, _ := ToDurationE(i)
 	return v
 }
@@ -159,7 +161,13 @@ func ToIntSlice(i interface{}) []int {
 }
 
 // ToDurationSlice casts an interface to a []time.Duration type.
-func ToDurationSlice(i interface{}) []time.Duration {
+func ToDurationSlice(i interface{}) []timex.Duration {
 	v, _ := ToDurationSliceE(i)
+	return v
+}
+
+// ToBytes casts an interface to a []byte type.
+func ToBytes(i interface{}) []byte {
+	v, _ := ToBytesE(i)
 	return v
 }

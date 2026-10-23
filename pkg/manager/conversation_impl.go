@@ -3,13 +3,13 @@ package manager
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // DefaultConvMgr ConvMgr 默认实现（纯 HTTP）
@@ -26,9 +26,9 @@ func NewConvMgr(http transport.HTTPClient, bus *eventbus.EventBus, l logger.Logg
 
 func (m *DefaultConvMgr) GetSortedConversationList(ctx context.Context, userID string, conversationIDs []string, pagination *model.RequestPagination) (*model.SortedConversationList, error) {
 	req := struct {
-		UserID           string                   `json:"userID"`
-		ConversationIDs  []string                 `json:"conversationIDs"`
-		Pagination       *model.RequestPagination `json:"pagination"`
+		UserID          string                   `json:"userID"`
+		ConversationIDs []string                 `json:"conversationIDs"`
+		Pagination      *model.RequestPagination `json:"pagination"`
 	}{UserID: userID, ConversationIDs: conversationIDs, Pagination: pagination}
 	var resp model.SortedConversationList
 	if err := m.http.Post(ctx, "/conversation/get_sorted_conversation_list", req, &resp); err != nil {
@@ -69,8 +69,8 @@ func (m *DefaultConvMgr) GetAllConversations(ctx context.Context) ([]*model.Conv
 
 func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string, conversationReq *model.ConversationReq) error {
 	req := struct {
-		UserIDs         []string                 `json:"userIDs"`
-		ConversationReq *model.ConversationReq   `json:"conversationReq"`
+		UserIDs         []string               `json:"userIDs"`
+		ConversationReq *model.ConversationReq `json:"conversationReq"`
 	}{UserIDs: userIDs, ConversationReq: conversationReq}
 	if err := m.http.Post(ctx, "/conversation/set_conversations", req, nil); err != nil {
 		return fmt.Errorf("set conversations: %w", err)
@@ -78,7 +78,7 @@ func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string,
 	if m.bus != nil {
 		m.bus.Publish(events.EventConversationCreated, events.Event{
 			Type:      events.EventConversationCreated,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 		})
 	}
 	return nil

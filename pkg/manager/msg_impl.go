@@ -3,8 +3,6 @@ package manager
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -12,7 +10,9 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 
 	pbmsg "github.com/PaperMan11/goim/pkg/protocol/msg"
 	pbsdk "github.com/PaperMan11/goim/pkg/protocol/sdkws"
@@ -90,7 +90,7 @@ func (m *DefaultMsgMgr) sendWSMsg(ctx context.Context, msg *model.MsgData, reqID
 	if m.bus != nil {
 		m.bus.Publish(events.EventMsgSent, events.Event{
 			Type:      events.EventMsgSent,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 			Payload:   sendResp,
 		})
 	}
@@ -145,13 +145,13 @@ func (m *DefaultMsgMgr) PullMsgBySeq(ctx context.Context, userID string, seqRang
 
 	pbRanges := make([]*pbsdk.SeqRange, 0, len(seqRanges))
 	for _, r := range seqRanges {
-		begin, _ := strconv.ParseInt(r.Begin, 10, 64)
-		end, _ := strconv.ParseInt(r.End, 10, 64)
+		begin := convert.ToInt64(r.Begin)
+		end := convert.ToInt64(r.End)
 		pbRanges = append(pbRanges, &pbsdk.SeqRange{
 			ConversationID: r.ConversationID,
 			Begin:          begin,
 			End:            end,
-			Num:            int64(r.Num),
+			Num:            convert.ToInt64(r.Num),
 		})
 	}
 
@@ -184,7 +184,7 @@ func (m *DefaultMsgMgr) PullMsgBySeq(ctx context.Context, userID string, seqRang
 		result[convID] = &model.PullMsgsResult{
 			Msgs:   fromProtoMsgList(pbMsgs.Msgs),
 			IsEnd:  pbMsgs.IsEnd,
-			EndSeq: strconv.FormatInt(pbMsgs.EndSeq, 10),
+			EndSeq: convert.ToString(pbMsgs.EndSeq),
 		}
 	}
 	return result, nil
@@ -203,7 +203,7 @@ func (m *DefaultMsgMgr) RevokeMsg(ctx context.Context, conversationID string, se
 	if m.bus != nil {
 		m.bus.Publish(events.EventMsgRevoked, events.Event{
 			Type:      events.EventMsgRevoked,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 		})
 	}
 	return nil
@@ -362,7 +362,7 @@ func fromProtoMsgData(pm *pbsdk.MsgData) *model.MsgData {
 		MsgType:          pm.ContentType, // proto.ContentType → model.MsgType
 		Content:          pm.Content,
 		CreateTime:       pm.SendTime,
-		Seqs:             strconv.FormatInt(pm.Seq, 10),
+		Seqs:             convert.ToString(pm.Seq),
 		Status:           pm.Status,
 		IsRead:           pm.IsRead,
 		AttachedInfo:     pm.AttachedInfo,

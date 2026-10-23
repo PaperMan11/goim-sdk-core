@@ -3,10 +3,10 @@ package transport
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/run"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // ConnectParams 连接认证参数（服务端统一定义，WS / TCP 等所有连接类型共用）
@@ -76,6 +76,15 @@ type MessageTransport interface {
 	SendRequestAndWait(ctx context.Context, req *Request) (*Response, error)
 	// Router 返回消息路由器（按 ReqIdentifier 路由 Response，推送 handler 从这里注册）
 	Router() *MessageRouter
+
+	// === 生命周期钩子（上层注入事件派发等行为） ===
+
+	// SetConnectParams 更新连接参数（Login 时覆盖 userID/token 后同步；建议在 Connect 之前调用）
+	SetConnectParams(p ConnectParams)
+	// SetOnReconnected 注册重连成功回调（被动断开后自动重连成功时触发）
+	SetOnReconnected(func(ctx context.Context))
+	// SetOnDisconnected 注册被动断开回调（非主动 Disconnect，如网络波动 / 对端关闭；在重连循环启动前触发一次）
+	SetOnDisconnected(func())
 }
 
 // baseTransport 通用传输层基类，提供状态机 / 重连 / 消息路由 / actor 并发管理
@@ -114,6 +123,10 @@ type baseTransport struct {
 
 	// 重连成功回调（上层注入，如触发 SeqSync）
 	OnReconnected func(ctx context.Context)
+
+	// OnDisconnected 被动断开回调（非主动 Disconnect，如网络波动 / 对端关闭）
+	// 在 actorsExited 里、runReconnectLoop 之前触发一次
+	OnDisconnected func()
 }
 
 // newBaseTransport 构造基类实例
@@ -137,6 +150,16 @@ func (b *baseTransport) Status() TransportStatus {
 
 func (b *baseTransport) IsConnected() bool {
 	return b.Status() == TransportStatusConnected
+}
+
+// SetOnReconnected 实现 MessageTransport 接口
+func (b *baseTransport) SetOnReconnected(fn func(ctx context.Context)) {
+	b.OnReconnected = fn
+}
+
+// SetOnDisconnected 实现 MessageTransport 接口
+func (b *baseTransport) SetOnDisconnected(fn func()) {
+	b.OnDisconnected = fn
 }
 
 func (b *baseTransport) setState(s TransportStatus) {
@@ -215,6 +238,11 @@ func (b *baseTransport) actorsExited() {
 	if !stillConnected {
 		return
 	}
+
+	// 被动断开：上层需要感知（如派发 EventDisconnect）
+	if b.OnDisconnected != nil {
+		b.OnDisconnected()
+	}
 	go b.runReconnectLoop()
 }
 
@@ -255,7 +283,7 @@ func (b *baseTransport) runReconnectLoop() {
 
 	b.setState(TransportStatusDisconnected)
 
-	backoff := time.Second
+	backoff := timex.Second
 	for {
 		// 主动 Disconnect 会 cancel 该 ctx，立刻结束重连
 		select {
@@ -270,12 +298,12 @@ func (b *baseTransport) runReconnectLoop() {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-timex.After(backoff):
 		}
 
 		b.setState(TransportStatusConnecting)
 
-		dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+		dialCtx, dialCancel := context.WithTimeout(ctx, 10*timex.Second)
 		err := b.reconnectDial(dialCtx)
 		dialCancel()
 		if ctx.Err() != nil {
@@ -298,8 +326,8 @@ func (b *baseTransport) runReconnectLoop() {
 		b.setState(TransportStatusDisconnected)
 
 		backoff *= 2
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
+		if backoff > 30*timex.Second {
+			backoff = 30 * timex.Second
 		}
 	}
 }

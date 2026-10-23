@@ -5,7 +5,8 @@ import (
 	"errors"
 	"os"
 	"testing"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 func TestContextHandler(t *testing.T) {
@@ -20,7 +21,7 @@ func TestContextHandler(t *testing.T) {
 		if want, have := context.Canceled, err; !errors.Is(have, want) {
 			t.Errorf("error: want %v, have %v", want, have)
 		}
-	case <-time.After(time.Second):
+	case <-timex.After(timex.Second):
 		t.Errorf("timeout waiting for error after cancel")
 	}
 }

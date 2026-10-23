@@ -7,10 +7,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 func TestHTTPClient_PostSuccess(t *testing.T) {
@@ -131,14 +131,14 @@ func TestHTTPClient_GetSuccess(t *testing.T) {
 
 func TestHTTPClient_ContextCancel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second) // 慢响应
+		timex.Sleep(2 * timex.Second) // 慢响应
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0})
 	}))
 	defer srv.Close()
 
 	c := NewHTTPClient(srv.URL, nil, &logger.NopLogger{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*timex.Millisecond)
 	defer cancel()
 
 	err := c.Post(ctx, "/slow", nil, nil)

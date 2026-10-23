@@ -3,12 +3,12 @@ package manager
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // DefaultAuthMgr AuthMgr 默认实现（纯 HTTP）
@@ -48,7 +48,7 @@ func (m *DefaultAuthMgr) GetUserToken(ctx context.Context, userID string, platfo
 		if m.bus != nil {
 			m.bus.Publish(events.EventLoginFailed, events.Event{
 				Type:      events.EventLoginFailed,
-				Timestamp: time.Now().UnixMilli(),
+				Timestamp: timex.UnixMilli(),
 			})
 		}
 		return nil, fmt.Errorf("get user token: %w", err)
@@ -63,7 +63,7 @@ func (m *DefaultAuthMgr) GetUserToken(ctx context.Context, userID string, platfo
 	if m.bus != nil {
 		m.bus.Publish(events.EventLoginSuccess, events.Event{
 			Type:      events.EventLoginSuccess,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 			Payload:   &resp,
 		})
 	}

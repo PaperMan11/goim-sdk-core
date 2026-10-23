@@ -3,13 +3,13 @@ package manager
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // DefaultUserMgr UserMgr 默认实现（纯 HTTP）
@@ -41,7 +41,7 @@ func (m *DefaultUserMgr) UpdateUserInfo(ctx context.Context, userInfo *model.Use
 	if m.bus != nil {
 		m.bus.Publish(events.EventUserInfoUpdated, events.Event{
 			Type:      events.EventUserInfoUpdated,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 			Payload:   userInfo,
 		})
 	}

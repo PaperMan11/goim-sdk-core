@@ -2,7 +2,8 @@ package httpclient
 
 import (
 	"sync"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 var (
@@ -29,11 +30,11 @@ type Mock func() (body []byte)
 type Option func(*option)
 
 type option struct {
-	ttl         time.Duration
+	ttl         timex.Duration
 	header      map[string][]string
 	logger      Logger
 	retryTimes  int
-	retryDelay  time.Duration
+	retryDelay  timex.Duration
 	retryVerify RetryVerify
 	mock        Mock
 }
@@ -57,7 +58,7 @@ func releaseOption(opt *option) {
 }
 
 // WithTTL http请求最长执行时间
-func WithTTL(ttl time.Duration) Option {
+func WithTTL(ttl timex.Duration) Option {
 	return func(o *option) {
 		o.ttl = ttl
 	}
@@ -81,7 +82,7 @@ func WithMock(m Mock) Option {
 	}
 }
 
-func WithOnFailedRetry(retryTime int, retryDelay time.Duration, retryVerify RetryVerify) Option {
+func WithOnFailedRetry(retryTime int, retryDelay timex.Duration, retryVerify RetryVerify) Option {
 	return func(o *option) {
 		o.retryTimes = retryTime
 		o.retryDelay = retryDelay

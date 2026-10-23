@@ -4,7 +4,8 @@ import (
 	"errors"
 
 	"testing"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 func TestZero(t *testing.T) {
@@ -17,7 +18,7 @@ func TestZero(t *testing.T) {
 			t.Errorf("%v", err)
 		}
 		t.Log("success")
-	case <-time.After(100 * time.Millisecond):
+	case <-timex.After(100 * timex.Millisecond):
 		t.Error("timeout")
 	}
 }
@@ -33,7 +34,7 @@ func TestOne(t *testing.T) {
 		if want, have := myError, err; want != have {
 			t.Errorf("want %v, have %v", want, have)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-timex.After(100 * timex.Millisecond):
 		t.Error("timeout")
 	}
 }
@@ -51,7 +52,7 @@ func TestMany(t *testing.T) {
 		if want, have := interrupt, err; want != have {
 			t.Errorf("want %v, have %v", want, have)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-timex.After(100 * timex.Millisecond):
 		t.Errorf("timeout")
 	}
 }

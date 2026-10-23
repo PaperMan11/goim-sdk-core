@@ -9,17 +9,18 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/uuidx"
 )
 
 const (
-	defaultHTTPTimeout = 15 * time.Second
+	defaultHTTPTimeout = 15 * timex.Second
 	maxRetry           = 3
-	initialBackoff     = 100 * time.Millisecond
+	initialBackoff     = 100 * timex.Millisecond
 )
 
 // HTTPClient HTTP 客户端接口
@@ -49,7 +50,7 @@ func NewHTTPClient(baseURL string, tokenStore TokenStore, l logger.Logger) *Defa
 }
 
 // NewHTTPClientWithTimeout 允许自定义超时
-func NewHTTPClientWithTimeout(baseURL string, tokenStore TokenStore, l logger.Logger, timeout time.Duration) *DefaultHTTPClient {
+func NewHTTPClientWithTimeout(baseURL string, tokenStore TokenStore, l logger.Logger, timeout timex.Duration) *DefaultHTTPClient {
 	return &DefaultHTTPClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
@@ -129,9 +130,9 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 	var lastErr error
 	for attempt := 0; attempt < maxRetry; attempt++ {
 		if attempt > 0 {
-			backoff := initialBackoff * time.Duration(1<<uint(attempt-1))
+			backoff := initialBackoff * convert.ToDuration(1<<uint(attempt-1))
 			// 加 jitter
-			jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
+			jitter := convert.ToDuration(rand.Int63n(convert.ToInt64(backoff / 2)))
 			wait := backoff + jitter
 			if c.logger != nil {
 				c.logger.Debugf("retrying request, attempt=%d, wait=%v, operationID=%s",
@@ -140,7 +141,7 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(wait):
+			case <-timex.After(wait):
 			}
 		}
 
@@ -234,13 +235,13 @@ func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Va
 	var lastErr error
 	for attempt := 0; attempt < maxRetry; attempt++ {
 		if attempt > 0 {
-			backoff := initialBackoff * time.Duration(1<<uint(attempt-1))
-			jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
+			backoff := initialBackoff * convert.ToDuration(1<<uint(attempt-1))
+			jitter := convert.ToDuration(rand.Int63n(convert.ToInt64(backoff / 2)))
 			wait := backoff + jitter
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(wait):
+			case <-timex.After(wait):
 			}
 		}
 

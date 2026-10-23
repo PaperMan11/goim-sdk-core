@@ -15,9 +15,8 @@ import (
 	"encoding/hex"
 	mrand "math/rand"
 	"sync"
-	"time"
 
-	"github.com/PaperMan11/goim/pkg/utils/timex"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 const (
@@ -208,7 +207,7 @@ func JitterInt(base int, ratioPct int) int {
 //	JitterDuration(5*time.Minute, 10)  // 用于重试退避、定时任务打散。
 //
 // 并发安全。
-func JitterDuration(base time.Duration, ratioPct int) time.Duration {
+func JitterDuration(base timex.Duration, ratioPct int) timex.Duration {
 	if base <= 0 {
 		return 0
 	}
@@ -223,7 +222,7 @@ func JitterDuration(base time.Duration, ratioPct int) time.Duration {
 		delta = 1
 	}
 	jitter := Int63n(2*delta+1) - delta
-	return base + time.Duration(jitter)
+	return base + timex.Duration(jitter)
 }
 
 // String 返回长度为 n 的伪随机字符串，每个字符从 chars 中均匀抽取。
@@ -280,11 +279,11 @@ func Bool() bool {
 
 // Duration 返回 [min, max) 范围内的伪随机 time.Duration。
 // min >= max 时直接返回 min；并发安全。
-func Duration(min, max time.Duration) time.Duration {
+func Duration(min, max timex.Duration) timex.Duration {
 	if min >= max {
 		return min
 	}
-	return min + time.Duration(Int63n(int64(max-min)))
+	return min + timex.Duration(Int63n(int64(max-min)))
 }
 
 // Perm 返回 0..n-1 的伪随机排列（洗牌后的切片）。

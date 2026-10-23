@@ -3,9 +3,10 @@ package transport
 import (
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 func newTestRouter() *MessageRouter {
@@ -20,15 +21,15 @@ func TestRouter_PushHandler(t *testing.T) {
 		got <- resp
 	})
 
-	want := &Response{ReqIdentifier: WSPushMsg, Data: []byte("push-data")}
+	want := &Response{ReqIdentifier: WSPushMsg, Data: convert.ToBytes("push-data")}
 	r.Route(want)
 
 	select {
 	case resp := <-got:
-		if string(resp.Data) != "push-data" {
+		if convert.ToString(resp.Data) != "push-data" {
 			t.Fatalf("unexpected data: %s", resp.Data)
 		}
-	case <-time.After(time.Second):
+	case <-timex.After(timex.Second):
 		t.Fatal("push handler not called")
 	}
 }
@@ -53,15 +54,15 @@ func TestRouter_PendingHit(t *testing.T) {
 	ch := r.waitResponse("op-1")
 	defer r.cancelWait("op-1")
 
-	want := &Response{ReqIdentifier: WSSendMsg, OperationID: "op-1", Data: []byte("ok")}
+	want := &Response{ReqIdentifier: WSSendMsg, OperationID: "op-1", Data: convert.ToBytes("ok")}
 	r.Route(want)
 
 	select {
 	case resp := <-ch:
-		if resp == nil || string(resp.Data) != "ok" {
+		if resp == nil || convert.ToString(resp.Data) != "ok" {
 			t.Fatalf("unexpected resp: %+v", resp)
 		}
-	case <-time.After(time.Second):
+	case <-timex.After(timex.Second):
 		t.Fatal("pending not delivered")
 	}
 }
@@ -89,7 +90,7 @@ func TestRouter_PendingMissFallsToPush(t *testing.T) {
 
 	select {
 	case <-got:
-	case <-time.After(time.Second):
+	case <-timex.After(timex.Second):
 		t.Fatal("should fall through to push handler")
 	}
 }
@@ -108,7 +109,7 @@ func TestRouter_FailAllPending(t *testing.T) {
 			if resp != nil {
 				t.Fatal("failAllPending should deliver nil")
 			}
-		case <-time.After(time.Second):
+		case <-timex.After(timex.Second):
 			t.Fatal("pending not woken up")
 		}
 	}

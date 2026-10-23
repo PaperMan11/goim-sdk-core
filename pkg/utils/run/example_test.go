@@ -6,7 +6,8 @@ import (
 	"net"
 	"net/http"
 	"testing"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 func Test_ExampleGroup_Add_basic(t *testing.T) {
@@ -15,7 +16,7 @@ func Test_ExampleGroup_Add_basic(t *testing.T) {
 		cancel := make(chan struct{})
 		g.Add(func() error {
 			select {
-			case <-time.After(time.Second):
+			case <-timex.After(timex.Second):
 				t.Logf("The first actor had its time elapsed\n")
 				return nil
 			case <-cancel:

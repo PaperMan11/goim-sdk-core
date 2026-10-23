@@ -8,9 +8,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 	"github.com/gorilla/websocket"
 )
 
@@ -110,7 +111,7 @@ func TestWSClient_ConnectAndRequestResponse(t *testing.T) {
 			resp := Response{
 				ReqIdentifier: req.ReqIdentifier,
 				OperationID:   req.OperationID,
-				Data:          []byte(`{"echo":true}`),
+				Data:          convert.ToBytes(`{"echo":true}`),
 			}
 			out, _ := json.Marshal(resp)
 			if err := conn.WriteMessage(websocket.BinaryMessage, out); err != nil {
@@ -125,7 +126,7 @@ func TestWSClient_ConnectAndRequestResponse(t *testing.T) {
 		Token:  "tok-1",
 	}, &logger.NopLogger{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*timex.Second)
 	defer cancel()
 
 	if err := c.Connect(ctx); err != nil {
@@ -139,12 +140,12 @@ func TestWSClient_ConnectAndRequestResponse(t *testing.T) {
 
 	resp, err := c.SendRequestAndWait(ctx, &Request{
 		ReqIdentifier: WSSendMsg,
-		Data:          []byte(`{"hello":"world"}`),
+		Data:          convert.ToBytes(`{"hello":"world"}`),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(resp.Data), "echo") {
+	if !strings.Contains(convert.ToString(resp.Data), "echo") {
 		t.Fatalf("resp.Data = %s", resp.Data)
 	}
 	if resp.OperationID == "" {
@@ -160,7 +161,7 @@ func TestWSClient_PushDispatch(t *testing.T) {
 		// 连接建立后主动推一条 WSPushMsg
 		resp := Response{
 			ReqIdentifier: WSPushMsg,
-			Data:          []byte(`{"msg":"new-message"}`),
+			Data:          convert.ToBytes(`{"msg":"new-message"}`),
 		}
 		out, _ := json.Marshal(resp)
 		_ = conn.WriteMessage(websocket.BinaryMessage, out)
@@ -181,7 +182,7 @@ func TestWSClient_PushDispatch(t *testing.T) {
 		got <- resp
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*timex.Second)
 	defer cancel()
 
 	if err := c.Connect(ctx); err != nil {
@@ -194,10 +195,10 @@ func TestWSClient_PushDispatch(t *testing.T) {
 		if resp.ReqIdentifier != WSPushMsg {
 			t.Fatalf("ReqIdentifier = %d", resp.ReqIdentifier)
 		}
-		if !strings.Contains(string(resp.Data), "new-message") {
+		if !strings.Contains(convert.ToString(resp.Data), "new-message") {
 			t.Fatalf("Data = %s", resp.Data)
 		}
-	case <-time.After(3 * time.Second):
+	case <-timex.After(3 * timex.Second):
 		t.Fatal("push not received")
 	}
 }
@@ -229,7 +230,7 @@ func TestWSClient_DisconnectThenSend(t *testing.T) {
 
 	c := NewWSClient(wsURL, ConnectParams{}, &logger.NopLogger{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*timex.Second)
 	defer cancel()
 
 	if err := c.Connect(ctx); err != nil {
@@ -277,7 +278,7 @@ func TestWSClient_AutoReconnect(t *testing.T) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*timex.Second)
 	defer cancel()
 
 	if err := c.Connect(ctx); err != nil {
@@ -288,7 +289,7 @@ func TestWSClient_AutoReconnect(t *testing.T) {
 	// 等第一次连接被服务端断开 + 重连成功
 	select {
 	case <-reconnected:
-	case <-time.After(5 * time.Second):
+	case <-timex.After(5 * timex.Second):
 		t.Fatal("auto reconnect did not happen")
 	}
 
@@ -312,7 +313,7 @@ func TestWSClient_PendingWokenOnDisconnect(t *testing.T) {
 
 	c := NewWSClient(wsURL, ConnectParams{}, &logger.NopLogger{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*timex.Second)
 	defer cancel()
 
 	if err := c.Connect(ctx); err != nil {
@@ -323,13 +324,13 @@ func TestWSClient_PendingWokenOnDisconnect(t *testing.T) {
 	go func() {
 		_, err := c.SendRequestAndWait(context.Background(), &Request{
 			ReqIdentifier: WSSendMsg,
-			Data:          []byte(`{}`),
+			Data:          convert.ToBytes(`{}`),
 		})
 		errCh <- err
 	}()
 
 	// 等请求确实发出去了再断开
-	time.Sleep(200 * time.Millisecond)
+	timex.Sleep(200 * timex.Millisecond)
 	_ = c.Disconnect()
 
 	select {
@@ -337,7 +338,7 @@ func TestWSClient_PendingWokenOnDisconnect(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "not connected") {
 			t.Fatalf("err = %v, want not connected", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-timex.After(3 * timex.Second):
 		t.Fatal("SendRequestAndWait not woken up by disconnect")
 	}
 }

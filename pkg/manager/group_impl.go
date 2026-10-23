@@ -3,13 +3,13 @@ package manager
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // DefaultGroupMgr GroupMgr 默认实现（纯 HTTP）
@@ -26,11 +26,11 @@ func NewGroupMgr(http transport.HTTPClient, bus *eventbus.EventBus, l logger.Log
 
 func (m *DefaultGroupMgr) CreateGroup(ctx context.Context, groupInfo *model.GroupInfo, memberUserIDs, adminUserIDs []string, ownerUserID string, sendMessage bool) (*model.GroupInfo, error) {
 	req := struct {
-		GroupInfo    *model.GroupInfo `json:"groupInfo"`
-		MemberUserIDs []string        `json:"memberUserIDs"`
-		AdminUserIDs  []string        `json:"adminUserIDs"`
-		OwnerUserID  string           `json:"ownerUserID"`
-		SendMessage  bool             `json:"sendMessage"`
+		GroupInfo     *model.GroupInfo `json:"groupInfo"`
+		MemberUserIDs []string         `json:"memberUserIDs"`
+		AdminUserIDs  []string         `json:"adminUserIDs"`
+		OwnerUserID   string           `json:"ownerUserID"`
+		SendMessage   bool             `json:"sendMessage"`
 	}{GroupInfo: groupInfo, MemberUserIDs: memberUserIDs, AdminUserIDs: adminUserIDs, OwnerUserID: ownerUserID, SendMessage: sendMessage}
 	var resp model.GroupInfo
 	if err := m.http.Post(ctx, "/group/create_group", req, &resp); err != nil {
@@ -39,7 +39,7 @@ func (m *DefaultGroupMgr) CreateGroup(ctx context.Context, groupInfo *model.Grou
 	if m.bus != nil {
 		m.bus.Publish(events.EventGroupCreated, events.Event{
 			Type:      events.EventGroupCreated,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 			Payload:   &resp,
 		})
 	}
@@ -53,7 +53,7 @@ func (m *DefaultGroupMgr) SetGroupInfo(ctx context.Context, groupInfo *model.Gro
 	if m.bus != nil {
 		m.bus.Publish(events.EventGroupInfoSet, events.Event{
 			Type:      events.EventGroupInfoSet,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 			Payload:   groupInfo,
 		})
 	}
@@ -62,8 +62,8 @@ func (m *DefaultGroupMgr) SetGroupInfo(ctx context.Context, groupInfo *model.Gro
 
 func (m *DefaultGroupMgr) SetGroupInfoEx(ctx context.Context, groupID string, groupInfoEx *model.GroupInfoEx) error {
 	req := struct {
-		GroupID      string            `json:"groupID"`
-		GroupInfoEx  *model.GroupInfoEx `json:"groupInfoEx"`
+		GroupID     string             `json:"groupID"`
+		GroupInfoEx *model.GroupInfoEx `json:"groupInfoEx"`
 	}{GroupID: groupID, GroupInfoEx: groupInfoEx}
 	if err := m.http.Post(ctx, "/group/set_group_info_ex", req, nil); err != nil {
 		return fmt.Errorf("set group info ex: %w", err)
@@ -187,7 +187,7 @@ func (m *DefaultGroupMgr) InviteUserToGroup(ctx context.Context, groupID, reason
 	if m.bus != nil {
 		m.bus.Publish(events.EventGroupMemberInvited, events.Event{
 			Type:      events.EventGroupMemberInvited,
-			Timestamp: time.Now().UnixMilli(),
+			Timestamp: timex.UnixMilli(),
 		})
 	}
 	return nil
@@ -198,7 +198,7 @@ func (m *DefaultGroupMgr) GetJoinedGroupList(ctx context.Context, pagination *mo
 		Pagination *model.RequestPagination `json:"pagination"`
 	}{Pagination: pagination}
 	var resp struct {
-		Total  int32             `json:"total"`
+		Total  int32              `json:"total"`
 		Groups []*model.GroupInfo `json:"groups"`
 	}
 	if err := m.http.Post(ctx, "/group/get_joined_group_list", req, &resp); err != nil {

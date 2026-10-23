@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"html/template"
 	"testing"
-	"time"
 
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -1072,13 +1072,13 @@ func TestToStringSliceE(t *testing.T) {
 func TestToDurationSliceE(t *testing.T) {
 	tests := []struct {
 		input  interface{}
-		expect []time.Duration
+		expect []timex.Duration
 		iserr  bool
 	}{
-		{[]string{"1s", "1m"}, []time.Duration{time.Second, time.Minute}, false},
-		{[]int{1, 2}, []time.Duration{1, 2}, false},
-		{[]interface{}{1, 3}, []time.Duration{1, 3}, false},
-		{[]time.Duration{1, 3}, []time.Duration{1, 3}, false},
+		{[]string{"1s", "1m"}, []timex.Duration{timex.Second, timex.Minute}, false},
+		{[]int{1, 2}, []timex.Duration{1, 2}, false},
+		{[]interface{}{1, 3}, []timex.Duration{1, 3}, false},
+		{[]timex.Duration{1, 3}, []timex.Duration{1, 3}, false},
 
 		// errors
 		{nil, nil, true},
@@ -1171,44 +1171,44 @@ func TestIndirectPointers(t *testing.T) {
 func TestToTimeEE(t *testing.T) {
 	tests := []struct {
 		input  interface{}
-		expect time.Time
+		expect timex.Time
 		iserr  bool
 	}{
-		{"2009-11-10 23:00:00 +0000 UTC", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},   // Time.String()
-		{"Tue Nov 10 23:00:00 2009", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},        // ANSIC
-		{"Tue Nov 10 23:00:00 UTC 2009", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},    // UnixDate
-		{"Tue Nov 10 23:00:00 +0000 2009", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},  // RubyDate
-		{"10 Nov 09 23:00 UTC", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},             // RFC822
-		{"10 Nov 09 23:00 +0000", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},           // RFC822Z
-		{"Tuesday, 10-Nov-09 23:00:00 UTC", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false}, // RFC850
-		{"Tue, 10 Nov 2009 23:00:00 UTC", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},   // RFC1123
-		{"Tue, 10 Nov 2009 23:00:00 +0000", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false}, // RFC1123Z
-		{"2009-11-10T23:00:00Z", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},            // RFC3339
-		{"2018-10-21T23:21:29+0200", time.Date(2018, 10, 21, 21, 21, 29, 0, time.UTC), false},      // RFC3339 without timezone hh:mm colon
-		{"2009-11-10T23:00:00Z", time.Date(2009, 11, 10, 23, 0, 0, 0, time.UTC), false},            // RFC3339Nano
-		{"11:00PM", time.Date(0, 1, 1, 23, 0, 0, 0, time.UTC), false},                              // Kitchen
-		{"Nov 10 23:00:00", time.Date(0, 11, 10, 23, 0, 0, 0, time.UTC), false},                    // Stamp
-		{"Nov 10 23:00:00.000", time.Date(0, 11, 10, 23, 0, 0, 0, time.UTC), false},                // StampMilli
-		{"Nov 10 23:00:00.000000", time.Date(0, 11, 10, 23, 0, 0, 0, time.UTC), false},             // StampMicro
-		{"Nov 10 23:00:00.000000000", time.Date(0, 11, 10, 23, 0, 0, 0, time.UTC), false},          // StampNano
-		{"2016-03-06 15:28:01-00:00", time.Date(2016, 3, 6, 15, 28, 1, 0, time.UTC), false},        // RFC3339 without T
-		{"2016-03-06 15:28:01-0000", time.Date(2016, 3, 6, 15, 28, 1, 0, time.UTC), false},         // RFC3339 without T or timezone hh:mm colon
-		{"2016-03-06 15:28:01", time.Date(2016, 3, 6, 15, 28, 1, 0, time.UTC), false},
-		{"2016-03-06 15:28:01 -0000", time.Date(2016, 3, 6, 15, 28, 1, 0, time.UTC), false},
-		{"2016-03-06 15:28:01 -00:00", time.Date(2016, 3, 6, 15, 28, 1, 0, time.UTC), false},
-		{"2006-01-02", time.Date(2006, 1, 2, 0, 0, 0, 0, time.UTC), false},
-		{"02 Jan 2006", time.Date(2006, 1, 2, 0, 0, 0, 0, time.UTC), false},
-		{1472574600, time.Date(2016, 8, 30, 16, 30, 0, 0, time.UTC), false},
-		{int(1482597504), time.Date(2016, 12, 24, 16, 38, 24, 0, time.UTC), false},
-		{int64(1234567890), time.Date(2009, 2, 13, 23, 31, 30, 0, time.UTC), false},
-		{int32(1234567890), time.Date(2009, 2, 13, 23, 31, 30, 0, time.UTC), false},
-		{uint(1482597504), time.Date(2016, 12, 24, 16, 38, 24, 0, time.UTC), false},
-		{uint64(1234567890), time.Date(2009, 2, 13, 23, 31, 30, 0, time.UTC), false},
-		{uint32(1234567890), time.Date(2009, 2, 13, 23, 31, 30, 0, time.UTC), false},
-		{time.Date(2009, 2, 13, 23, 31, 30, 0, time.UTC), time.Date(2009, 2, 13, 23, 31, 30, 0, time.UTC), false},
+		{"2009-11-10 23:00:00 +0000 UTC", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},   // Time.String()
+		{"Tue Nov 10 23:00:00 2009", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},        // ANSIC
+		{"Tue Nov 10 23:00:00 UTC 2009", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},    // UnixDate
+		{"Tue Nov 10 23:00:00 +0000 2009", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},  // RubyDate
+		{"10 Nov 09 23:00 UTC", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},             // RFC822
+		{"10 Nov 09 23:00 +0000", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},           // RFC822Z
+		{"Tuesday, 10-Nov-09 23:00:00 UTC", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false}, // RFC850
+		{"Tue, 10 Nov 2009 23:00:00 UTC", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},   // RFC1123
+		{"Tue, 10 Nov 2009 23:00:00 +0000", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false}, // RFC1123Z
+		{"2009-11-10T23:00:00Z", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},            // RFC3339
+		{"2018-10-21T23:21:29+0200", timex.Date(2018, 10, 21, 21, 21, 29, 0, timex.UTCLoc), false},      // RFC3339 without timezone hh:mm colon
+		{"2009-11-10T23:00:00Z", timex.Date(2009, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},            // RFC3339Nano
+		{"11:00PM", timex.Date(0, 1, 1, 23, 0, 0, 0, timex.UTCLoc), false},                              // Kitchen
+		{"Nov 10 23:00:00", timex.Date(0, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},                    // Stamp
+		{"Nov 10 23:00:00.000", timex.Date(0, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},                // StampMilli
+		{"Nov 10 23:00:00.000000", timex.Date(0, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},             // StampMicro
+		{"Nov 10 23:00:00.000000000", timex.Date(0, 11, 10, 23, 0, 0, 0, timex.UTCLoc), false},          // StampNano
+		{"2016-03-06 15:28:01-00:00", timex.Date(2016, 3, 6, 15, 28, 1, 0, timex.UTCLoc), false},        // RFC3339 without T
+		{"2016-03-06 15:28:01-0000", timex.Date(2016, 3, 6, 15, 28, 1, 0, timex.UTCLoc), false},         // RFC3339 without T or timezone hh:mm colon
+		{"2016-03-06 15:28:01", timex.Date(2016, 3, 6, 15, 28, 1, 0, timex.UTCLoc), false},
+		{"2016-03-06 15:28:01 -0000", timex.Date(2016, 3, 6, 15, 28, 1, 0, timex.UTCLoc), false},
+		{"2016-03-06 15:28:01 -00:00", timex.Date(2016, 3, 6, 15, 28, 1, 0, timex.UTCLoc), false},
+		{"2006-01-02", timex.Date(2006, 1, 2, 0, 0, 0, 0, timex.UTCLoc), false},
+		{"02 Jan 2006", timex.Date(2006, 1, 2, 0, 0, 0, 0, timex.UTCLoc), false},
+		{1472574600, timex.Date(2016, 8, 30, 16, 30, 0, 0, timex.UTCLoc), false},
+		{int(1482597504), timex.Date(2016, 12, 24, 16, 38, 24, 0, timex.UTCLoc), false},
+		{int64(1234567890), timex.Date(2009, 2, 13, 23, 31, 30, 0, timex.UTCLoc), false},
+		{int32(1234567890), timex.Date(2009, 2, 13, 23, 31, 30, 0, timex.UTCLoc), false},
+		{uint(1482597504), timex.Date(2016, 12, 24, 16, 38, 24, 0, timex.UTCLoc), false},
+		{uint64(1234567890), timex.Date(2009, 2, 13, 23, 31, 30, 0, timex.UTCLoc), false},
+		{uint32(1234567890), timex.Date(2009, 2, 13, 23, 31, 30, 0, timex.UTCLoc), false},
+		{timex.Date(2009, 2, 13, 23, 31, 30, 0, timex.UTCLoc), timex.Date(2009, 2, 13, 23, 31, 30, 0, timex.UTCLoc), false},
 		// errors
-		{"2006", time.Time{}, true},
-		{testing.T{}, time.Time{}, true},
+		{"2006", timex.Time{}, true},
+		{testing.T{}, timex.Time{}, true},
 	}
 
 	for i, test := range tests {
@@ -1230,14 +1230,14 @@ func TestToTimeEE(t *testing.T) {
 }
 
 func TestToDurationE(t *testing.T) {
-	var td time.Duration = 5
+	var td timex.Duration = 5
 
 	tests := []struct {
 		input  interface{}
-		expect time.Duration
+		expect timex.Duration
 		iserr  bool
 	}{
-		{time.Duration(5), td, false},
+		{timex.Duration(5), td, false},
 		{int(5), td, false},
 		{int64(5), td, false},
 		{int32(5), td, false},
@@ -1252,12 +1252,12 @@ func TestToDurationE(t *testing.T) {
 		{float32(5), td, false},
 		{string("5"), td, false},
 		{string("5ns"), td, false},
-		{string("5us"), time.Microsecond * td, false},
-		{string("5µs"), time.Microsecond * td, false},
-		{string("5ms"), time.Millisecond * td, false},
-		{string("5s"), time.Second * td, false},
-		{string("5m"), time.Minute * td, false},
-		{string("5h"), time.Hour * td, false},
+		{string("5us"), timex.Microsecond * td, false},
+		{string("5µs"), timex.Microsecond * td, false},
+		{string("5ms"), timex.Millisecond * td, false},
+		{string("5s"), timex.Second * td, false},
+		{string("5m"), timex.Minute * td, false},
+		{string("5h"), timex.Hour * td, false},
 		// errors
 		{"test", 0, true},
 		{testing.T{}, 0, true},

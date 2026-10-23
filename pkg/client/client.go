@@ -8,15 +8,13 @@
 //	系统事件   → Storage / SeqSync 内部 Publish             → Event{Type}
 //
 // 上层业务统一用 Subscribe / OnConnect / OnForceLogout 等 API 监听。
-// gomobile 封装层后续把 channel 桥接成原生回调。
+// gomobile 封装层后续把 channel 桥接成原生回调（见 DEVELOPMENT.md Phase 5）。
 //
-// 本文件仅定义 Client 接口骨架 + ClientConfig 配置骨架，
-// DefaultClient 完整实现放在 Phase 4。
+// 完整实现见 client_impl.go。
 package client
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
@@ -84,53 +82,3 @@ type ClientConfig struct {
 	HTTP transport.HTTPClient
 	WS   transport.MessageTransport
 }
-
-// DefaultClient 默认 Client 实现（骨架，Phase 4 填充）
-//
-// 完整实现需要：
-//  1. 初始化 eventbus + logger + TokenStore + HTTPClient + WSClient
-//  2. 构造六个 Manager（依赖注入）
-//  3. 注册 MessageRouter.PushHandler 映射表（5 个 WS 推送 → EventType）
-//  4. 注入 baseTransport.OnReconnected → eventbus.Publish(EventReconnect)
-type DefaultClient struct{}
-
-// NewClient 构造 DefaultClient（Phase 4 填充完整实现）
-func NewClient(cfg *ClientConfig) Client {
-	return &DefaultClient{}
-}
-
-// —— 骨架占位方法（Phase 4 填充完整实现）——
-
-func (c *DefaultClient) Login(ctx context.Context, userID string, platformID int32) error {
-	return fmt.Errorf("client.Login: not implemented")
-}
-func (c *DefaultClient) Logout() error {
-	return fmt.Errorf("client.Logout: not implemented")
-}
-func (c *DefaultClient) Connect(ctx context.Context) error {
-	return fmt.Errorf("client.Connect: not implemented")
-}
-func (c *DefaultClient) Disconnect() error {
-	return fmt.Errorf("client.Disconnect: not implemented")
-}
-func (c *DefaultClient) Status() transport.TransportStatus {
-	return transport.TransportStatusDisconnected
-}
-func (c *DefaultClient) Auth() manager.AuthMgr   { return nil }
-func (c *DefaultClient) User() manager.UserMgr   { return nil }
-func (c *DefaultClient) Msg() manager.MsgMgr     { return nil }
-func (c *DefaultClient) Group() manager.GroupMgr { return nil }
-func (c *DefaultClient) Rel() manager.RelMgr     { return nil }
-func (c *DefaultClient) Conv() manager.ConvMgr   { return nil }
-func (c *DefaultClient) Subscribe(eventType events.EventType) (<-chan events.Event, eventbus.UnsubscribeFunc) {
-	return nil, func() {}
-}
-func (c *DefaultClient) SubscribeAll() (<-chan events.Event, eventbus.UnsubscribeFunc) {
-	return nil, func() {}
-}
-func (c *DefaultClient) OnConnect(h func())              {}
-func (c *DefaultClient) OnDisconnect(h func(err error))  {}
-func (c *DefaultClient) OnReconnect(h func())            {}
-func (c *DefaultClient) OnLoginSuccess(h func())         {}
-func (c *DefaultClient) OnLoginFailed(h func(err error)) {}
-func (c *DefaultClient) OnForceLogout(h func())          {}

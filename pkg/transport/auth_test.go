@@ -5,7 +5,8 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 func TestTokenStore_SetGet(t *testing.T) {
@@ -158,7 +159,7 @@ func TestTokenStore_GetExpiredNoDeleteFresh_Concurrent(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		// 预置已过期 entry（expireAt 在过去）
 		s.mu.Lock()
-		s.tokens[key("u1", 1)] = tokenEntry{token: "stale", expireAt: time.Now().Unix() - 1}
+		s.tokens[key("u1", 1)] = tokenEntry{token: "stale", expireAt: timex.Unix() - 1}
 		s.mu.Unlock()
 
 		start := make(chan struct{})

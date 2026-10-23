@@ -3,9 +3,9 @@ package transport
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 func TestConnectParams_WithDefaults(t *testing.T) {
@@ -28,7 +28,7 @@ func TestTransportStatus_String(t *testing.T) {
 		TransportStatusDisconnected: "Disconnected",
 		TransportStatusConnecting:   "Connecting",
 		TransportStatusConnected:    "Connected",
-		TransportStatus(99):          "Unknown",
+		TransportStatus(99):         "Unknown",
 	}
 	for s, want := range cases {
 		if got := s.String(); got != want {
@@ -67,7 +67,7 @@ func TestBaseTransport_ActorExitTriggersOthers(t *testing.T) {
 		select {
 		case name := <-exited:
 			got[name] = true
-		case <-time.After(2 * time.Second):
+		case <-timex.After(2 * timex.Second):
 			t.Fatal("actors not all exited")
 		}
 	}
@@ -94,7 +94,7 @@ func TestBaseTransport_StopActors(t *testing.T) {
 
 	select {
 	case <-exited:
-	case <-time.After(2 * time.Second):
+	case <-timex.After(2 * timex.Second):
 		t.Fatal("actor not stopped")
 	}
 }
@@ -110,7 +110,7 @@ func TestBaseTransport_ActorsExited_ReconnectGuard(t *testing.T) {
 
 	// actorsExited 已执行；reconnectDial=nil → runReconnectLoop 直接返回
 	// 等一小段时间确认没有重连发生
-	time.Sleep(50 * time.Millisecond)
+	timex.Sleep(50 * timex.Millisecond)
 	if b.isReconnecting() {
 		t.Fatal("should not be reconnecting without reconnectDial")
 	}
@@ -148,7 +148,7 @@ func TestBaseTransport_ActorsExited_FailsPending(t *testing.T) {
 		if resp != nil {
 			t.Fatal("pending should receive nil on disconnect")
 		}
-	case <-time.After(time.Second):
+	case <-timex.After(timex.Second):
 		t.Fatal("pending not woken up")
 	}
 }

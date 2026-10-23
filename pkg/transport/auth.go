@@ -3,9 +3,10 @@ package transport
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // TokenResult 获取 Token 的返回结构
@@ -60,7 +61,7 @@ func NewTokenStore(refresh RefreshFunc) TokenStore {
 }
 
 func key(userID string, platformID int32) string {
-	return userID + ":" + strconv.Itoa(int(platformID))
+	return userID + ":" + convert.ToString(platformID)
 }
 
 func (s *defaultTokenStore) Set(userID string, platformID int32, token string, expireTimeSeconds int64) error {
@@ -68,7 +69,7 @@ func (s *defaultTokenStore) Set(userID string, platformID int32, token string, e
 	defer s.mu.Unlock()
 	s.tokens[key(userID, platformID)] = tokenEntry{
 		token:    token,
-		expireAt: time.Now().Unix() + expireTimeSeconds,
+		expireAt: timex.Unix() + expireTimeSeconds,
 	}
 	return nil
 }
@@ -81,11 +82,11 @@ func (s *defaultTokenStore) Get(userID string, platformID int32) (string, error)
 	if !ok {
 		return "", nil
 	}
-	if time.Now().Unix() >= entry.expireAt {
+	if timex.Unix() >= entry.expireAt {
 		s.mu.Lock()
 		// 写锁内复查：entry 可能已被其他 goroutine 删除，或被 Refresh 替换为未过期的新 token，
 		// 无条件 delete 会误删新 token
-		if cur, ok := s.tokens[k]; ok && time.Now().Unix() >= cur.expireAt {
+		if cur, ok := s.tokens[k]; ok && timex.Unix() >= cur.expireAt {
 			delete(s.tokens, k)
 		}
 		s.mu.Unlock()

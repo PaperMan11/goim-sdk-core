@@ -3,14 +3,15 @@ package httpclient
 import (
 	"context"
 	"net/http"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 const (
 	// DefaultRetryTimes 重试次数
 	DefaultRetryTimes = 3
 	// DefaultRetryDelay 重试前等待时延
-	DefaultRetryDelay = time.Millisecond * 100
+	DefaultRetryDelay = timex.Millisecond * 100
 )
 
 type RetryVerify func(body []byte) (shouldRetry bool)

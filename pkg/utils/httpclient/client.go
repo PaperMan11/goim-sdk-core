@@ -6,11 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"time"
+
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 const (
-	DefaultTTL = time.Minute
+	DefaultTTL = timex.Minute
 )
 
 func Get(url string, form url.Values, options ...Option) (body []byte, err error) {
@@ -89,7 +90,7 @@ func withoutBody(method, url string, form url.Values, options ...Option) (body [
 	for i := 0; i < retryTimes; i++ {
 		body, httpCode, err = doHTTP(ctx, method, url, nil, opt)
 		if shouldRetry(ctx, httpCode) || (opt.retryVerify != nil && opt.retryVerify(body)) {
-			time.Sleep(retryDelay)
+			timex.Sleep(retryDelay)
 			continue
 		}
 		return
@@ -136,7 +137,7 @@ func withFormBody(method, url string, form url.Values, options ...Option) (body 
 	for i := 0; i < retryTimes; i++ {
 		body, httpCode, err = doHTTP(ctx, method, url, []byte(formValue), opt)
 		if shouldRetry(ctx, httpCode) || (opt.retryVerify != nil && opt.retryVerify(body)) {
-			time.Sleep(retryDelay)
+			timex.Sleep(retryDelay)
 			continue
 		}
 		return
@@ -183,7 +184,7 @@ func withJSONBody(method, url string, raw json.RawMessage, options ...Option) (b
 	for i := 0; i < retryTimes; i++ {
 		body, httpCode, err = doHTTP(ctx, method, url, raw, opt)
 		if shouldRetry(ctx, httpCode) || (opt.retryVerify != nil && opt.retryVerify(body)) {
-			time.Sleep(retryDelay)
+			timex.Sleep(retryDelay)
 			continue
 		}
 		return

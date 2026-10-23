@@ -4,25 +4,25 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"strconv"
 	"sync"
-	"time"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport/compressor"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport/encoder"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/uuidx"
 	"github.com/gorilla/websocket"
 )
 
 const (
-	wsHeartbeatInterval = 30 * time.Second
-	wsPongWait          = 10 * time.Second
-	wsWriteTimeout      = 10 * time.Second
+	wsHeartbeatInterval = 30 * timex.Second
+	wsPongWait          = 10 * timex.Second
+	wsWriteTimeout      = 10 * timex.Second
 	wsSendBufferSize    = 256
-	wsSendTimeout       = 5 * time.Second
-	wsResponseTimeout   = 15 * time.Second
+	wsSendTimeout       = 5 * timex.Second
+	wsResponseTimeout   = 15 * timex.Second
 )
 
 // encodeQuery 把认证参数编码为 URL query（WS 特有，与服务端字段名逐一对齐）
@@ -30,11 +30,11 @@ func encodeQuery(p ConnectParams) url.Values {
 	q := url.Values{}
 	q.Set("userID", p.UserID)
 	q.Set("token", p.Token)
-	q.Set("platformID", strconv.Itoa(p.PlatformID))
+	q.Set("platformID", convert.ToString(p.PlatformID))
 	q.Set("deviceID", p.DeviceID)
 	q.Set("operationID", p.OperationID)
-	q.Set("sendResponse", strconv.FormatBool(p.SendResponse))
-	q.Set("isBackground", strconv.FormatBool(p.IsBackground))
+	q.Set("sendResponse", convert.ToString(p.SendResponse))
+	q.Set("isBackground", convert.ToString(p.IsBackground))
 	q.Set("compression", p.Compression)
 	q.Set("sdkType", p.SDKType)
 	q.Set("sdkVersion", p.SDKVersion)
@@ -85,6 +85,12 @@ func NewWSClient(wsURL string, params ConnectParams, l logger.Logger) *DefaultWS
 	}
 	w.onActorExit = w.closeConn
 	return w
+}
+
+// SetConnectParams 运行时更新 ConnectParams（实现 MessageTransport interface）
+// 建议在 Connect 之前调用；连接过程中调用可能导致认证参数不一致
+func (w *DefaultWSClient) SetConnectParams(p ConnectParams) {
+	w.params = p.withDefaults()
 }
 
 func (w *DefaultWSClient) getEncoder() encoder.Encoder {
@@ -177,7 +183,7 @@ func (w *DefaultWSClient) SendRequestAndWait(ctx context.Context, req *Request) 
 		return resp, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(wsResponseTimeout):
+	case <-timex.After(wsResponseTimeout):
 		return nil, fmt.Errorf("wait response timeout, operationID=%s", req.OperationID)
 	}
 }
@@ -217,7 +223,7 @@ func (w *DefaultWSClient) deliver(ctx context.Context, payload []byte) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(wsSendTimeout):
+	case <-timex.After(wsSendTimeout):
 		w.logger.Errorf("websocket send timeout")
 		return fmt.Errorf("send message timeout")
 	}
@@ -275,16 +281,16 @@ func (w *DefaultWSClient) readLoop(ctx context.Context) {
 
 	// 收到服务端 ping → 回复 pong + 续期读超时
 	conn.SetPingHandler(func(appData string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(wsHeartbeatInterval + wsPongWait))
-		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(wsWriteTimeout))
+		_ = conn.SetReadDeadline(timex.Now().Add(wsHeartbeatInterval + wsPongWait))
+		_ = conn.SetWriteDeadline(timex.Now().Add(wsWriteTimeout))
+		return conn.WriteControl(websocket.PongMessage, convert.ToBytes(appData), timex.Now().Add(wsWriteTimeout))
 	})
 	// 收到服务端 pong（对我们 ping 的回复） → 续期读超时
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(wsHeartbeatInterval + wsPongWait))
+		return conn.SetReadDeadline(timex.Now().Add(wsHeartbeatInterval + wsPongWait))
 	})
 
-	_ = conn.SetReadDeadline(time.Now().Add(wsHeartbeatInterval + wsPongWait))
+	_ = conn.SetReadDeadline(timex.Now().Add(wsHeartbeatInterval + wsPongWait))
 
 	for {
 		select {
@@ -328,7 +334,7 @@ func (w *DefaultWSClient) writeLoop(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(wsHeartbeatInterval)
+	ticker := timex.NewTicker(wsHeartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -342,8 +348,8 @@ func (w *DefaultWSClient) writeLoop(ctx context.Context) {
 		case <-ticker.C:
 			if err := conn.WriteControl(
 				websocket.PingMessage,
-				[]byte("ping"),
-				time.Now().Add(wsWriteTimeout),
+				convert.ToBytes("ping"),
+				timex.Now().Add(wsWriteTimeout),
 			); err != nil {
 				if ctx.Err() == nil {
 					w.logger.Warnf("websocket ping failed, error=%v", err)
@@ -355,7 +361,7 @@ func (w *DefaultWSClient) writeLoop(ctx context.Context) {
 }
 
 func (w *DefaultWSClient) writeMessage(conn *websocket.Conn, payload []byte) error {
-	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+	_ = conn.SetWriteDeadline(timex.Now().Add(wsWriteTimeout))
 	if err := conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
 		w.logger.Warnf("websocket write failed, error=%v", err)
 		return err

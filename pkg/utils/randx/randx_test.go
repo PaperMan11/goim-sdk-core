@@ -4,8 +4,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -220,18 +220,18 @@ func TestJitterInt(t *testing.T) {
 
 func TestJitterDuration(t *testing.T) {
 	t.Run("边界情况", func(t *testing.T) {
-		assert.Equal(t, time.Duration(0), JitterDuration(0, 10))
-		assert.Equal(t, 5*time.Second, JitterDuration(5*time.Second, 0))
-		assert.Equal(t, 5*time.Second, JitterDuration(5*time.Second, -1))
+		assert.Equal(t, timex.Duration(0), JitterDuration(0, 10))
+		assert.Equal(t, 5*timex.Second, JitterDuration(5*timex.Second, 0))
+		assert.Equal(t, 5*timex.Second, JitterDuration(5*timex.Second, -1))
 	})
 
 	t.Run("范围校验", func(t *testing.T) {
-		base := 10 * time.Second
+		base := 10 * timex.Second
 		ratio := 20
 		deltaNs := int64(base) * int64(ratio) / 100
 		for i := 0; i < 10000; i++ {
 			v := JitterDuration(base, ratio)
-			assert.True(t, v >= base-time.Duration(deltaNs) && v <= base+time.Duration(deltaNs),
+			assert.True(t, v >= base-timex.Duration(deltaNs) && v <= base+timex.Duration(deltaNs),
 				"JitterDuration 结果越界: %v", v)
 		}
 	})
@@ -283,9 +283,9 @@ func TestHexString(t *testing.T) {
 }
 
 func TestDuration(t *testing.T) {
-	min, max := 5*time.Second, 10*time.Second
+	min, max := 5*timex.Second, 10*timex.Second
 	assert.Equal(t, min, Duration(min, min))
-	assert.Equal(t, 8*time.Second, Duration(8*time.Second, 3*time.Second))
+	assert.Equal(t, 8*timex.Second, Duration(8*timex.Second, 3*timex.Second))
 
 	const samples = 50000
 	for i := 0; i < samples; i++ {
@@ -293,8 +293,8 @@ func TestDuration(t *testing.T) {
 		assert.True(t, v >= min && v < max, "Duration 结果越界: %v", v)
 	}
 
-	tinyMin := time.Duration(0)
-	tinyMax := time.Duration(2)
+	tinyMin := timex.Duration(0)
+	tinyMax := timex.Duration(2)
 	hitMin := false
 	for i := 0; i < 20000; i++ {
 		if Duration(tinyMin, tinyMax) == tinyMin {
