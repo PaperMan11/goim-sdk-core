@@ -624,16 +624,292 @@ WS 推送消息
 
 ---
 
-### Phase 5: 封装编译（暂缓）⏳
+### Phase 5: 跨语言封装 ⏳
 
 > 等 Phase 1-4 全部完成且测试充分后再动手。
+>
+> **为什么需要 call 层？** gomobile / cgo / wasm 只能传 Go 基本类型（string/int/bool/[]byte），不能传 Go channel、泛型、复杂 interface。Phase 1-4 的 Client 接口返回 `(*model.SendMsgResp, error)`、`<-chan events.Event`、interface{} 载荷——这些在跨语言边界都无法直接导出。
+>
+> **核心 SDK 和 call 层是两件事**：goim-sdk-core 定位是 Go 语言内部使用，所以保持类型安全的 Manager 接口；call 层是为跨语言边界准备的**薄反射适配层**，它不参与 core 层设计，Phase 5 时纯增量添加。
 
-| 平台 | 入口 | 产物 | 命令 |
-|---|---|---|---|
-| iOS | — | .framework | `gomobile bind -target=ios ./pkg/client` |
-| Android | — | .aar | `gomobile bind -target=android -o goim-sdk.aar ./pkg/client` |
-| Windows | — | .dll | CGO 编译 + 导出 C 函数 |
-| Web | `wasm/cmd/main.go` | .wasm | `GOOS=js GOARCH=wasm go build -o goim.wasm ./wasm/cmd` |
+#### 5.1 架构总图
+
+```
+┌───────────────────────────────────────────────────────────┐
+│              跨语言桥接层（平台边界）                        │
+│  gomobile .framework / .aar   ·   cgo .dll / .dylib       │
+│  wasm .wasm (syscall/js)                                  │
+│                                                           │
+│  ↓ 只能传 string / int / bool / []byte                    │
+├───────────────────────────────────────────────────────────┤
+│              pkg/call 反射调用内核                          │
+│                                                           │
+│  · call(method, argsJSON)        异步，回调 OnSuccess / OnError
+│  · syncCall(method, argsJSON)    同步，返回 JSON string
+│  · messageCall(method, argsJSON) 消息类方法，带进度回调
+│                                                           │
+│  反射分发:                                                 │
+│    1. method string → Client 方法名查找                    │
+│    2. argsJSON → 参数 struct 反序列化                      │
+│    3. operationID / 登录态校验                              │
+│    4. panic recover + 错误归一化                           │
+│    5. 返回值 struct → JSON 序列化                           │
+│                                                           │
+│  ↓ Go 内部调用                                             │
+├───────────────────────────────────────────────────────────┤
+│             pkg/client DefaultClient                       │
+│  Login / Logout / Connect / Disconnect / Status            │
+│  Auth() / User() / Msg() / Group() / Rel() / Conv()        │
+│  Subscribe / SubscribeAll / OnConnect / OnDisconnect       │
+├───────────────────────────────────────────────────────────┤
+│             pkg/manager 六个 Manager 实现                  │
+├───────────────────────────────────────────────────────────┤
+│             pkg/transport + pkg/storage                    │
+├───────────────────────────────────────────────────────────┤
+│             pkg/model DTO + pkg/events EventType           │
+└───────────────────────────────────────────────────────────┘
+```
+
+#### 5.2 pkg/call 包设计
+
+```
+pkg/call/
+  ├── call.go           # Dispatcher 主入口（反射分发）
+  ├── converter.go      # 参数/返回值 ↔ JSON 编解码
+  ├── middleware.go     # operationID 校验 / 登录态校验 / panic recover
+  ├── error.go          # 统一错误归一化（SDKError → call error code + msg）
+  └── handler.go        # 跨语言回调桥接（gomobile 闭包 ↔ Go channel）
+```
+
+**核心 API（全部是 gomobile 可绑定的基本类型签名）**：
+
+```go
+// Dispatcher 反射分发器（全局单例）
+type Dispatcher struct {
+    client *client.DefaultClient  // Phase 4 构造完成后注入
+}
+
+// call 异步调用：method="MsgMgr.SendMsg", argsJSON='{"sendID":"...","content":"..."}'
+// gomobile 导出后变成：
+//   iOS:    dispatcher.call(..., onSuccess: (String) -> Void, onError: (Int, String) -> Void)
+//   Android: dispatcher.call(..., (String) -> Unit, (Int, String) -> Unit)
+func (d *Dispatcher) call(method string, argsJSON string, onSuccess func(string), onError func(int32, string))
+
+// syncCall 同步调用，返回 JSON 字符串（少数非事件型场景用）
+func (d *Dispatcher) syncCall(method string, argsJSON string) (string, error)
+
+// messageCall 消息发送专用，带进度回调
+func (d *Dispatcher) messageCall(method string, argsJSON string,
+    onSuccess func(string), onError func(int32, string), onProgress func(int32))
+
+// SetClient 注入 DefaultClient（单例模式，call 层持有唯一 client 实例）
+func (d *Dispatcher) SetClient(c *client.DefaultClient)
+
+// Subscribe 跨语言订阅事件
+// gomobile 导出后变成：
+//   iOS:    dispatcher.subscribe(eventType, onEvent: (Event) -> Void) -> Unsubscriber
+//   Android: dispatcher.subscribe(eventType, (Event) -> Unit) -> () -> Unit
+//   Event 结构必须全是 gomobile 可绑定类型，payload 用 []byte / string
+func (d *Dispatcher) Subscribe(eventType int32, onEvent func(eventJSON string)) func()
+
+// —— SDK 生命周期（gomobile 导出的顶层 API 也可以直接调 DefaultClient）——
+
+// Login / Logout / Connect / Disconnect 也可以直接导出为具体方法，
+// 因为 gomobile 能直接绑定 func() / func(error error) 这种基本签名
+func (d *Dispatcher) Login(userID string, platformID int32, onSuccess func(), onError func(int32, string))
+func (d *Dispatcher) Logout(onSuccess func(), onError func(int32, string))
+func (d *Dispatcher) Connect(onSuccess func(), onError func(int32, string))
+func (d *Dispatcher) Disconnect(onSuccess func(), onError func(int32, string))
+func (d *Dispatcher) Status() int32
+```
+
+**反射分发表**（call 层内部维护，method string → (receiver, methodName) 映射）：
+
+| method string | receiver | 方法 | args struct | 返回 struct |
+|--------------|----------|------|------------|------------|
+| `"Login"` | Dispatcher | Login | - | - |
+| `"AuthMgr.GetUserToken"` | AuthMgr | GetUserToken | `{userID, platformID}` | `{token, expireTimeSeconds}` |
+| `"MsgMgr.SendMsg"` | MsgMgr | SendMsg | `MsgData` (全部是具体字段) | `SendMsgResp` |
+| `"MsgMgr.NewestSeq"` | MsgMgr | NewestSeq | - | `{maxSeqs, minSeqs}` (JSON object) |
+| `"MsgMgr.PullMsgBySeq"` | MsgMgr | PullMsgBySeq | `{userID, seqRanges, order}` | `{msgsByConv}` |
+| `"GroupMgr.CreateGroup"` | GroupMgr | CreateGroup | `{groupInfo, memberIDs, adminIDs, ownerID, sendMessage}` | `GroupInfo` |
+| ... | ... | ... | ... | ... |
+
+**参数/返回值 struct 约束**：
+- 全部用具体 struct（**不能用 interface{} / interface / 嵌套 interface 字段**）
+- gomobile 不支持泛型，所有 slice 必须是具体类型：`[]string`、`[]*MsgData`（而不是 `[]interface{}`）
+- map 允许（gomobile 可绑定 `map[string]string`）
+- `interface{}` 字段用 `json.RawMessage` / `[]byte` / `string` 替代
+
+**operationID / 登录态 / panic recover 中间件**：
+
+```go
+// middleware.go
+func (d *Dispatcher) withMiddleware(method string, fn func() (interface{}, error)) (interface{}, error) {
+    // 1. panic recover（反射调用中 panic 不能直接传到 C/ObjC/Swift）
+    defer func() {
+        if r := recover(); r != nil {
+            err = fmt.Errorf("panic in %s: %v", method, r)
+        }
+    }()
+
+    // 2. 登录态校验（方法白名单跳过：Login / ParseToken / Register）
+    if !d.isLoggedIn() && !isAuthBypass(method) {
+        return nil, ErrNotLoggedIn
+    }
+
+    // 3. 反射调用
+    return fn()
+}
+```
+
+#### 5.3 Subscribe 事件桥接
+
+```
+eventbus (core 层)                     call 层 handler
+  chan events.Event    →  range 监听  →  event.Timestamp / event.Type / payload JSON
+                                          → gomobile 闭包回调 onEvent(JSONString)
+                                               ↓
+                                         iOS Swift block / Android Kotlin lambda
+```
+
+**events.Event 在 gomobile 下的 JSON 结构**（不能直接 Export，因为 Payload 是 `interface{}`）：
+
+```go
+// call/event_payload.go 专门给 gomobile 导出的事件载荷
+type EventPayload struct {
+    Type      int32  `json:"type"`
+    Timestamp int64  `json:"timestamp"`
+    Payload   string `json:"payload,omitempty"` // 具体事件的 JSON 序列化，比如 MsgData
+}
+```
+
+call 层内部做 `Event → EventPayload → JSON string`，跨语言边界只传 string。
+
+#### 5.4 四平台桥接
+
+##### iOS / Android（gomobile bind）
+
+```bash
+# iOS: .framework
+gomobile bind -target=ios -o goim-sdk.framework -v ./pkg/call
+
+# Android: .aar
+gomobile bind -target=android -o goim-sdk.aar -v ./pkg/call
+```
+
+导出的接口全部用 **基本类型**（string / int32 / int64 / bool / []byte / map），gomobile 自动生成 ObjC / Java 绑定。
+
+**Swift 端示例**：
+```swift
+let dispatcher = GoimSdkNewDispatcher()
+dispatcher.login("user-123", platformID: 1,
+    onSuccess: { print("login ok") },
+    onError: { code, msg in print("login failed: \(code) \(msg)") })
+
+dispatcher.call("MsgMgr.SendMsg", argsJSON: "{\"content\":\"hello\"}",
+    onSuccess: { respJSON in print("sent: \(respJSON)") },
+    onError: { code, msg in print("send failed: \(code) \(msg)") })
+
+let unsub = dispatcher.subscribe(EventNewMsg) { eventJSON in
+    print("new msg: \(eventJSON)")
+}
+```
+
+##### PC 桌面（cgo）
+
+```bash
+# Windows DLL
+CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build -buildmode=c-shared -o goim-sdk.dll -v ./cmd/cgo
+
+# macOS dylib
+CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -buildmode=c-shared -o goim-sdk.dylib -v ./cmd/cgo
+```
+
+导出 C 函数：
+
+```c
+// cmd/cgo/main.go 里用 //export 注释导出
+extern void GoimSdkCall(const char* method, const char* argsJSON,
+                        void (*onSuccess)(const char*),
+                        void (*onError)(int32_t, const char*));
+extern void GoimSdkLogin(const char* userID, int32_t platformID,
+                        void (*onSuccess)(void),
+                        void (*onError)(int32_t, const char*));
+extern void GoimSdkSubscribe(int32_t eventType, void (*onEvent)(const char*));
+```
+
+##### Web（wasm + syscall/js）
+
+```bash
+GOOS=js GOARCH=wasm go build -o goim.wasm -v ./wasm/cmd/main.go
+cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" ./
+```
+
+**特殊约束**：
+- Storage 不能用 SQLite（wasm 没有文件系统），用 IndexedDB（`go-proton-idb` 或 `syscall/js` 封装）
+- `gorilla/websocket` 在 wasm 下自动降级为 `syscall/js.WebSocket`（gorilla 已内置支持）
+- Logger 输出到 `console.log`（`syscall/js.Global().Get("console").Call("log", ...)`）
+- glebarez/sqlite 在 wasm 下走 JS backend（pure-Go SQLite 有 wasm 支持）
+
+**JS 调用入口**（暴露到 `globalThis`）：
+
+```go
+// wasm/cmd/main.go
+func init() {
+    // JS 端: globalThis.goimSdk.call("MsgMgr.SendMsg", argsJSON, (resp)=>{}, (code,msg)=>{})
+    js.Global().Set("goimSdk", js.ValueOf(map[string]interface{}{
+        "call":        js.FuncOf(callJS),
+        "subscribe":   js.FuncOf(subscribeJS),
+        "login":       js.FuncOf(loginJS),
+        "logout":      js.FuncOf(logoutJS),
+    }))
+}
+```
+
+#### 5.5 gomobile 约束清单（call 层必须遵守）
+
+| 特性 | gomobile 支持 | call 层处理方式 |
+|------|--------------|----------------|
+| Go channel | ❌ 不支持 | Subscribe 返回 Go func() 类型（gomobile 支持），内部监听 channel |
+| 泛型 `<T>` | ❌ 不支持 | 全部用具体 slice：`[]*model.MsgData` 代替 `[]interface{}` |
+| `interface{}` | ❌ 不支持作为返回值 | 跨语言边界只用具体 struct / string / []byte |
+| closure / func 类型 | ✅ 支持 | `func(string)` / `func(int32, string)` 直接导出 |
+| `map[string]string` | ✅ 支持 | 直接导出 |
+| `map[string]*MsgData` | ❌ value 不能是 pointer struct | JSON string 传递 |
+| 方法接收者是 interface | ⚠️ 不稳定 | call 层统一持有具体类型 `*DefaultMsgMgr`，不用 interface 作为反射 receiver |
+| 多返回值 | ⚠️ 有限支持 | gomobile 只支持最多 2 个返回值，call 层内部可以更多，但导出方法要拍平 |
+| `(T, error)` | ✅ 支持 | Go 惯用模式，gomobile 能正确映射 error |
+| `context.Context` | ✅ 支持（作为参数） | call 层内部传 `context.Background()` 或带 timeout 的 context |
+| goroutine | ✅ 支持 | call 层内部正常起 goroutine，回调切回主线程由桥接层负责 |
+
+#### 5.6 Phase 5 完成判定
+
+| 判定 | 验证方式 |
+|------|---------|
+| gomobile bind 无编译错误 | `gomobile bind -target=ios ./pkg/call` |
+| iOS 能 build | Xcode 打开 .framework，写 Swift 代码 import 并调用 Login + SendMsg |
+| Android 能 build | gradle 引入 .aar，Kotlin 调用 |
+| cgo dll 能 link | C# P/Invoke 测试 |
+| wasm 浏览器能跑 | chrome://inspect → 调试 JS 调用 |
+| 事件能送达 | iOS `onEvent` 回调里打印 payload，收到新消息推送 |
+| 错误能正确归一化 | Mock error code 1501 → iOS `onError(1501, "token expired")` |
+| panic 不穿透 | call 层 middleware 捕获 panic → onError(90001, "internal") |
+
+#### 5.7 交付产物
+
+```
+pkg/call/                      # 反射调用层（gomobile / cgo / wasm 共用）
+  ├── call.go
+  ├── converter.go
+  ├── middleware.go
+  ├── error.go
+  └── handler.go
+
+cmd/cgo/main.go                # PC 平台 C 导出函数入口
+wasm/cmd/main.go               # Web 平台 syscall/js 入口
+wasm/storage/idb.go            # IndexedDB 实现（Storage 接口的 wasm 版本）
+```
 
 ---
 
