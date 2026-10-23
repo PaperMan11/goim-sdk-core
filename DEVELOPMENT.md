@@ -174,18 +174,23 @@ Connect(ctx):
   服务端→客户端: SetPingHandler 自动回复 Pong + 续 read deadline
 ```
 
-#### D. Seq 同步引擎（待实现）
+#### D. 数据同步引擎（待实现 → Phase 4.5）
 
 ```
-启动时:
-  newest_seq() → 各会话 maxSeq/minSeq
-  pull_msg_by_seq([minSeq, maxSeq]) → 全量补齐
+消息 Seq 同步（SeqSyncEngine，pkg/sync/msg.go）:
+  登录后/重连后:
+    newest_seq() → 各会话服务端 maxSeq/minSeq
+    与本地 local_seqs 对比 → gap = [localMax+1, serverMax]
+    gap > 0 → pull_msg_by_seq 分批拉取 → 入库 → 前移游标
 
 运行时增量:
-  WS 推送新消息 → PushHandler(2001) → 触发本地 seq 更新
+  WS 推送新消息 → PushHandler(2001) → MsgData 入库 + local_seqs 前移
 
-重连后:
-  丢弃本地缓存 → OnReconnected → 重新执行启动流程
+实体版本同步（EntitySyncEngine，pkg/sync/entity.go）:
+  好友/黑名单/群/群成员/会话 五类，version + versionID 游标增量，
+  full/IDHash 不匹配 → 全量回退（详见 Phase 4.5.4）
+
+事件: 全部同步完成后 Publish(EventSeqSynced)；EntityLoginSuccess 在同步链路完成后才发布
 ```
 
 #### E. 同步请求-响应（MessageRouter）
@@ -578,10 +583,9 @@ EventSeqSynced            // 全量同步完成
 
 ### Phase 4: Storage + DefaultClient 完整实现 ⏳
 
-**步骤 4.1 — pkg/storage**
-- Storage 接口（seq / version / idHash / 消息缓存 / 会话缓存）
-- SQLite 实现（gorm + glebarez/sqlite）
-- 内存实现（测试用）
+**步骤 4.1 — pkg/storage（已完成基础，业务数据部分 → Phase 4.5）**
+- ✅ Storage 接口（GetMaxSeqs/SetMaxSeqs、GetVersion/SetVersion、Clear）+ MemoryStorage
+- ⏳ SQLite 实现（gorm + glebarez/sqlite）+ 业务数据表 → **Phase 4.5**
 
 **步骤 4.2 — pkg/client/client.go 完整实现**
 - DefaultClient 聚合：HTTPClient、MessageTransport、TokenStore、六个 Manager、Storage、eventbus
@@ -620,6 +624,114 @@ WS 推送消息
   
 上层业务
   → client.Subscribe(EventNewMsg) → 收到 chan 事件 → 业务处理
+```
+
+---
+
+### Phase 4.5: 本地存储落地 + 数据同步引擎 ⏳
+
+> **为什么需要这个阶段**：服务端已有完整 data-sync 协议 —— `version + versionID` 增量同步、`IDHash` 全量回退（见服务端 docs/data-sync.md，10 个专用接口）。SDK 必须实现对应的本地缓存和同步引擎，否则上层业务拿不到离线数据、重连后状态不一致。
+>
+> Phase 4 只交付了 Storage 接口 + MemoryStorage（元数据级），本阶段补齐：业务数据持久化（SQLite）+ 双同步引擎（消息 Seq 同步 / 实体版本同步）。
+
+#### 4.5.1 存储层结构
+
+```
+pkg/storage/
+  ├── storage.go        # Storage 接口 + MemoryStorage（已有，Phase 4 ✅）
+  ├── sqlite.go         # SQLiteStorage（gorm + glebarez/sqlite，纯 Go 无 CGO，全平台可用）
+  ├── models.go         # gorm 表模型（8 张表，见 4.5.2）
+  └── idhash.go         # IDHash 计算（对齐服务端 hash 算法，复用 pkg/utils/hash）
+```
+
+- `ClientConfig.Storage` 依赖注入：默认 `SQLiteStorage`，单元测试注入 `MemoryStorage` 或 `:memory:` SQLite
+- 所有表带 `OwnerUserID` 隔离（多账号共存，Logout 只清当前 owner）
+- wasm：接口不变，Phase 5 换 IndexedDB 实现（见 §5.4）
+
+#### 4.5.2 SQLite 表设计（8 张表）
+
+| 表 | 联合主键 | 关键列 | 用途 |
+|----|---------|--------|------|
+| local_seqs | (owner_user_id) | max_seqs JSON, min_seqs JSON | NewestSeq 持久化（现有接口对齐） |
+| versions | (owner_user_id, entity) | version_id, version | 五类实体同步游标 |
+| conversations | (owner_user_id, conversation_id) | conv_type, recv_opt, unread, latest_msg_json, max_seq, min_seq, attached_info, version | 会话列表 |
+| messages | (owner_user_id, client_msg_id) | server_msg_id, **seq**, conversation_id, sender_id, content_json, status, send_time | 消息缓存 |
+| friends | (owner_user_id, friend_user_id) | remark, is_pinned, add_source | 好友 |
+| blacks | (owner_user_id, black_user_id) | | 黑名单 |
+| groups | (owner_user_id, group_id) | group_name, member_count, group_type, status | 加入的群 |
+| group_members | (owner_user_id, group_id, user_id) | role_level, join_time, nickname | 群成员 |
+
+关键索引：`messages(conversation_id, seq)` 唯一、`conversations(latest_msg_send_time DESC)`（排序会话列表）。
+
+#### 4.5.3 SeqSyncEngine（消息同步，pkg/sync/msg.go）
+
+```
+初始化（登录后 / 重连后）:
+  1. NewestSeq(WS 1001) → 服务端 maxSeq/minSeq（按会话）
+  2. 与 Storage.local_seqs 对比 → 缺口 = [localMax+1, serverMax]
+  3. gap > 0 → PullMsgBySeqList(WS 1002) 分批拉取（每批 ≤100 seq）
+     → messages 表 upsert → local_seqs 前移
+  4. Publish(EventSeqSynced)
+
+运行时:
+  WS 2001 推送 MsgData → seq > localMax → 直接入库 + local_seqs 前移
+  （EventNewMsg 由 PushHandler 派发，Phase 4 已做；引擎只管持久化与游标）
+
+重连后:
+  OnReconnected → 重新走初始化流程做 gap 拉取（不再整库丢弃，§3.D 旧方案废弃）
+```
+
+#### 4.5.4 EntitySyncEngine（实体版本同步，pkg/sync/entity.go）
+
+**五类实体 × 服务端接口**（/api/v1 前缀，对齐服务端 data-sync.md）：
+
+| 实体 | 增量接口 | 全量 ID 校验接口 | 本地表 |
+|------|---------|----------------|--------|
+| 好友 | /relation/get_incremental_friends | /relation/get_full_friend_user_ids | friends |
+| 黑名单 | /relation/get_incremental_blacks | （复用好友 ID 空间判定） | blacks |
+| 加入的群 | /group/get_incremental_join_groups | /group/get_full_join_group_ids | groups |
+| 群成员 | /group/get_incremental_group_members(+_batch) | /group/get_full_group_member_user_ids | group_members |
+| 会话 | /conversation/get_incremental_conversations | /conversation/get_full_conversation_ids | conversations |
+
+**协议**（model 已有 DTO：IncrementalFriends / IncrementalBlacks / IncrementalGroups / IncrementalMembers / IncrementalConversations）：
+- 请求：`{versionID, version, syncCount}`（游标分批）
+- 响应：`{versionID, version, insert[], update[], delete[], full}`
+
+**同步算法（单实体）**：
+```
+1. Storage.GetVersion(entity) → (versionID, version)
+2. 携带游标请求增量，分批循环直到服务端拉完
+3. full == true 或 服务端 versionID 不匹配（文档重建） → 全量回退：
+   get_full_*_ids → 与本地 IDHash 对比
+   hash 不匹配 → 清表 → 全量拉取（GetFriendList / 分页拉会话...）
+   hash 匹配   → 仅删除本地多余 ID
+4. 应用 insert/update/delete 三列表（upsert / 硬删）
+5. SetVersion(entity, versionID, version) 写回游标
+6. Publish 对应实体事件（复用 Phase 2.5 枚举，不足则补充）
+```
+
+**群成员特殊**：按群维度游标（groupID + version + versionID），`get_incremental_group_members_batch` 一次拉多群；先同步 `get_incremental_join_groups` 拿到摘要变更群（GroupAbstractInfo），再按需拉成员。
+
+#### 4.5.5 触发时机矩阵
+
+| 时机 | 动作 |
+|------|------|
+| Login 成功（EventConnect 后） | SeqSyncEngine 初始化 + 五类 EntitySyncEngine 顺序执行 → 全部完成才 Publish(EventLoginSuccess) |
+| Reconnect（OnReconnected） | SeqSyncEngine gap 拉取 + 五类实体带游标增量（通常 0 或小增量） |
+| WS 2001 推送 | 消息直接入库；检测到本地无对应会话 → 触发会话实体增量补拉 |
+| WS 实体 Tips（群变更/好友变更等 2001 Tips） | 标记实体脏 → 500ms 防抖合并 → 触发对应实体增量 |
+| Logout | Storage.Clear（当前 owner）+ 引擎游标重置 |
+
+#### 4.5.6 完成判定 + 交付物
+
+```
+pkg/storage/sqlite.go + models.go   8 表 CRUD（:memory: SQLite 单测覆盖）
+pkg/sync/msg.go + entity.go         gap 拉取 / 游标增量 / IDHash 全量回退 / 防抖（mock 服务端单测）
+
+集成验证：
+  Login → SeqSync → EntitySync → EventLoginSuccess（全链路）
+  Login(账号A) → Logout → Login(账号B) → 数据完全隔离
+  断网重连 → gap 拉取无丢消息
 ```
 
 ---
@@ -1025,29 +1137,31 @@ WS 场景拼到 URL query（encodeQuery），TCP 场景放在握手包中。
 
 ---
 
-## 11. 本地存储设计（Phase 4）
+## 11. 本地存储设计
 
-### Storage 接口
+### 11.1 已实现（Phase 4 ✅）— pkg/storage/storage.go
 
 ```go
 type Storage interface {
-    // Seq 相关
-    SaveLocalMaxSeq(conversationID string, seq int64) error
-    GetLocalMaxSeq(conversationID string) (int64, error)
+    // Seq 元数据（SeqSyncEngine 游标）
+    GetMaxSeqs(userID string) (maxSeqs, minSeqs map[string]int64, err error)
+    SetMaxSeqs(userID string, maxSeqs, minSeqs map[string]int64) error
 
-    // 版本相关
-    SaveVersion(storageKey, versionID string, version uint64) error
-    GetVersion(storageKey string) (versionID string, version uint64, err error)
-
-    // ID Hash
-    SaveIDHash(storageKey string, idHash uint64) error
-    GetIDHash(storageKey string) (uint64, error)
+    // 版本游标（EntitySyncEngine；entity ∈ friends/blacks/joinGroups/groupMembers/conversations）
+    GetVersion(entity string) (versionID string, version uint64, err error)
+    SetVersion(entity, versionID string, version uint64) error
 
     // 生命周期
-    Close() error
-    Clear() error  // 退出登录时调用
+    Clear(ctx context.Context) error // Logout 时清理
 }
 ```
+
+当前默认实现 MemoryStorage；`ClientConfig.Storage` 支持注入。
+
+### 11.2 待实现（Phase 4.5）
+
+分层架构、SQLite 8 张业务表设计、IDHash 计算、wasm IndexedDB 方案 ——
+完整设计见 **Phase 4.5（§4.5.1 - §4.5.6）**，此处不重复。
 
 ---
 
@@ -1094,12 +1208,14 @@ github.com/PaperMan11/goim/pkg/utils/timex     # utils/timex 依赖
 ## 14. 开发进度总览
 
 ```
-✅ Phase 1  model → events → logger → transport (33 单元测试)
-✅ Phase 2  六个 Manager interface 骨架
-⏳ Phase 2.5 Client interface 骨架 + 统一事件总线架构       ← 下一步
-⏳ Phase 3  逐个实现 Manager（操作结果派发 event）
-⏳ Phase 4  Storage → DefaultClient 完整实现 → Events 桥接
-⏳ Phase 5  gomobile / cgo / wasm 编译输出（暂缓）
+✅ Phase 1    model → events → logger → transport (33 单元测试)
+✅ Phase 2    六个 Manager interface 骨架
+✅ Phase 2.5  Client interface 骨架 + EventType 扩展（42 枚举）
+✅ Phase 3    六个 Manager 实现（WS 链路 + 事件派发）
+✅ Phase 4    Storage 接口 + DefaultClient 完整实现（生命周期钩子入 interface、type probe 推送路由）
+✅ Phase 4.0a time → timex 全量替换（26 文件）+ 业务转换统一走 utils/convert（7 文件）
+⏳ Phase 4.5  本地存储落地（SQLite 8 表）+ 数据同步引擎（SeqSyncEngine + EntitySyncEngine）  ← 下一步
+⏳ Phase 5    gomobile / cgo / wasm 编译输出（暂缓）
 ```
 
 **每个 Phase 的完成判定**：编译通过 + 对应单元测试覆盖核心路径 + `go vet` 无告警。

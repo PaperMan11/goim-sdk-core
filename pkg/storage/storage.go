@@ -1,7 +1,8 @@
 // Package storage 本地持久化接口 + 实现。
 //
 // MVP 只实现内存版本（单元测试 + 早期开发用）。
-// SQLite（gorm + glebarez/sqlite）和 wasm IndexedDB 实现留到 Phase 5。
+// SQLite（gorm + glebarez/sqlite，纯 Go 无 CGO）实现与业务数据表 → Phase 4.5；
+// wasm IndexedDB 实现 → Phase 5。
 //
 // 设计原则：
 //   - Storage 只管「轻量元数据」：最大 seq / versionID / version 数值
@@ -50,8 +51,11 @@ type MemoryStorage struct {
 // NewMemoryStorage 构造内存存储
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		seqs:     make(map[string]struct{ max, min map[string]int64 }),
-		versions: make(map[string]struct { id string; version uint64 }),
+		seqs: make(map[string]struct{ max, min map[string]int64 }),
+		versions: make(map[string]struct {
+			id      string
+			version uint64
+		}),
 	}
 }
 
@@ -99,6 +103,9 @@ func (s *MemoryStorage) Clear(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seqs = make(map[string]struct{ max, min map[string]int64 })
-	s.versions = make(map[string]struct { id string; version uint64 })
+	s.versions = make(map[string]struct {
+		id      string
+		version uint64
+	})
 	return nil
 }
