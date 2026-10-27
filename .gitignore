@@ -29,5 +29,19 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+*.swp
+
+# 本地运行产物（SDK 日志 / SQLite 数据文件，文档示例目录 sdk_data/）
+*.log
+*.db
+*.sqlite
+*.sqlite3
+sdk_data/
+
+# IDE/Agent 本地缓存
+.screenshots/
+.trae/
+.claude/
+

@@ -213,7 +213,10 @@ SendRequestAndWait(ctx, req):
 
 ```
 goim-sdk-core/
-├── DEVELOPMENT.md               # 本文档
+├── README.md                    # 项目入口
+├── docs/
+│   ├── DEVELOPMENT.md           # 本文档
+│   └── INTEGRATION_TEST_PLAN.md # 服务端对接测试方案
 ├── go.mod                       # module: github.com/PaperMan11/goim-sdk-core
 ├── go.sum
 │
