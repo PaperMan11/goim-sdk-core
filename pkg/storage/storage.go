@@ -97,6 +97,13 @@ type Storage interface {
 
 	// Clear 清理指定 owner 的全部数据（Logout 时调用）
 	Clear(ctx context.Context, ownerUserID string) error
+
+	// === SDK 级元数据（与 owner 无关，如设备 ID）===
+
+	// GetMeta 读取键值，不存在返回 ("", nil)
+	GetMeta(key string) (string, error)
+	// SetMeta 写入键值
+	SetMeta(key, value string) error
 }
 
 // VersionInfo 实体游标信息
@@ -127,6 +134,7 @@ type MemoryStorage struct {
 	blacks       map[string]map[string]*model.BlackInfo                      // owner → blackUserID → info
 	groups       map[string]map[string]*model.GroupInfo                      // owner → groupID → info
 	groupMembers map[string]map[string]map[string]*model.GroupMemberFullInfo // owner → groupID → userID → member
+	meta         map[string]string                                           // SDK 级元数据（设备 ID 等）
 }
 
 // NewMemoryStorage 构造内存存储
@@ -143,6 +151,7 @@ func NewMemoryStorage() *MemoryStorage {
 		blacks:       make(map[string]map[string]*model.BlackInfo),
 		groups:       make(map[string]map[string]*model.GroupInfo),
 		groupMembers: make(map[string]map[string]map[string]*model.GroupMemberFullInfo),
+		meta:         make(map[string]string),
 	}
 }
 
@@ -501,5 +510,20 @@ func (s *MemoryStorage) Clear(_ context.Context, owner string) error {
 	delete(s.blacks, owner)
 	delete(s.groups, owner)
 	delete(s.groupMembers, owner)
+	return nil
+}
+
+// === SDK 级元数据 ===
+
+func (s *MemoryStorage) GetMeta(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.meta[key], nil
+}
+
+func (s *MemoryStorage) SetMeta(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.meta[key] = value
 	return nil
 }

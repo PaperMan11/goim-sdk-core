@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -75,7 +76,22 @@ func NewClient(cfg *ClientConfig) Client {
 		l = logger.New(cfg.Logging)
 	}
 	bus := eventbus.New(eventbus.WithLogger(l))
-	tokens := transport.NewTokenStore(nil)
+
+	// TokenStore 刷新闭包：token 过期时重新走 bootstrap 获取新 token。
+	// AdminSecret 模式下完整可用（admin token 过期时 get_admin_token 白名单可重取）；
+	// 终端模式（LoginWithToken）下无法自行刷新，返回错误由上层触发宿主重新下发。
+	var c *DefaultClient
+	refresh := func(ctx context.Context, userID string, platformID int32) (string, int64, error) {
+		if c == nil || c.auth == nil {
+			return "", 0, fmt.Errorf("token refresh: client not initialized")
+		}
+		resp, err := c.acquireUserToken(ctx, userID, platformID)
+		if err != nil {
+			return "", 0, err
+		}
+		return resp.Token, resp.ExpireTimeSeconds, nil
+	}
+	tokens := transport.NewTokenStore(refresh)
 
 	// 存储：注入优先；否则 SessionDataPath 有值 → SQLite；都空 → 内存
 	var stor storage.Storage
@@ -99,12 +115,27 @@ func NewClient(cfg *ClientConfig) Client {
 		http = transport.NewHTTPClient(cfg.BaseURL, tokens, l)
 	}
 
+	// 设备 ID 解析：配置优先 → 存储持久化值 → 自动生成并持久化。
+	// 跨重启稳定很重要：多端互踢策略下，同一设备重连不应被当成新设备
+	deviceID := cfg.DefaultDeviceID
+	if deviceID == "" {
+		if v, _ := stor.GetMeta(metaKeyDeviceID); v != "" {
+			deviceID = v
+		} else {
+			deviceID = uuidx.New()
+			_ = stor.SetMeta(metaKeyDeviceID, deviceID)
+		}
+	}
+
 	params := transport.ConnectParams{
 		PlatformID:  convert.ToInt(cfg.DefaultPlatformID),
-		DeviceID:    cfg.DefaultDeviceID,
+		DeviceID:    deviceID,
 		SDKVersion:  cfg.DefaultSDKVersion,
 		Compression: cfg.DefaultCompression,
 		OperationID: uuidx.New(),
+	}
+	if params.SDKVersion == "" {
+		params.SDKVersion = Version
 	}
 
 	var ws transport.MessageTransport
@@ -122,7 +153,7 @@ func NewClient(cfg *ClientConfig) Client {
 	relMgr := manager.NewRelMgr(http, bus, l)
 	convMgr := manager.NewConvMgr(http, bus, l)
 
-	c := &DefaultClient{
+	c = &DefaultClient{
 		cfg:       cfg,
 		http:      http,
 		transport: ws,
@@ -185,9 +216,18 @@ func NewClient(cfg *ClientConfig) Client {
 
 // === 生命周期 ===
 
+const defaultAdminUserID = "imAdmin"
+
+// sdk_meta 表键名
+const metaKeyDeviceID = "device_id"
+
+// Login 登录（受信环境模式）：Token 获取 + WS 连接 + 数据同步
+//
+// 配置了 ClientConfig.AdminSecret 时自动 admin bootstrap
+// （GetAdminToken → 挂 admin token → GetUserToken → 切回用户 token），
+// 未配置时要求凭证已注入（如 LoginWithToken / 宿主自管 TokenStore）
 func (c *DefaultClient) Login(ctx context.Context, userID string, platformID int32) error {
-	// 1. GetUserToken（内部已 Publish EventLoginSuccess + TokenStore.Set）
-	tokenResp, err := c.auth.GetUserToken(ctx, userID, platformID)
+	tokenResp, err := c.acquireUserToken(ctx, userID, platformID)
 	if err != nil {
 		c.bus.Publish(events.EventLoginFailed, events.Event{
 			Type:      events.EventLoginFailed,
@@ -195,10 +235,57 @@ func (c *DefaultClient) Login(ctx context.Context, userID string, platformID int
 		})
 		return fmt.Errorf("login: get user token: %w", err)
 	}
+	return c.loginFlow(ctx, userID, platformID, tokenResp.Token)
+}
+
+// LoginWithToken 登录（终端模式）：使用宿主业务服务端下发的 user token，
+// SDK 全程不接触 admin secret
+func (c *DefaultClient) LoginWithToken(ctx context.Context, userID string, platformID int32, token string, expireTimeSeconds int64) error {
+	if token == "" {
+		return fmt.Errorf("login: token is empty")
+	}
+	_ = c.tokens.Set(userID, platformID, token, expireTimeSeconds)
+	return c.loginFlow(ctx, userID, platformID, token)
+}
+
+// acquireUserToken 获取用户 token（过期刷新也走此路径，见 NewClient 的 refresh 闭包）
+//
+//   - 配置 AdminSecret → admin bootstrap：复用/重取 admin token → 挂载 → GetUserToken
+//     （服务端 get_user_token 要求调用方具备 admin 身份，见 docs/INTEGRATION_TEST_PLAN.md §4）
+//   - 未配置 AdminSecret → 直接 GetUserToken（依赖当前已注入的凭证）
+func (c *DefaultClient) acquireUserToken(ctx context.Context, userID string, platformID int32) (*transport.TokenResult, error) {
+	if c.cfg.AdminSecret != "" {
+		adminUserID := c.cfg.AdminUserID
+		if adminUserID == "" {
+			adminUserID = defaultAdminUserID
+		}
+		// admin token 缓存有效则复用，缺失/过期则重取（get_admin_token 为白名单接口，无需凭证）
+		if cached, _ := c.tokens.Get(adminUserID, pbconstant.AdminPlatformID); cached == "" {
+			adminResp, err := c.auth.GetAdminToken(ctx, c.cfg.AdminSecret, adminUserID)
+			if err != nil {
+				return nil, fmt.Errorf("admin bootstrap: %w", err)
+			}
+			_ = c.tokens.Set(adminUserID, pbconstant.AdminPlatformID, adminResp.Token, adminResp.ExpireTimeSeconds)
+		}
+		if setter, ok := c.http.(transport.CurrentUserSetter); ok {
+			setter.SetCurrentUser(adminUserID, pbconstant.AdminPlatformID)
+		}
+	}
+	// 内部 TokenStore.Set(userID, platformID) + Publish EventLoginSuccess
+	return c.auth.GetUserToken(ctx, userID, platformID)
+}
+
+// loginFlow token 就绪后的公共登录链路：HTTP 选路 → WS 参数 → 连接 → 同步 → 事件
+func (c *DefaultClient) loginFlow(ctx context.Context, userID string, platformID int32, token string) error {
+	// 1. HTTP 层 token 选路：TokenStore 按 (userID, platformID) 存取，
+	//    后续 HTTP 请求（实体同步等）按当前用户取 token
+	if setter, ok := c.http.(transport.CurrentUserSetter); ok {
+		setter.SetCurrentUser(userID, platformID)
+	}
 
 	// 2. 覆盖 WS 连接参数
 	c.params.UserID = userID
-	c.params.Token = tokenResp.Token
+	c.params.Token = token
 	c.params.PlatformID = convert.ToInt(platformID)
 	c.params.OperationID = uuidx.New()
 
@@ -271,12 +358,26 @@ func (c *DefaultClient) Logout(clearData bool) error {
 		_ = c.tokens.Delete(userID, platformID)
 	}
 
+	// 清除 HTTP 层当前用户（下次 Login 重新注入）
+	if setter, ok := c.http.(transport.CurrentUserSetter); ok {
+		setter.SetCurrentUser("", 0)
+	}
+
 	// 本地数据默认保留（owner 隔离，多账号共存）：下次登录游标增量同步，快速恢复。
 	// 仅调用方显式要求时清除（共享设备隐私、注销账号），代价是下次登录全量重拉
 	if clearData && c.storage != nil && userID != "" {
 		_ = c.storage.Clear(context.Background(), userID)
 	}
 
+	return nil
+}
+
+// Close 释放资源：断开 WS + 关闭底层存储（SQLite 句柄，Windows 下不关闭会锁文件）
+func (c *DefaultClient) Close() error {
+	_ = c.Disconnect()
+	if cl, ok := c.storage.(io.Closer); ok {
+		return cl.Close()
+	}
 	return nil
 }
 
@@ -351,9 +452,7 @@ func (c *DefaultClient) Subscribe(eventType events.EventType) (<-chan events.Eve
 
 // SubscribeAll 订阅全部事件（调试用）
 func (c *DefaultClient) SubscribeAll() (<-chan events.Event, eventbus.UnsubscribeFunc) {
-	// SubscribeAll 用一个特殊 key，所有 Publish 时也 publish 一份到这个 key
-	const allKey = "__all__"
-	rawCh, unsubscribe := c.bus.Subscribe(allKey)
+	rawCh, unsubscribe := c.bus.Subscribe(eventbus.AllKey)
 
 	typedCh := make(chan events.Event, cap(rawCh))
 	go func() {

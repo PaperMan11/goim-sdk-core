@@ -145,8 +145,16 @@ type GroupMemberRow struct {
 
 func (GroupMemberRow) TableName() string { return "group_members" }
 
+// SDKMetaRow SDK 级键值元数据（设备 ID 等，与 owner 无关）
+type SDKMetaRow struct {
+	Key   string `gorm:"primaryKey;column:key;size:128"`
+	Value string `gorm:"column:value;type:text"`
+}
+
+func (SDKMetaRow) TableName() string { return "sdk_meta" }
+
 // allModels AutoMigrate 用
 var allModels = []interface{}{
 	&LocalSeq{}, &Version{}, &MessageRow{}, &ConversationRow{},
-	&FriendRow{}, &BlackRow{}, &GroupRow{}, &GroupMemberRow{},
+	&FriendRow{}, &BlackRow{}, &GroupRow{}, &GroupMemberRow{}, &SDKMetaRow{},
 }

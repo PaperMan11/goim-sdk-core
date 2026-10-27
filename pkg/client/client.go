@@ -8,7 +8,7 @@
 //	系统事件   → Storage / SeqSync 内部 Publish             → Event{Type}
 //
 // 上层业务统一用 Subscribe / OnConnect / OnForceLogout 等 API 监听。
-// gomobile 封装层后续把 channel 桥接成原生回调（见 DEVELOPMENT.md Phase 5）。
+// gomobile 封装层后续把 channel 桥接成原生回调（见 docs/DEVELOPMENT.md Phase 5）。
 //
 // 完整实现见 client_impl.go。
 package client
@@ -23,19 +23,38 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
+	"github.com/PaperMan11/goim-sdk-core/version"
 )
+
+// Version 当前 SDK 版本，随 WS 握手 sdkVersion 上报。
+//
+// 权威定义在 version/VERSION（go:embed 注入，CI/发布脚本可直接读取）；
+// 编译期仍可用 ldflags 覆盖：
+//
+//	go build -ldflags "-X github.com/PaperMan11/goim-sdk-core/pkg/client.Version=x.y.z" ./...
+var Version = version.Version
 
 // Client SDK 统一入口接口
 type Client interface {
 	// —— 生命周期 ——
 	// Login 获取 User Token + 建立 WS 连接 + 触发 SeqSync
+	//
+	// 两种凭证模式（二选一）：
+	//   - 受信环境（服务端集成/运维工具）：配置 ClientConfig.AdminSecret，
+	//     Login 内部自动 admin bootstrap（GetAdminToken → GetUserToken）
+	//   - 终端模式：token 由宿主业务服务端下发，用 LoginWithToken 注入（SDK 不接触 secret）
 	Login(ctx context.Context, userID string, platformID int32) error
+	// LoginWithToken 使用宿主下发的 user token 登录（终端模式，SDK 不接触 secret）
+	LoginWithToken(ctx context.Context, userID string, platformID int32, token string, expireTimeSeconds int64) error
 	// Logout 登出：断开连接 + 清理 TokenStore
 	//
 	// clearData=false 时本地存储（消息/会话/好友/游标）保留，下次登录走游标增量，快速恢复；
 	// clearData=true 时额外清除该 owner 全部本地数据（共享设备隐私场景、账号注销），
 	// 下次登录将触发服务端 full=true 全量同步。
 	Logout(clearData bool) error
+	// Close 释放资源：断开 WS + 关闭底层存储（SessionDataPath 创建的 SQLite 句柄）。
+	// Logout 后（或宿主 App 退出前）调用；Close 后 client 不可再用
+	Close() error
 	// Connect 单独建立 WS 连接（Login 内部会调用，也可重连场景单独用）
 	Connect(ctx context.Context) error
 	// Disconnect 断开 WS 连接（不清理 TokenStore，Logout 内部会调用）
@@ -84,7 +103,7 @@ type Client interface {
 
 // ClientConfig Client 构造配置
 type ClientConfig struct {
-	// HTTP API 基础地址（如 https://api.goim.io/api/v1）
+	// HTTP API 基础地址（如 https://api.goim.io，不含 /api/v1 前缀，SDK 自动拼接）
 	BaseURL string
 	// 传输层连接目标（如 ws://api.goim.io:10001/ws 或 wss://...）
 	// 当前默认传输层是 WebSocket，scheme 为 ws/wss；未来 TCP 实现复用同一字段（tcp://host:port）。
@@ -93,8 +112,10 @@ type ClientConfig struct {
 
 	// 认证默认参数（WS Connect 用，Login 时 userID/token 会动态替换）
 	// DefaultPlatformID 仅在未 Login、直接 Connect 的场景作兜底；类型与 Login 的 platformID 对齐
-	DefaultPlatformID  int32
-	DefaultDeviceID    string
+	DefaultPlatformID int32
+	DefaultDeviceID   string
+	// DefaultSDKVersion 随 WS 握手上报的 SDK 版本号，空时使用 Version（编译期可用
+	// ldflags 覆盖：-ldflags "-X github.com/PaperMan11/goim-sdk-core/pkg/client.Version=x.y.z"）
 	DefaultSDKVersion  string
 	DefaultCompression string
 
@@ -111,4 +132,13 @@ type ClientConfig struct {
 	// 存储配置（二选一；都为空时用内存存储，重启后数据丢失）
 	Storage         storage.Storage // 直接注入（单测注入 MemoryStorage / :memory: SQLite）
 	SessionDataPath string          // SQLite 文件路径（Storage 为 nil 且非空时内部创建 SQLiteStorage，如 "sdk_data/data.db"）
+
+	// —— 凭证（受信环境模式，终端模式用 LoginWithToken）——
+	// AdminSecret 应用密钥：非空时 Login 自动 admin bootstrap。
+	// ⚠️ 仅限服务端/受信环境使用；终端 App 严禁内嵌 secret（应使用 LoginWithToken）
+	// ⚠️ 实测 goim 服务端 get_admin_token 不校验 secret（见 INTEGRATION_TEST_PLAN.md R9），
+	//    权限边界是 AdminUserID 是否在服务端管理员列表；secret 字段保留以兼容未来服务端恢复校验
+	AdminSecret string
+	// AdminUserID 管理员账号（默认 "imAdmin"，必须在服务端管理员列表内，否则 Login 失败）
+	AdminUserID string
 }

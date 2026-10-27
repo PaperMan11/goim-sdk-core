@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"sync"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
@@ -29,12 +30,22 @@ type HTTPClient interface {
 	Get(ctx context.Context, path string, query url.Values, resp interface{}) error
 }
 
+// CurrentUserSetter 可选扩展：设置当前用户，用于 TokenStore 选路
+// （TokenStore 按 (userID, platformID) 存储 token，HTTP 层需要知道当前用户才能取到）
+type CurrentUserSetter interface {
+	SetCurrentUser(userID string, platformID int32)
+}
+
 // DefaultHTTPClient 默认 HTTPClient 实现
 type DefaultHTTPClient struct {
 	baseURL    string
 	httpClient *http.Client
 	tokenStore TokenStore
 	logger     logger.Logger
+
+	mu        sync.Mutex
+	curUser   string // 当前用户（Login 后设置），token 按 (curUser, curPlatform) 选取
+	curPlatID int32
 }
 
 // NewHTTPClient 创建 DefaultHTTPClient
@@ -66,6 +77,21 @@ type postResp struct {
 	Code int32           `json:"code"`
 	Msg  string          `json:"msg"`
 	Data json.RawMessage `json:"data"`
+}
+
+// SetCurrentUser 设置当前用户（TokenStore 选路用）；Logout 时传空清除
+func (c *DefaultHTTPClient) SetCurrentUser(userID string, platformID int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.curUser = userID
+	c.curPlatID = platformID
+}
+
+// currentUser 返回当前 (userID, platformID)
+func (c *DefaultHTTPClient) currentUser() (string, int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.curUser, c.curPlatID
 }
 
 // Post 发送 POST 请求
@@ -153,9 +179,9 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 		httpReq.Header.Set("operationID", operationID)
 
 		if c.tokenStore != nil {
-			// 从 store 中取一个 token，按约定使用固定的 userID/platformID
-			// 实际多用户场景下应由上层持有 tokenStore 实例并自行选路
-			token, _ := c.tokenStore.Get("", 0)
+			// 按 SetCurrentUser 设置的当前用户选取 token（TokenStore 以 (userID, platformID) 为键）
+			userID, platformID := c.currentUser()
+			token, _ := c.tokenStore.Get(userID, platformID)
 			if token != "" {
 				httpReq.Header.Set("token", token)
 			}
@@ -206,11 +232,12 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 		// Token 过期/未生效 → 刷新并返回让上层重试一次
 		if parsed.Code == model.ErrCodeTokenExpiredError || parsed.Code == model.ErrCodeTokenNotValidYetError {
 			if c.tokenStore != nil {
-				// 尝试刷新（TokenStore.Refresh 需要 userID/platformID，
-				// 这里空参数会返回 error，实际由上层持有具体 store 处理）
-				if _, rerr := c.tokenStore.Refresh(ctx, "", 0); rerr == nil {
-					// 刷新成功，返回特殊错误让 Post 外层重试
-					return model.NewSDKError(parsed.Code, parsed.Msg)
+				userID, platformID := c.currentUser()
+				if userID != "" {
+					// 刷新成功后 token 已写回 store，返回错误让外层重试一次
+					if _, rerr := c.tokenStore.Refresh(ctx, userID, platformID); rerr == nil {
+						return model.NewSDKError(parsed.Code, parsed.Msg)
+					}
 				}
 			}
 			return model.NewSDKError(parsed.Code, parsed.Msg)
@@ -251,7 +278,8 @@ func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Va
 		}
 		httpReq.Header.Set("operationID", operationID)
 		if c.tokenStore != nil {
-			token, _ := c.tokenStore.Get("", 0)
+			userID, platformID := c.currentUser()
+			token, _ := c.tokenStore.Get(userID, platformID)
 			if token != "" {
 				httpReq.Header.Set("token", token)
 			}

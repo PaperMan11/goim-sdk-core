@@ -564,12 +564,38 @@ func (s *SQLiteStorage) ListGroupMemberIDs(owner, groupID string) ([]string, err
 func (s *SQLiteStorage) Clear(_ context.Context, owner string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		for _, m := range allModels {
+			// sdk_meta 为 SDK 级数据（设备 ID 等），无 owner 列且需跨 Logout 保留
+			if _, isMeta := m.(*SDKMetaRow); isMeta {
+				continue
+			}
 			if err := tx.Where("owner_user_id = ?", owner).Delete(m).Error; err != nil {
 				return fmt.Errorf("storage: clear %T: %w", m, err)
 			}
 		}
 		return nil
 	})
+}
+
+// === SDK 级元数据 ===
+
+func (s *SQLiteStorage) GetMeta(key string) (string, error) {
+	var row SDKMetaRow
+	err := s.db.Where("`key` = ?", key).First(&row).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return "", nil
+		}
+		return "", fmt.Errorf("storage: get meta %s: %w", key, err)
+	}
+	return row.Value, nil
+}
+
+func (s *SQLiteStorage) SetMeta(key, value string) error {
+	row := SDKMetaRow{Key: key, Value: value}
+	if err := s.db.Save(&row).Error; err != nil {
+		return fmt.Errorf("storage: set meta %s: %w", key, err)
+	}
+	return nil
 }
 
 // === JSON helpers ===
