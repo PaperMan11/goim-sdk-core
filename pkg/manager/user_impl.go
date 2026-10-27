@@ -70,11 +70,13 @@ func (m *DefaultUserMgr) GetUsersInfo(ctx context.Context, userIDs []string) ([]
 	req := struct {
 		UserIDs []string `json:"userIDs"`
 	}{UserIDs: userIDs}
-	var resp []*model.UserInfo
+	var resp struct {
+		UsersInfo []*model.UserInfo `json:"usersInfo"`
+	}
 	if err := m.http.Post(ctx, "/user/get_users_info", req, &resp); err != nil {
 		return nil, fmt.Errorf("get users info: %w", err)
 	}
-	return resp, nil
+	return resp.UsersInfo, nil
 }
 
 func (m *DefaultUserMgr) GetAllUsersUID(ctx context.Context, pagination *model.RequestPagination) (int32, []string, error) {
@@ -95,11 +97,13 @@ func (m *DefaultUserMgr) AccountCheck(ctx context.Context, checkUserIDs []string
 	req := struct {
 		CheckUserIDs []string `json:"checkUserIDs"`
 	}{CheckUserIDs: checkUserIDs}
-	var resp []*model.AccountStatus
+	var resp struct {
+		Results []*model.AccountStatus `json:"results"`
+	}
 	if err := m.http.Post(ctx, "/user/account_check", req, &resp); err != nil {
 		return nil, fmt.Errorf("account check: %w", err)
 	}
-	return resp, nil
+	return resp.Results, nil
 }
 
 func (m *DefaultUserMgr) GetUsers(ctx context.Context, pagination *model.RequestPagination, userID, nickName string) (int32, []*model.UserInfo, error) {
@@ -123,11 +127,13 @@ func (m *DefaultUserMgr) GetUsersOnlineStatus(ctx context.Context, userID string
 		UserID  string   `json:"userID"`
 		UserIDs []string `json:"userIDs"`
 	}{UserID: userID, UserIDs: userIDs}
-	var resp []*model.OnlineStatus
+	var resp struct {
+		SuccessResult []*model.OnlineStatus `json:"successResult"`
+	}
 	if err := m.http.Post(ctx, "/user/get_users_online_status", req, &resp); err != nil {
 		return nil, fmt.Errorf("get users online status: %w", err)
 	}
-	return resp, nil
+	return resp.SuccessResult, nil
 }
 
 func (m *DefaultUserMgr) SubscribeUsersStatus(ctx context.Context, userID string, userIDs []string, genre int32) ([]*model.OnlineStatus, error) {
@@ -136,22 +142,26 @@ func (m *DefaultUserMgr) SubscribeUsersStatus(ctx context.Context, userID string
 		UserIDs []string `json:"userIDs"`
 		Genre   int32    `json:"genre"`
 	}{UserID: userID, UserIDs: userIDs, Genre: genre}
-	var resp []*model.OnlineStatus
+	var resp struct {
+		StatusList []*model.OnlineStatus `json:"statusList"`
+	}
 	if err := m.http.Post(ctx, "/user/subscribe_users_status", req, &resp); err != nil {
 		return nil, fmt.Errorf("subscribe users status: %w", err)
 	}
-	return resp, nil
+	return resp.StatusList, nil
 }
 
 func (m *DefaultUserMgr) GetSubscribeUsersStatus(ctx context.Context, userID string) ([]*model.OnlineStatus, error) {
 	req := struct {
 		UserID string `json:"userID"`
 	}{UserID: userID}
-	var resp []*model.OnlineStatus
+	var resp struct {
+		StatusList []*model.OnlineStatus `json:"statusList"`
+	}
 	if err := m.http.Post(ctx, "/user/get_subscribe_users_status", req, &resp); err != nil {
 		return nil, fmt.Errorf("get subscribe users status: %w", err)
 	}
-	return resp, nil
+	return resp.StatusList, nil
 }
 
 func (m *DefaultUserMgr) GetUserClientConfig(ctx context.Context, userID string) (map[string]string, error) {

@@ -117,7 +117,7 @@ func (m *mockRelSource) GetIncrementalBlacks(ctx context.Context, userID, versio
 	return m.incBlacks, nil
 }
 
-func (m *mockRelSource) GetFullFriendUserIDs(ctx context.Context, idHash uint64) (*model.FullFriendIDs, error) {
+func (m *mockRelSource) GetFullFriendUserIDs(ctx context.Context, userID string, idHash uint64) (*model.FullFriendIDs, error) {
 	m.fullFriendsCalled = true
 	m.fullFriendsIDHash = append(m.fullFriendsIDHash, idHash)
 	return m.fullFriends, nil
@@ -176,12 +176,12 @@ func (m *mockGroupSource) GetFullGroupMemberUserIDs(ctx context.Context, groupID
 	return &model.FullMemberIDs{VersionID: "fmv0", Version: 1, Equal: true}, nil
 }
 
-func (m *mockGroupSource) GetFullJoinGroupIDs(ctx context.Context, idHash uint64) (*model.FullGroupIDs, error) {
+func (m *mockGroupSource) GetFullJoinGroupIDs(ctx context.Context, userID string, idHash uint64) (*model.FullGroupIDs, error) {
 	m.fullJoinIDHash = append(m.fullJoinIDHash, idHash)
 	return m.fullJoin, nil
 }
 
-func (m *mockGroupSource) GetJoinedGroupList(ctx context.Context, pagination *model.RequestPagination) (int32, []*model.GroupInfo, error) {
+func (m *mockGroupSource) GetJoinedGroupList(ctx context.Context, userID string, pagination *model.RequestPagination) (int32, []*model.GroupInfo, error) {
 	return int32(len(m.joinedList)), pageSlice(m.joinedList, int(pagination.PageNumber), int(pagination.ShowNumber)), nil
 }
 
@@ -197,15 +197,15 @@ type mockConvSource struct {
 	allConvs []*model.Conversation
 }
 
-func (m *mockConvSource) GetIncrementalConversations(ctx context.Context, versionID string, version uint64) (*model.IncrementalConversations, error) {
+func (m *mockConvSource) GetIncrementalConversations(ctx context.Context, userID string, versionID string, version uint64) (*model.IncrementalConversations, error) {
 	return m.incConvs, nil
 }
 
-func (m *mockConvSource) GetFullConversationIDs(ctx context.Context, idHash uint64) (*model.FullConversationIDs, error) {
+func (m *mockConvSource) GetFullConversationIDs(ctx context.Context, userID string, idHash uint64) (*model.FullConversationIDs, error) {
 	return m.fullConv, nil
 }
 
-func (m *mockConvSource) GetAllConversations(ctx context.Context) ([]*model.Conversation, error) {
+func (m *mockConvSource) GetAllConversations(ctx context.Context, ownerUserID string) ([]*model.Conversation, error) {
 	return m.allConvs, nil
 }
 

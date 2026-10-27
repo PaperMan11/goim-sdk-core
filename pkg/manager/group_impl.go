@@ -125,11 +125,14 @@ func (m *DefaultGroupMgr) GetGroupsInfo(ctx context.Context, groupIDs []string) 
 	req := struct {
 		GroupIDs []string `json:"groupIDs"`
 	}{GroupIDs: groupIDs}
-	var resp []*model.GroupInfo
+
+	var resp struct {
+		GroupInfos []*model.GroupInfo `json:"groupInfos"`
+	}
 	if err := m.http.Post(ctx, "/group/get_groups_info", req, &resp); err != nil {
 		return nil, fmt.Errorf("get groups info: %w", err)
 	}
-	return resp, nil
+	return resp.GroupInfos, nil
 }
 
 func (m *DefaultGroupMgr) KickGroup(ctx context.Context, groupID string, kickedUserIDs []string, reason string, sendMessage *bool) error {
@@ -150,11 +153,14 @@ func (m *DefaultGroupMgr) GetGroupMembersInfo(ctx context.Context, groupID strin
 		GroupID string   `json:"groupID"`
 		UserIDs []string `json:"userIDs"`
 	}{GroupID: groupID, UserIDs: userIDs}
-	var resp []*model.GroupMemberFullInfo
+
+	var resp struct {
+		Members []*model.GroupMemberFullInfo `json:"members"`
+	}
 	if err := m.http.Post(ctx, "/group/get_group_members_info", req, &resp); err != nil {
 		return nil, fmt.Errorf("get group members info: %w", err)
 	}
-	return resp, nil
+	return resp.Members, nil
 }
 
 func (m *DefaultGroupMgr) GetGroupMemberList(ctx context.Context, pagination *model.RequestPagination, groupID string, filter int32, keyword string) (uint32, []*model.GroupMemberFullInfo, error) {
@@ -193,10 +199,11 @@ func (m *DefaultGroupMgr) InviteUserToGroup(ctx context.Context, groupID, reason
 	return nil
 }
 
-func (m *DefaultGroupMgr) GetJoinedGroupList(ctx context.Context, pagination *model.RequestPagination) (int32, []*model.GroupInfo, error) {
+func (m *DefaultGroupMgr) GetJoinedGroupList(ctx context.Context, userID string, pagination *model.RequestPagination) (int32, []*model.GroupInfo, error) {
 	req := struct {
+		FromUserID string                   `json:"fromUserID"`
 		Pagination *model.RequestPagination `json:"pagination"`
-	}{Pagination: pagination}
+	}{FromUserID: userID, Pagination: pagination}
 	var resp struct {
 		Total  int32              `json:"total"`
 		Groups []*model.GroupInfo `json:"groups"`
@@ -276,11 +283,14 @@ func (m *DefaultGroupMgr) GetGroupAbstractInfo(ctx context.Context, groupIDs []s
 	req := struct {
 		GroupIDs []string `json:"groupIDs"`
 	}{GroupIDs: groupIDs}
-	var resp []*model.GroupAbstractInfo
+
+	var resp struct {
+		GroupAbstractInfos []*model.GroupAbstractInfo `json:"groupAbstractInfos"`
+	}
 	if err := m.http.Post(ctx, "/group/get_group_abstract_info", req, &resp); err != nil {
 		return nil, fmt.Errorf("get group abstract info: %w", err)
 	}
-	return resp, nil
+	return resp.GroupAbstractInfos, nil
 }
 
 func (m *DefaultGroupMgr) GetIncrementalJoinGroups(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalGroups, error) {
@@ -321,10 +331,11 @@ func (m *DefaultGroupMgr) GetFullGroupMemberUserIDs(ctx context.Context, groupID
 	return &resp, nil
 }
 
-func (m *DefaultGroupMgr) GetFullJoinGroupIDs(ctx context.Context, idHash uint64) (*model.FullGroupIDs, error) {
+func (m *DefaultGroupMgr) GetFullJoinGroupIDs(ctx context.Context, userID string, idHash uint64) (*model.FullGroupIDs, error) {
 	req := struct {
+		UserID string `json:"userID"`
 		IDHash uint64 `json:"idHash"`
-	}{IDHash: idHash}
+	}{UserID: userID, IDHash: idHash}
 	var resp model.FullGroupIDs
 	if err := m.http.Post(ctx, "/group/get_full_join_group_ids", req, &resp); err != nil {
 		return nil, fmt.Errorf("get full join group ids: %w", err)

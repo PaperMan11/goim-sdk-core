@@ -172,11 +172,13 @@ func (m *DefaultRelMgr) GetFriendIDs(ctx context.Context, userID string) ([]stri
 	req := struct {
 		UserID string `json:"userID"`
 	}{UserID: userID}
-	var resp []string
+	var resp struct {
+		FriendIDs []string `json:"friendIDs"`
+	}
 	if err := m.http.Post(ctx, "/relation/get_friend_id", req, &resp); err != nil {
 		return nil, fmt.Errorf("get friend ids: %w", err)
 	}
-	return resp, nil
+	return resp.FriendIDs, nil
 }
 
 func (m *DefaultRelMgr) GetIncrementalFriends(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalFriends, error) {
@@ -205,10 +207,11 @@ func (m *DefaultRelMgr) GetIncrementalBlacks(ctx context.Context, userID, versio
 	return &resp, nil
 }
 
-func (m *DefaultRelMgr) GetFullFriendUserIDs(ctx context.Context, idHash uint64) (*model.FullFriendIDs, error) {
+func (m *DefaultRelMgr) GetFullFriendUserIDs(ctx context.Context, userID string, idHash uint64) (*model.FullFriendIDs, error) {
 	req := struct {
+		UserID string `json:"userID"`
 		IDHash uint64 `json:"idHash"`
-	}{IDHash: idHash}
+	}{UserID: userID, IDHash: idHash}
 	var resp model.FullFriendIDs
 	if err := m.http.Post(ctx, "/relation/get_full_friend_user_ids", req, &resp); err != nil {
 		return nil, fmt.Errorf("get full friend user ids: %w", err)

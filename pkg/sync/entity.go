@@ -20,7 +20,7 @@ const fullPageSize = 500
 type RelSource interface {
 	GetIncrementalFriends(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalFriends, error)
 	GetIncrementalBlacks(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalBlacks, error)
-	GetFullFriendUserIDs(ctx context.Context, idHash uint64) (*model.FullFriendIDs, error)
+	GetFullFriendUserIDs(ctx context.Context, userID string, idHash uint64) (*model.FullFriendIDs, error)
 	GetFriendList(ctx context.Context, userID string, pagination *model.RequestPagination) (total int32, friends []*model.FriendInfo, err error)
 	GetBlackList(ctx context.Context, userID string, pagination *model.RequestPagination) (total int32, blacks []*model.BlackInfo, err error)
 }
@@ -30,16 +30,16 @@ type GroupSource interface {
 	GetIncrementalJoinGroups(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalGroups, error)
 	GetIncrementalGroupMembers(ctx context.Context, groupID, versionID string, version uint64) (*model.IncrementalMembers, error)
 	GetFullGroupMemberUserIDs(ctx context.Context, groupID string, idHash uint64) (*model.FullMemberIDs, error)
-	GetFullJoinGroupIDs(ctx context.Context, idHash uint64) (*model.FullGroupIDs, error)
-	GetJoinedGroupList(ctx context.Context, pagination *model.RequestPagination) (total int32, groups []*model.GroupInfo, err error)
+	GetFullJoinGroupIDs(ctx context.Context, userID string, idHash uint64) (*model.FullGroupIDs, error)
+	GetJoinedGroupList(ctx context.Context, userID string, pagination *model.RequestPagination) (total int32, groups []*model.GroupInfo, err error)
 	GetGroupMemberList(ctx context.Context, pagination *model.RequestPagination, groupID string, filter int32, keyword string) (total uint32, members []*model.GroupMemberFullInfo, err error)
 }
 
 // ConvSource 会话同步最小依赖（manager.ConvMgr 子集）
 type ConvSource interface {
-	GetIncrementalConversations(ctx context.Context, versionID string, version uint64) (*model.IncrementalConversations, error)
-	GetFullConversationIDs(ctx context.Context, idHash uint64) (*model.FullConversationIDs, error)
-	GetAllConversations(ctx context.Context) ([]*model.Conversation, error)
+	GetIncrementalConversations(ctx context.Context, userID string, versionID string, version uint64) (*model.IncrementalConversations, error)
+	GetFullConversationIDs(ctx context.Context, userID string, idHash uint64) (*model.FullConversationIDs, error)
+	GetAllConversations(ctx context.Context, ownerUserID string) ([]*model.Conversation, error)
 }
 
 // EntitySyncEngine 五类实体同步引擎
@@ -155,6 +155,7 @@ type fullSyncSpec[ITEM any] struct {
 func runIncSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s incSyncSpec[ITEM], f fullSyncSpec[ITEM]) error {
 	vID, ver, err := e.stor.GetVersion(e.owner, s.key)
 	if err != nil {
+		e.logger.Errorf("runIncSync get version: %w", err)
 		return err
 	}
 	meta, ch, err := s.fetchInc(ctx, vID, ver)
@@ -165,22 +166,27 @@ func runIncSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s incSyncSpe
 		return runFullSync(e, ctx, f, meta)
 	}
 	if err := s.upsert(e.owner, ch.insert); err != nil {
+		e.logger.Errorf("runIncSync upsert insert: %w", err)
 		return err
 	}
 	if err := s.upsert(e.owner, ch.update); err != nil {
+		e.logger.Errorf("runIncSync upsert update: %w", err)
 		return err
 	}
 	if err := s.del(e.owner, ch.del); err != nil {
+		e.logger.Errorf("runIncSync del: %w", err)
 		return err
 	}
 	if s.afterSync != nil {
 		if err := s.afterSync(ctx, ch); err != nil {
+			e.logger.Errorf("runIncSync afterSync: %w", err)
 			return err
 		}
 	}
 	// 游标最后落盘（commit-last）：附加步骤（群成员同步）失败时游标不推进，
 	// 下次同步重拉同批增量重试，落库均幂等
 	if err := e.stor.SetVersion(e.owner, s.key, meta.versionID, meta.version); err != nil {
+		e.logger.Errorf("runIncSync set version: %w", err)
 		return err
 	}
 	e.publish(s.event, meta.payload)
@@ -201,18 +207,21 @@ func runIncSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s incSyncSpe
 func runFullSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s fullSyncSpec[ITEM], inc incMeta) error {
 	localIDs, err := s.listLocalIDs()
 	if err != nil {
+		e.logger.Errorf("runFullSync listLocalIDs: %w", err)
 		return err
 	}
 	meta := fullMeta{versionID: inc.versionID, version: inc.version}
 	if s.verify != nil {
 		meta, err = s.verify(ctx, hash.HashStringSet(localIDs))
 		if err != nil {
+			e.logger.Errorf("runFullSync verify: %w", err)
 			return err
 		}
 	}
 	if meta.equal {
 		// 本地 ID 集合与服务端一致：内容可信（历史增量已应用），仅对齐游标
 		if err := e.stor.SetVersion(e.owner, s.key, meta.versionID, meta.version); err != nil {
+			e.logger.Errorf("runFullSync set version: %w", err)
 			return err
 		}
 		e.publish(s.event, inc.payload)
@@ -220,21 +229,26 @@ func runFullSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s fullSyncS
 	}
 	all, err := s.fetchAll(ctx)
 	if err != nil {
+		e.logger.Errorf("runFullSync fetchAll: %w", err)
 		return err
 	}
 	if err := s.clear(localIDs); err != nil {
+		e.logger.Errorf("runFullSync clear: %w", err)
 		return err
 	}
 	if err := s.upsert(e.owner, all); err != nil {
+		e.logger.Errorf("runFullSync upsert: %w", err)
 		return err
 	}
 	if s.afterFull != nil {
 		if err := s.afterFull(ctx); err != nil {
+			e.logger.Errorf("runFullSync afterFull: %w", err)
 			return err
 		}
 	}
 	// 游标最后落盘（commit-last）：附加步骤失败时游标不推进，下次同步重新走全量流程
 	if err := e.stor.SetVersion(e.owner, s.key, meta.versionID, meta.version); err != nil {
+		e.logger.Errorf("runFullSync set version: %w", err)
 		return err
 	}
 	e.publish(s.event, inc.payload)
@@ -283,7 +297,7 @@ func (e *EntitySyncEngine) SyncFriends(ctx context.Context) error {
 				return e.stor.ListFriendIDs(e.owner)
 			},
 			verify: func(ctx context.Context, localHash uint64) (fullMeta, error) {
-				full, err := e.rel.GetFullFriendUserIDs(ctx, localHash)
+				full, err := e.rel.GetFullFriendUserIDs(ctx, e.owner, localHash)
 				if err != nil {
 					return fullMeta{}, err
 				}
@@ -403,7 +417,7 @@ func (e *EntitySyncEngine) SyncGroups(ctx context.Context) error {
 				return e.stor.ListGroupIDs(e.owner)
 			},
 			verify: func(ctx context.Context, localHash uint64) (fullMeta, error) {
-				full, err := e.group.GetFullJoinGroupIDs(ctx, localHash)
+				full, err := e.group.GetFullJoinGroupIDs(ctx, e.owner, localHash)
 				if err != nil {
 					return fullMeta{}, err
 				}
@@ -414,7 +428,7 @@ func (e *EntitySyncEngine) SyncGroups(ctx context.Context) error {
 			},
 			fetchAll: func(ctx context.Context) ([]*model.GroupInfo, error) {
 				err := e.pageFetch(ctx, func(p *model.RequestPagination) (int32, int, error) {
-					total, groups, err := e.group.GetJoinedGroupList(ctx, p)
+					total, groups, err := e.group.GetJoinedGroupList(ctx, e.owner, p)
 					if err != nil {
 						return 0, 0, err
 					}
@@ -534,7 +548,7 @@ func (e *EntitySyncEngine) SyncConversations(ctx context.Context) error {
 			key:   storage.EntityConversations,
 			event: events.EventConversationSynced,
 			fetchInc: func(ctx context.Context, vID string, ver uint64) (incMeta, incChanges[model.Conversation], error) {
-				inc, err := e.conv.GetIncrementalConversations(ctx, vID, ver)
+				inc, err := e.conv.GetIncrementalConversations(ctx, e.owner, vID, ver)
 				if err != nil {
 					return incMeta{}, incChanges[model.Conversation]{}, err
 				}
@@ -553,7 +567,7 @@ func (e *EntitySyncEngine) SyncConversations(ctx context.Context) error {
 				return e.stor.ListConversationIDs(e.owner)
 			},
 			verify: func(ctx context.Context, localHash uint64) (fullMeta, error) {
-				full, err := e.conv.GetFullConversationIDs(ctx, localHash)
+				full, err := e.conv.GetFullConversationIDs(ctx, e.owner, localHash)
 				if err != nil {
 					return fullMeta{}, err
 				}
@@ -563,7 +577,7 @@ func (e *EntitySyncEngine) SyncConversations(ctx context.Context) error {
 				return e.stor.DeleteConversations(e.owner, localIDs)
 			},
 			fetchAll: func(ctx context.Context) ([]*model.Conversation, error) {
-				return e.conv.GetAllConversations(ctx)
+				return e.conv.GetAllConversations(ctx, e.owner)
 			},
 			upsert: e.stor.UpsertConversations,
 		})

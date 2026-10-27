@@ -15,10 +15,10 @@ type ConvMgr interface {
 	GetSortedConversationList(ctx context.Context, userID string, conversationIDs []string, pagination *model.RequestPagination) (*model.SortedConversationList, error)
 	GetConversation(ctx context.Context, conversationID string) (*model.Conversation, error)
 	GetConversations(ctx context.Context, conversationIDs []string) ([]*model.Conversation, error)
-	GetAllConversations(ctx context.Context) ([]*model.Conversation, error)
+	GetAllConversations(ctx context.Context, ownerUserID string) ([]*model.Conversation, error)
 	SetConversations(ctx context.Context, userIDs []string, conversationReq *model.ConversationReq) error
-	GetFullConversationIDs(ctx context.Context, idHash uint64) (*model.FullConversationIDs, error)
-	GetIncrementalConversations(ctx context.Context, versionID string, version uint64) (*model.IncrementalConversations, error)
+	GetFullConversationIDs(ctx context.Context, userID string, idHash uint64) (*model.FullConversationIDs, error)
+	GetIncrementalConversations(ctx context.Context, userID string, versionID string, version uint64) (*model.IncrementalConversations, error)
 	DeleteConversations(ctx context.Context, needDeleteTime int64, conversationIDs []string) error
 	UpdateConversationsByUser(ctx context.Context, userID string, ex string) error
 }

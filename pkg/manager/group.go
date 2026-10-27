@@ -25,7 +25,7 @@ type GroupMgr interface {
 	GetGroupMembersInfo(ctx context.Context, groupID string, userIDs []string) ([]*model.GroupMemberFullInfo, error)
 	GetGroupMemberList(ctx context.Context, pagination *model.RequestPagination, groupID string, filter int32, keyword string) (total uint32, members []*model.GroupMemberFullInfo, err error)
 	InviteUserToGroup(ctx context.Context, groupID, reason string, invitedUserIDs []string, sendMessage *bool) error
-	GetJoinedGroupList(ctx context.Context, pagination *model.RequestPagination) (total int32, groups []*model.GroupInfo, err error)
+	GetJoinedGroupList(ctx context.Context, userID string, pagination *model.RequestPagination) (total int32, groups []*model.GroupInfo, err error)
 	DismissGroup(ctx context.Context, groupID string, deleteMember bool, sendMessage *bool) error
 	MuteGroupMember(ctx context.Context, groupID, userID string, mutedSeconds uint32) error
 	MuteGroup(ctx context.Context, groupID string) error
@@ -37,5 +37,5 @@ type GroupMgr interface {
 	GetIncrementalGroupMembers(ctx context.Context, groupID, versionID string, version uint64) (*model.IncrementalMembers, error)
 	GetFullGroupMemberUserIDs(ctx context.Context, groupID string, idHash uint64) (*model.FullMemberIDs, error)
 	// GetFullJoinGroupIDs 加入群 ID 全量校验（增量 full=true 回退时调用）
-	GetFullJoinGroupIDs(ctx context.Context, idHash uint64) (*model.FullGroupIDs, error)
+	GetFullJoinGroupIDs(ctx context.Context, userID string, idHash uint64) (*model.FullGroupIDs, error)
 }

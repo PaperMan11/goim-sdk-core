@@ -52,19 +52,28 @@ func (m *DefaultConvMgr) GetConversations(ctx context.Context, conversationIDs [
 	req := struct {
 		ConversationIDs []string `json:"conversationIDs"`
 	}{ConversationIDs: conversationIDs}
-	var resp []*model.Conversation
+
+	var resp struct {
+		Conversations []*model.Conversation `json:"conversations"`
+	}
 	if err := m.http.Post(ctx, "/conversation/get_conversations", req, &resp); err != nil {
 		return nil, fmt.Errorf("get conversations: %w", err)
 	}
-	return resp, nil
+	return resp.Conversations, nil
 }
 
-func (m *DefaultConvMgr) GetAllConversations(ctx context.Context) ([]*model.Conversation, error) {
-	var resp []*model.Conversation
-	if err := m.http.Post(ctx, "/conversation/get_all_conversations", struct{}{}, &resp); err != nil {
+func (m *DefaultConvMgr) GetAllConversations(ctx context.Context, ownerUserID string) ([]*model.Conversation, error) {
+	req := struct {
+		OwnerUserID string `json:"ownerUserID"`
+	}{OwnerUserID: ownerUserID}
+
+	var resp struct {
+		Conversations []*model.Conversation `json:"conversations"`
+	}
+	if err := m.http.Post(ctx, "/conversation/get_all_conversations", req, &resp); err != nil {
 		return nil, fmt.Errorf("get all conversations: %w", err)
 	}
-	return resp, nil
+	return resp.Conversations, nil
 }
 
 func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string, conversationReq *model.ConversationReq) error {
@@ -84,10 +93,11 @@ func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string,
 	return nil
 }
 
-func (m *DefaultConvMgr) GetFullConversationIDs(ctx context.Context, idHash uint64) (*model.FullConversationIDs, error) {
+func (m *DefaultConvMgr) GetFullConversationIDs(ctx context.Context, userID string, idHash uint64) (*model.FullConversationIDs, error) {
 	req := struct {
+		UserID string `json:"userID"`
 		IDHash uint64 `json:"idHash"`
-	}{IDHash: idHash}
+	}{UserID: userID, IDHash: idHash}
 	var resp model.FullConversationIDs
 	if err := m.http.Post(ctx, "/conversation/get_full_conversation_ids", req, &resp); err != nil {
 		return nil, fmt.Errorf("get full conversation ids: %w", err)
@@ -95,11 +105,12 @@ func (m *DefaultConvMgr) GetFullConversationIDs(ctx context.Context, idHash uint
 	return &resp, nil
 }
 
-func (m *DefaultConvMgr) GetIncrementalConversations(ctx context.Context, versionID string, version uint64) (*model.IncrementalConversations, error) {
+func (m *DefaultConvMgr) GetIncrementalConversations(ctx context.Context, userID string, versionID string, version uint64) (*model.IncrementalConversations, error) {
 	req := struct {
+		UserID    string `json:"userID"`
 		VersionID string `json:"versionID"`
 		Version   uint64 `json:"version"`
-	}{VersionID: versionID, Version: version}
+	}{UserID: userID, VersionID: versionID, Version: version}
 	var resp model.IncrementalConversations
 	if err := m.http.Post(ctx, "/conversation/get_incremental_conversations", req, &resp); err != nil {
 		return nil, fmt.Errorf("get incremental conversations: %w", err)
