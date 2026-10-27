@@ -2,9 +2,97 @@ package logger
 
 import (
 	"context"
+	"strings"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+// New 根据配置创建 Logger（zap 实现）
+//
+// 规则：
+//   - cfg 为 nil 或 Disable=true → NopLogger（静默）
+//   - Level 非法/为空 → info；Format 非法/为空 → console
+//   - OutputPaths 为空 → stdout；路径不可用（如目录不存在）时降级 stdout
+func New(cfg *Config) Logger {
+	if cfg == nil || cfg.Disable {
+		return &NopLogger{}
+	}
+
+	paths := cfg.OutputPaths
+	if len(paths) == 0 {
+		paths = []string{"stdout"}
+	}
+
+	zcfg := zap.Config{
+		Level:            zap.NewAtomicLevelAt(parseLevel(cfg.Level)),
+		Development:      cfg.Development,
+		Encoding:         normalizeFormat(cfg.Format),
+		EncoderConfig:    encoderConfig(cfg.Format, isTerminal(paths)),
+		OutputPaths:      paths,
+		ErrorOutputPaths: []string{"stderr"},
+	}
+
+	z, err := zcfg.Build()
+	if err != nil {
+		// 输出目标不可用 → 降级 stdout
+		zcfg.OutputPaths = []string{"stdout"}
+		if z, err = zcfg.Build(); err != nil {
+			return &NopLogger{}
+		}
+	}
+	return &ZapLogger{sugar: z.Sugar()}
+}
+
+// parseLevel 解析日志级别，非法/为空 → info
+func parseLevel(s string) zapcore.Level {
+	var level zapcore.Level
+	if err := level.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
+		return zapcore.InfoLevel
+	}
+	return level
+}
+
+// normalizeFormat 归一化输出格式，非法/为空 → console
+func normalizeFormat(s string) string {
+	if strings.EqualFold(strings.TrimSpace(s), FormatJSON) {
+		return FormatJSON
+	}
+	return FormatConsole
+}
+
+// isTerminal 是否输出到终端（console 格式且输出终端时级别用彩色）
+func isTerminal(paths []string) bool {
+	for _, p := range paths {
+		if p == "stdout" || p == "stderr" {
+			return true
+		}
+	}
+	return false
+}
+
+func encoderConfig(format string, color bool) zapcore.EncoderConfig {
+	encCfg := zapcore.EncoderConfig{
+		TimeKey:        "ts",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.CapitalLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+	}
+	if format == FormatJSON {
+		return encCfg
+	}
+	if color {
+		encCfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	}
+	return encCfg
+}
 
 // ZapLogger Logger 接口的 zap 适配器（printf 风格，底层用 SugaredLogger）
 type ZapLogger struct {

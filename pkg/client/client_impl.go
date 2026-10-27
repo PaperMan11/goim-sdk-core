@@ -69,7 +69,11 @@ func NewClient(cfg *ClientConfig) Client {
 	}
 
 	// 1. 依赖构建
-	l := &logger.NopLogger{} // TODO: 从 cfg 注入，默认 nop；Phase 4 完可以用 zap 替换
+	// Logger 注入优先（测试/宿主 App 日志）；否则按 Logging 配置构建 zap；都为空 → NopLogger 静默
+	l := cfg.Logger
+	if l == nil {
+		l = logger.New(cfg.Logging)
+	}
 	bus := eventbus.New(eventbus.WithLogger(l))
 	tokens := transport.NewTokenStore(nil)
 

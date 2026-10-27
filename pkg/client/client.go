@@ -17,6 +17,7 @@ import (
 	"context"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
+	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
@@ -100,6 +101,12 @@ type ClientConfig struct {
 	// 依赖注入（可用于单元测试 mock；nil 时 DefaultClient 内部构造）
 	HTTP      transport.HTTPClient
 	Transport transport.MessageTransport
+
+	// 日志（三选一优先级：Logger 注入 > Logging 配置构建 zap > NopLogger 静默）
+	// Logger 直接注入完整实现（测试传 NopLogger / 复用宿主 App 日志）
+	Logger logger.Logger
+	// Logging 按配置内部构建 zap Logger（Logger 为 nil 时生效，nil 时保持静默）
+	Logging *logger.Config
 
 	// 存储配置（二选一；都为空时用内存存储，重启后数据丢失）
 	Storage         storage.Storage // 直接注入（单测注入 MemoryStorage / :memory: SQLite）
