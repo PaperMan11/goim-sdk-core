@@ -38,6 +38,29 @@ func TestSubscribePublishReceive(t *testing.T) {
 	}
 }
 
+// TestSubscribeAllWildcard 通配订阅者能收到所有 key 的事件（client.SubscribeAll 依赖）
+func TestSubscribeAllWildcard(t *testing.T) {
+	bus := New()
+	defer bus.Close()
+
+	allCh, unsubAll := bus.Subscribe(AllKey)
+	defer unsubAll()
+	aCh, unsubA := bus.Subscribe("a")
+	defer unsubA()
+
+	bus.Publish("a", 1)
+	bus.Publish("b", 2)
+	bus.Publish(AllKey, 3) // key 本身是 AllKey 时不能对通配订阅者重复派发
+
+	gotAll := collect(allCh)
+	if len(gotAll) != 3 {
+		t.Fatalf("wildcard got %d events, want 3", len(gotAll))
+	}
+	if got := collect(aCh); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("key subscriber got %v, want [1]", got)
+	}
+}
+
 func TestSubscribeIsolation(t *testing.T) {
 	bus := New()
 	defer bus.Close()

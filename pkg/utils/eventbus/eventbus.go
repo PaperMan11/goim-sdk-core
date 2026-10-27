@@ -22,6 +22,10 @@ import "sync"
 
 const defaultBufferSize = 64
 
+// AllKey 通配订阅 key：Subscribe(AllKey) 可收到所有 Publish 的事件
+// （Publish 时除派发给精确 key 订阅者外，会额外派发给 AllKey 订阅者）
+const AllKey = "__all__"
+
 // UnsubscribeFunc 取消订阅函数
 type UnsubscribeFunc func()
 
@@ -110,10 +114,14 @@ func (b *EventBus) Subscribe(key interface{}) (<-chan interface{}, UnsubscribeFu
 // Publish 不会阻塞调用方。
 func (b *EventBus) Publish(key interface{}, payload interface{}) {
 	b.mu.RLock()
-	subs := b.subscribers[key]
-	// 复制一份 slice，避免 dispatch 期间 map / slice 被修改
-	targets := make([]chan interface{}, len(subs))
-	copy(targets, subs)
+	// 显式拷贝（不能 append 到 map 持有的 slice，并发 Publish 会写同一底层数组）
+	allSubs := b.subscribers[AllKey]
+	targets := make([]chan interface{}, 0, len(b.subscribers[key])+len(allSubs))
+	targets = append(targets, b.subscribers[key]...)
+	// 合并通配订阅者（key 自身是 AllKey 时不能重复派发）
+	if key != AllKey {
+		targets = append(targets, allSubs...)
+	}
 	b.mu.RUnlock()
 
 	for _, ch := range targets {
