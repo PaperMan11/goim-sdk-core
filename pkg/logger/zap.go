@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	"go.uber.org/zap"
@@ -14,6 +15,8 @@ import (
 //   - cfg 为 nil 或 Disable=true → NopLogger（静默）
 //   - Level 非法/为空 → info；Format 非法/为空 → console
 //   - OutputPaths 为空 → stdout；路径不可用（如目录不存在）时降级 stdout
+//
+// 输出到文件时调用方需在退出前调用 Close()（*ZapLogger）释放句柄。
 func New(cfg *Config) Logger {
 	if cfg == nil || cfg.Disable {
 		return &NopLogger{}
@@ -24,24 +27,38 @@ func New(cfg *Config) Logger {
 		paths = []string{"stdout"}
 	}
 
-	zcfg := zap.Config{
-		Level:            zap.NewAtomicLevelAt(parseLevel(cfg.Level)),
-		Development:      cfg.Development,
-		Encoding:         normalizeFormat(cfg.Format),
-		EncoderConfig:    encoderConfig(cfg.Format, isTerminal(paths)),
-		OutputPaths:      paths,
-		ErrorOutputPaths: []string{"stderr"},
-	}
-
-	z, err := zcfg.Build()
+	// 输出目标不可用（如目录不存在）→ 降级 stdout
+	sink, closeFn, err := zap.Open(paths...)
 	if err != nil {
-		// 输出目标不可用 → 降级 stdout
-		zcfg.OutputPaths = []string{"stdout"}
-		if z, err = zcfg.Build(); err != nil {
+		sink, closeFn, err = zap.Open("stdout")
+		if err != nil {
 			return &NopLogger{}
 		}
 	}
-	return &ZapLogger{sugar: z.Sugar()}
+
+	format := normalizeFormat(cfg.Format)
+	var enc zapcore.Encoder
+	if format == FormatJSON {
+		enc = zapcore.NewJSONEncoder(encoderConfig(format, false))
+	} else {
+		enc = zapcore.NewConsoleEncoder(encoderConfig(format, isTerminal(paths)))
+	}
+
+	stackLevel := zapcore.ErrorLevel
+	if cfg.Development {
+		stackLevel = zapcore.WarnLevel
+	}
+	opts := []zap.Option{
+		zap.AddCaller(),
+		zap.AddStacktrace(stackLevel),
+		zap.ErrorOutput(os.Stderr),
+	}
+	if cfg.Development {
+		opts = append(opts, zap.Development())
+	}
+
+	z := zap.New(zapcore.NewCore(enc, sink, parseLevel(cfg.Level)), opts...)
+	return &ZapLogger{sugar: z.Sugar(), close: closeFn}
 }
 
 // parseLevel 解析日志级别，非法/为空 → info
@@ -97,6 +114,18 @@ func encoderConfig(format string, color bool) zapcore.EncoderConfig {
 // ZapLogger Logger 接口的 zap 适配器（printf 风格，底层用 SugaredLogger）
 type ZapLogger struct {
 	sugar *zap.SugaredLogger
+	close func() // 资源释放函数（New 构建文件输出时非 nil，其余为 nil）
+}
+
+// Close 释放底层资源（文件句柄等）；复用 *zap.Logger 构造时退化为 Sync
+func (l *ZapLogger) Close() error {
+	if l.close != nil {
+		_ = l.sugar.Sync()
+		l.close()
+		l.close = nil
+		return nil
+	}
+	return l.sugar.Sync()
 }
 
 // NewZapLogger 从 *zap.Logger 构造适配器
@@ -110,7 +139,7 @@ func NewZapSugarLogger(sugar *zap.SugaredLogger) *ZapLogger {
 }
 
 func (l *ZapLogger) With(keyvals ...interface{}) Logger {
-	return &ZapLogger{sugar: l.sugar.With(keyvals...)}
+	return &ZapLogger{sugar: l.sugar.With(keyvals...), close: l.close}
 }
 
 func (l *ZapLogger) Debugf(format string, args ...interface{}) {
