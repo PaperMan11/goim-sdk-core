@@ -26,5 +26,7 @@ type RelMgr interface {
 	GetFriendIDs(ctx context.Context, userID string) ([]string, error)
 	GetIncrementalFriends(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalFriends, error)
 	GetIncrementalBlacks(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalBlacks, error)
+	// GetFullFriendUserIDs 好友 ID 全量校验（full=true 回退时调用；equal=true 表示本地 IDHash 一致无需重拉）
+	GetFullFriendUserIDs(ctx context.Context, idHash uint64) (*model.FullFriendIDs, error)
 	ImportFriend(ctx context.Context, ownerUserID string, friendUserIDs []string) error
 }

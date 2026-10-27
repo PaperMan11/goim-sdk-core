@@ -54,7 +54,12 @@ const (
 	EventTokenRefreshed // Token 刷新成功
 
 	// —— 同步引擎 ——
-	EventSeqSynced // 全量同步完成
+	EventSeqSynced            // 消息 Seq gap 拉取完成
+	EventFriendListSynced     // 好友列表本地缓存已更新（增量/全量同步完成，可刷新 UI）
+	EventBlackListSynced      // 黑名单本地缓存已更新
+	EventGroupListSynced      // 加入群列表本地缓存已更新
+	EventGroupMemberSynced    // 群成员本地缓存已更新（Payload: *model.IncrementalMembers 携带 GroupID）
+	EventConversationSynced   // 会话列表本地缓存已更新
 
 	// —— Manager 操作结果 ——
 	EventMsgSent             // 消息发送成功

@@ -65,7 +65,7 @@ func (m *DefaultRelMgr) GetFriendList(ctx context.Context, userID string, pagina
 		Pagination *model.RequestPagination `json:"pagination"`
 	}{UserID: userID, Pagination: pagination}
 	var resp struct {
-		Total   int32             `json:"total"`
+		Total   int32               `json:"total"`
 		Friends []*model.FriendInfo `json:"friends"`
 	}
 	if err := m.http.Post(ctx, "/relation/get_friend_list", req, &resp); err != nil {
@@ -81,8 +81,8 @@ func (m *DefaultRelMgr) GetFriendApplyList(ctx context.Context, userID string, p
 		HandleResults []int32                  `json:"handleResults"`
 	}{UserID: userID, Pagination: pagination, HandleResults: handleResults}
 	var resp struct {
-		Total    int32                      `json:"total"`
-		Requests []*model.FriendRequest     `json:"requests"`
+		Total    int32                  `json:"total"`
+		Requests []*model.FriendRequest `json:"requests"`
 	}
 	if err := m.http.Post(ctx, "/relation/get_friend_apply_list", req, &resp); err != nil {
 		return 0, nil, fmt.Errorf("get friend apply list: %w", err)
@@ -97,8 +97,8 @@ func (m *DefaultRelMgr) GetSelfFriendApplyList(ctx context.Context, userID strin
 		HandleResults []int32                  `json:"handleResults"`
 	}{UserID: userID, Pagination: pagination, HandleResults: handleResults}
 	var resp struct {
-		Total    int32                      `json:"total"`
-		Requests []*model.FriendRequest     `json:"requests"`
+		Total    int32                  `json:"total"`
+		Requests []*model.FriendRequest `json:"requests"`
 	}
 	if err := m.http.Post(ctx, "/relation/get_self_friend_apply_list", req, &resp); err != nil {
 		return 0, nil, fmt.Errorf("get self friend apply list: %w", err)
@@ -120,9 +120,9 @@ func (m *DefaultRelMgr) SetFriendRemark(ctx context.Context, ownerUserID, friend
 
 func (m *DefaultRelMgr) AddBlack(ctx context.Context, ownerUserID, blackUserID, ex string) error {
 	req := struct {
-		OwnerUserID  string `json:"ownerUserID"`
-		BlackUserID  string `json:"blackUserID"`
-		Ex           string `json:"ex"`
+		OwnerUserID string `json:"ownerUserID"`
+		BlackUserID string `json:"blackUserID"`
+		Ex          string `json:"ex"`
 	}{OwnerUserID: ownerUserID, BlackUserID: blackUserID, Ex: ex}
 	if err := m.http.Post(ctx, "/relation/add_black", req, nil); err != nil {
 		return fmt.Errorf("add black: %w", err)
@@ -147,7 +147,7 @@ func (m *DefaultRelMgr) GetBlackList(ctx context.Context, userID string, paginat
 		Pagination *model.RequestPagination `json:"pagination"`
 	}{UserID: userID, Pagination: pagination}
 	var resp struct {
-		Total  int32             `json:"total"`
+		Total  int32              `json:"total"`
 		Blacks []*model.BlackInfo `json:"blacks"`
 	}
 	if err := m.http.Post(ctx, "/relation/get_black_list", req, &resp); err != nil {
@@ -201,6 +201,17 @@ func (m *DefaultRelMgr) GetIncrementalBlacks(ctx context.Context, userID, versio
 	var resp model.IncrementalBlacks
 	if err := m.http.Post(ctx, "/relation/get_incremental_blacks", req, &resp); err != nil {
 		return nil, fmt.Errorf("get incremental blacks: %w", err)
+	}
+	return &resp, nil
+}
+
+func (m *DefaultRelMgr) GetFullFriendUserIDs(ctx context.Context, idHash uint64) (*model.FullFriendIDs, error) {
+	req := struct {
+		IDHash uint64 `json:"idHash"`
+	}{IDHash: idHash}
+	var resp model.FullFriendIDs
+	if err := m.http.Post(ctx, "/relation/get_full_friend_user_ids", req, &resp); err != nil {
+		return nil, fmt.Errorf("get full friend user ids: %w", err)
 	}
 	return &resp, nil
 }

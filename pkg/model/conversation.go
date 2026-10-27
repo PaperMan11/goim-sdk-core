@@ -74,6 +74,8 @@ type SeqInfo struct {
 
 // IncrementalConversations 增量会话
 type IncrementalConversations struct {
+	VersionID string          `json:"versionID"`
+	Version   uint64          `json:"version"`
 	Delete    []string        `json:"delete"`
 	Insert    []*Conversation `json:"insert"`
 	Update    []*Conversation `json:"update"`
@@ -82,7 +84,10 @@ type IncrementalConversations struct {
 
 // FullConversationIDs 会话 ID 全量
 type FullConversationIDs struct {
-	UserIDs []string `json:"userIDs"`
+	VersionID string   `json:"versionID"`
+	Version   uint64   `json:"version"`
+	Equal     bool     `json:"equal"`
+	UserIDs   []string `json:"userIDs"` // 会话 ID 列表（服务端复用 userIDs 字段名）
 }
 
 // DeleteSyncOpt 删除同步选项

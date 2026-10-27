@@ -13,6 +13,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
+	sdkSync "github.com/PaperMan11/goim-sdk-core/pkg/sync"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
@@ -49,6 +50,10 @@ type DefaultClient struct {
 	platformID    int32
 	loggedIn      bool
 	connectCancel context.CancelFunc // 连接相关 goroutine 的 cancel
+
+	// 同步引擎（Login / 重连后执行）
+	seqSync    *sdkSync.SeqSyncEngine
+	entitySync *sdkSync.EntitySyncEngine
 }
 
 // NewClient 构造 DefaultClient
@@ -67,7 +72,21 @@ func NewClient(cfg *ClientConfig) Client {
 	l := &logger.NopLogger{} // TODO: 从 cfg 注入，默认 nop；Phase 4 完可以用 zap 替换
 	bus := eventbus.New(eventbus.WithLogger(l))
 	tokens := transport.NewTokenStore(nil)
-	stor := storage.NewMemoryStorage()
+
+	// 存储：注入优先；否则 SessionDataPath 有值 → SQLite；都空 → 内存
+	var stor storage.Storage
+	if cfg.Storage != nil {
+		stor = cfg.Storage
+	} else if cfg.SessionDataPath != "" {
+		db, err := storage.NewSQLiteStorage(cfg.SessionDataPath, l)
+		if err != nil {
+			l.Errorf("client: init sqlite storage, path=%s, error=%v", cfg.SessionDataPath, err.Error())
+			return nil
+		}
+		stor = db
+	} else {
+		stor = storage.NewMemoryStorage()
+	}
 
 	var http transport.HTTPClient
 	if cfg.HTTP != nil {
@@ -128,6 +147,19 @@ func NewClient(cfg *ClientConfig) Client {
 			Type:      events.EventReconnect,
 			Timestamp: timex.UnixMilli(),
 		})
+		// 重连后：gap 拉取 + 五类实体带游标增量（异步，失败只 warn，下轮重连再补）
+		c.mu.RLock()
+		owner := c.userID
+		loggedIn := c.loggedIn
+		c.mu.RUnlock()
+		if !loggedIn || owner == "" {
+			return
+		}
+		go func() {
+			if err := c.runSyncFlow(context.Background(), owner); err != nil {
+				c.logger.Warnf("client: resync after reconnect, owner=%s, error=%v", owner, err.Error())
+			}
+		}()
 	})
 	ws.SetOnDisconnected(func() {
 		bus.Publish(events.EventDisconnect, events.Event{
@@ -181,14 +213,22 @@ func (c *DefaultClient) Login(ctx context.Context, userID string, platformID int
 	// 4. 注入 MsgMgr senderID
 	c.msg.SetSenderID(userID)
 
-	// 5. 记录登录状态
+	// 5. 数据同步：消息 Seq gap 拉取 + 五类实体游标增量
+	//    全部完成才算登录成功（上层收到 EventLoginSuccess 时本地数据已就绪）
 	c.mu.Lock()
 	c.userID = userID
 	c.platformID = platformID
 	c.loggedIn = true
 	c.mu.Unlock()
+	if err := c.runSyncFlow(ctx, userID); err != nil {
+		c.bus.Publish(events.EventLoginFailed, events.Event{
+			Type:      events.EventLoginFailed,
+			Timestamp: timex.UnixMilli(),
+		})
+		return fmt.Errorf("login: sync data: %w", err)
+	}
 
-	// 6. 完整登录成功事件（包含 EventConnect + Token + SeqSync 后续）
+	// 6. 完整登录成功事件（Token + WS + SeqSync + EntitySync 全部完成）
 	c.bus.Publish(events.EventLoginSuccess, events.Event{
 		Type:      events.EventLoginSuccess,
 		Timestamp: timex.UnixMilli(),
@@ -197,7 +237,21 @@ func (c *DefaultClient) Login(ctx context.Context, userID string, platformID int
 	return nil
 }
 
-func (c *DefaultClient) Logout() error {
+// runSyncFlow 执行完整同步流程：消息 Seq gap 拉取 → 五类实体增量
+func (c *DefaultClient) runSyncFlow(ctx context.Context, owner string) error {
+	seqSync := sdkSync.NewSeqSyncEngine(c.msg, c.storage, owner, c.bus, c.logger)
+	entitySync := sdkSync.NewEntitySyncEngine(c.rel, c.group, c.conv, c.storage, owner, c.bus, c.logger)
+
+	if err := seqSync.Sync(ctx); err != nil {
+		return fmt.Errorf("seq sync: %w", err)
+	}
+	if err := entitySync.SyncAll(ctx); err != nil {
+		return fmt.Errorf("entity sync: %w", err)
+	}
+	return nil
+}
+
+func (c *DefaultClient) Logout(clearData bool) error {
 	c.mu.Lock()
 	userID := c.userID
 	platformID := c.platformID
@@ -208,14 +262,15 @@ func (c *DefaultClient) Logout() error {
 	// 主动 Disconnect（不会触发 OnDisconnected，因为 actorsExited 里 stillConnected=false）
 	_ = c.Disconnect()
 
-	// 清理 TokenStore
+	// 清理 TokenStore（会话结束，token 不复用）
 	if c.tokens != nil && userID != "" {
 		_ = c.tokens.Delete(userID, platformID)
 	}
 
-	// 清理 Storage
-	if c.storage != nil {
-		_ = c.storage.Clear(context.Background())
+	// 本地数据默认保留（owner 隔离，多账号共存）：下次登录游标增量同步，快速恢复。
+	// 仅调用方显式要求时清除（共享设备隐私、注销账号），代价是下次登录全量重拉
+	if clearData && c.storage != nil && userID != "" {
+		_ = c.storage.Clear(context.Background(), userID)
 	}
 
 	return nil

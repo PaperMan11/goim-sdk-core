@@ -19,6 +19,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
+	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
 )
@@ -28,8 +29,12 @@ type Client interface {
 	// —— 生命周期 ——
 	// Login 获取 User Token + 建立 WS 连接 + 触发 SeqSync
 	Login(ctx context.Context, userID string, platformID int32) error
-	// Logout 主动登出：断开 WS + 清理 TokenStore
-	Logout() error
+	// Logout 登出：断开连接 + 清理 TokenStore
+	//
+	// clearData=false 时本地存储（消息/会话/好友/游标）保留，下次登录走游标增量，快速恢复；
+	// clearData=true 时额外清除该 owner 全部本地数据（共享设备隐私场景、账号注销），
+	// 下次登录将触发服务端 full=true 全量同步。
+	Logout(clearData bool) error
 	// Connect 单独建立 WS 连接（Login 内部会调用，也可重连场景单独用）
 	Connect(ctx context.Context) error
 	// Disconnect 断开 WS 连接（不清理 TokenStore，Logout 内部会调用）
@@ -95,4 +100,8 @@ type ClientConfig struct {
 	// 依赖注入（可用于单元测试 mock；nil 时 DefaultClient 内部构造）
 	HTTP      transport.HTTPClient
 	Transport transport.MessageTransport
+
+	// 存储配置（二选一；都为空时用内存存储，重启后数据丢失）
+	Storage         storage.Storage // 直接注入（单测注入 MemoryStorage / :memory: SQLite）
+	SessionDataPath string          // SQLite 文件路径（Storage 为 nil 且非空时内部创建 SQLiteStorage，如 "sdk_data/data.db"）
 }

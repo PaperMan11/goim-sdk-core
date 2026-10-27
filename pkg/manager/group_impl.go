@@ -320,3 +320,14 @@ func (m *DefaultGroupMgr) GetFullGroupMemberUserIDs(ctx context.Context, groupID
 	}
 	return &resp, nil
 }
+
+func (m *DefaultGroupMgr) GetFullJoinGroupIDs(ctx context.Context, idHash uint64) (*model.FullGroupIDs, error) {
+	req := struct {
+		IDHash uint64 `json:"idHash"`
+	}{IDHash: idHash}
+	var resp model.FullGroupIDs
+	if err := m.http.Post(ctx, "/group/get_full_join_group_ids", req, &resp); err != nil {
+		return nil, fmt.Errorf("get full join group ids: %w", err)
+	}
+	return &resp, nil
+}

@@ -55,18 +55,30 @@ type FriendRelation struct {
 	InUser2Friends   bool   `json:"inUser2Friends"`
 }
 
-// IncrementalFriends 增量好友
+// IncrementalFriends 增量好友（对齐服务端 GetIncrementalFriendsResp：无分批，一次返回全部增量）
 type IncrementalFriends struct {
-	Delete []string     `json:"delete"`
-	Insert []FriendInfo `json:"insert"`
-	Update []FriendInfo `json:"update"`
-	Full   bool         `json:"full"`
+	VersionID string       `json:"versionID"` // 当前版本ID（写回本地游标）
+	Version   uint64       `json:"version"`   // 当前版本号
+	Delete    []string     `json:"delete"`
+	Insert    []FriendInfo `json:"insert"`
+	Update    []FriendInfo `json:"update"`
+	Full      bool         `json:"full"` // true：版本线变更，需走 GetFullFriendUserIDs 全量校验
 }
 
 // IncrementalBlacks 增量黑名单
 type IncrementalBlacks struct {
-	Delete []string     `json:"delete"`
-	Insert []BlackInfo  `json:"insert"`
-	Update []BlackInfo  `json:"update"`
-	Full   bool         `json:"full"`
+	VersionID string      `json:"versionID"`
+	Version   uint64      `json:"version"`
+	Delete    []string    `json:"delete"`
+	Insert    []BlackInfo `json:"insert"`
+	Update    []BlackInfo `json:"update"`
+	Full      bool        `json:"full"`
+}
+
+// FullFriendIDs 好友 ID 全量校验结果（对齐 GetFullFriendUserIDsResp）
+type FullFriendIDs struct {
+	VersionID string   `json:"versionID"`
+	Version   uint64   `json:"version"`
+	Equal     bool     `json:"equal"`  // 本地 idHash 与服务端是否一致
+	UserIDs   []string `json:"userIDs"` // 不一致时的服务端全量好友 ID 列表
 }

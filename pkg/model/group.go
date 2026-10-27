@@ -79,25 +79,40 @@ type GroupRequest struct {
 
 // IncrementalGroups 增量群组列表
 type IncrementalGroups struct {
+	VersionID string      `json:"versionID"`
+	Version   uint64      `json:"version"`
 	Delete    []string    `json:"delete"`
 	Insert    []GroupInfo `json:"insert"`
 	Update    []GroupInfo `json:"update"`
 	Full      bool        `json:"full"`
 }
 
-// IncrementalMembers 增量群成员列表
+// IncrementalMembers 增量群成员列表（群维度游标）
 type IncrementalMembers struct {
-	GroupID   string                 `json:"groupID"`
-	Delete    []string               `json:"delete"`
-	Insert    []GroupMemberFullInfo  `json:"insert"`
-	Update    []GroupMemberFullInfo  `json:"update"`
-	Full      bool                   `json:"full"`
+	VersionID string                `json:"versionID"`
+	Version   uint64                `json:"version"`
+	GroupID   string                `json:"groupID"`
+	Delete    []string              `json:"delete"`
+	Insert    []GroupMemberFullInfo `json:"insert"`
+	Update    []GroupMemberFullInfo `json:"update"`
+	Full      bool                  `json:"full"`
 }
 
 // FullMemberIDs 群成员 ID 全量
 type FullMemberIDs struct {
-	GroupID string   `json:"groupID"`
-	UserIDs []string `json:"userIDs"`
+	VersionID string   `json:"versionID"`
+	Version   uint64   `json:"version"`
+	GroupID   string   `json:"groupID"`
+	Equal     bool     `json:"equal"`
+	UserIDs   []string `json:"userIDs"`
+}
+
+// FullGroupIDs 加入群 ID 全量校验结果（对齐 GetFullJoinGroupIDsResp）
+type FullGroupIDs struct {
+	VersionID string   `json:"versionID"`
+	Version   uint64   `json:"version"`
+	Equal     bool     `json:"equal"`
+	GroupIDs  []string `json:"groupIDs"`
 }
 
 // GroupAbstractInfo 群摘要

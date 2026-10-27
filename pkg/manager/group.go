@@ -36,4 +36,6 @@ type GroupMgr interface {
 	GetIncrementalJoinGroups(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalGroups, error)
 	GetIncrementalGroupMembers(ctx context.Context, groupID, versionID string, version uint64) (*model.IncrementalMembers, error)
 	GetFullGroupMemberUserIDs(ctx context.Context, groupID string, idHash uint64) (*model.FullMemberIDs, error)
+	// GetFullJoinGroupIDs 加入群 ID 全量校验（增量 full=true 回退时调用）
+	GetFullJoinGroupIDs(ctx context.Context, idHash uint64) (*model.FullGroupIDs, error)
 }
