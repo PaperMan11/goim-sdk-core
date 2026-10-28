@@ -50,6 +50,9 @@ func New(cfg *Config) Logger {
 	}
 	opts := []zap.Option{
 		zap.AddCaller(),
+		// ZapLogger 适配器是调用链上的一层封装（业务代码 → Infof → sugar.Infof），
+		// 不跳过该帧的话 caller 永远显示 logger/zap.go:xx，无法定位真实调用点
+		zap.AddCallerSkip(1),
 		zap.AddStacktrace(stackLevel),
 		zap.ErrorOutput(os.Stderr),
 	}
@@ -129,13 +132,16 @@ func (l *ZapLogger) Close() error {
 }
 
 // NewZapLogger 从 *zap.Logger 构造适配器
+//
+// 本适配器在调用链上增加了一帧，这里追加 AddCallerSkip(1)，使 caller 指向
+// 真实调用点而非适配器内部。若宿主 *zap.Logger 未开启 AddCaller 则无影响
 func NewZapLogger(z *zap.Logger) *ZapLogger {
-	return &ZapLogger{sugar: z.Sugar()}
+	return &ZapLogger{sugar: z.WithOptions(zap.AddCallerSkip(1)).Sugar()}
 }
 
-// NewZapSugarLogger 从 *zap.SugaredLogger 构造
+// NewZapSugarLogger 从 *zap.SugaredLogger 构造（跳帧约定同 NewZapLogger）
 func NewZapSugarLogger(sugar *zap.SugaredLogger) *ZapLogger {
-	return &ZapLogger{sugar: sugar}
+	return &ZapLogger{sugar: sugar.Desugar().WithOptions(zap.AddCallerSkip(1)).Sugar()}
 }
 
 func (l *ZapLogger) With(keyvals ...interface{}) Logger {
