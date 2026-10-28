@@ -3,6 +3,8 @@
 > 目标：在跨语言封装（Phase 5）之前，验证 SDK 与 goim 服务端真实链路的端到端正确性。
 > 服务端仓库：`goim`（im-api / im-msggateway / im-msgtransfer / im-push / im-rpc / im-cron）
 
+**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ⏳ E1-E6 待执行。风险 R1/R7/R8/R9/R10 均在 E0 阶段暴露并闭环，详见 §4。
+
 ---
 
 ## 1. 目标与范围
@@ -99,6 +101,9 @@ go test ./test/integration/... -v -count=1
 
 > ⚠️ E0.1/E0.2 大概率率先暴露 §4 风险 R1（HTTP token 注入选路），先修复再继续。
 
+> ✅ **E0 已完成（2026-10-28）**：4 个集成用例全绿 —— `TestE0_AdminToken`（E0.1）、`TestE0_RegisterUsers`（E0.2）、`TestE0_LoginFullFlow`（E0.3-E0.5，含五类实体同步全链路）、`TestE0_LoginFailedWrongAdmin`（E1.2 前置，错误凭证路径）。
+> E0 阶段累计暴露并修复 5 项对接问题：R1（token 选路）、R7（admin bootstrap）、R8/R9（服务端鉴权语义）、R10（proto 字段名 10 处 + 响应包装）；另外补齐 deviceID 自动生成持久化、sdkVersion 注入、`Close()` 句柄释放。
+
 ### E1 认证与连接
 
 | # | 用例 | 步骤 | 预期 |
@@ -185,16 +190,16 @@ go test ./test/integration/... -v -count=1
 
 | # | 风险 | 位置 | 影响 | 建议动作 |
 |---|---|---|---|---|
-| R1 | **HTTP token 注入选路失效**：HTTPClient 统一用 `tokenStore.Get("", 0)` 取 token，而 GetUserToken 按 `key(userID, platformID)`（即 `u1:1`）存入，空 key 永远取不到 → 所有需鉴权 HTTP 接口不带 token | `transport/http.go` Get 注入处 vs `transport/auth.go` key() | **P0**：E0.1/E0.2 直接失败（注册、撤回、已读等全部 HTTP 业务接口） | 对接前修复：Client 持有当前 userID，登录后注入给 HTTPClient，或 TokenStore 增加默认选路 |
-| R2 | HTTP token 过期重试逻辑：`tokenRefreshed` 置位后直接 `continue` 重试，但未真正刷新 token，且 `Refresh(ctx, "", 0)` 同样空参 | `transport/http.go` Post/Get | token 过期场景重试仍失败 | E1.5 验证；必要时改为回调式刷新 |
-| R3 | WS 认证参数字段名与服务端网关逐字段比对：`userID/token/platformID/deviceID/sendResponse/isBackground/compression/sdkType/sdkVersion` | `transport/ws.go` encodeQuery | 握手 401/参数忽略 | E0.4 用服务端 gateway 日志核对实际收到的 query |
-| R4 | compression 默认 `none`，若服务端默认 gzip 不一致会导致读流程 Decompress 失败 | `transport/encoder` `compressor` | 收发乱码/解析失败 | E0.5 注意日志中的 decompress 报错 |
+| R1 | ~~**HTTP token 注入选路失效**~~ **已修复并经 E0 验证**：`HTTPClient` 新增 `CurrentUserSetter`，Login 后注入当前 `(userID, platformID)`，token 按 `key(userID, platformID)` 精确选路；Logout 清除 | `transport/http.go` Get 注入处 vs `transport/auth.go` key() | ~~P0~~ 已闭环 | ✅ `TestE0_RegisterUsers`/`TestE0_LoginFullFlow` 回归通过 |
+| R2 | ~~HTTP token 过期重试逻辑~~ **已随刷新闭包修复**：`TokenStore.Refresh` 闭包优先级 TokenProvider > AdminSecret bootstrap；`tokenRefreshed` 重试路径真正拿到新 token | `transport/http.go` Post/Get、`client/client_impl.go` refresh 闭包 | E1.5 回归确认 | E1.5 用超短有效期 token 验证 |
+| R3 | ~~WS 认证参数字段名比对~~ **已验证**：E0.4/E0.5 握手成功且全链路稳定，query 字段名（`userID/token/platformID/deviceID/sendResponse/isBackground/compression/sdkType/sdkVersion`）与服务端网关一致；`deviceID` 已补自动生成 + SQLite 持久化，`sdkVersion` 从 `version/VERSION` 注入 | `transport/ws.go` encodeQuery | 已闭环 | ✅ E0.4 握手日志核对（`deviceID=<uuid>`、`sdkVersion=1.0.0`） |
+| R4 | ~~compression 默认不一致风险~~ **已验证**：`compression=none` 与服务端一致，同步链路 JSON 解析无乱码 | `transport/encoder` `compressor` | 已闭环 | ✅ E0.5 五类实体同步解析正常 |
 | R5 | `handleMessagePush` 只按 `MsgData` 信封解析，通知走 `ContentType >= 1000` 分流；服务端若有信封外推送形态（如 2004/2005 直接推送 tips）需要核实 | `client/client_impl.go` handleMessagePush | 推送事件丢失 | E3.8 用真实服务端验证 |
 | R6 | 事件订阅 channel 满时静默丢弃（与 eventbus 策略一致），测试断言必须先起订阅者再触发操作 | `client/client_impl.go` Subscribe | 测试假阳性/漏收 | helper 统一在操作前订阅，并留足 buffer |
-| R7 | **Login 需要 admin bootstrap**：服务端 `get_user_token` 要求调用方具备 admin 身份（middleware 全路径验 token + `requireUserIsAdmin`），裸调必然 401 | `im-api/middlewares/auth.go`、`im-rpc/auth/logic/get_user_token.go` | **P0**：E0.5 Login 失败 | 已实现双模式：`ClientConfig.AdminSecret`（受信环境自动 bootstrap）+ `LoginWithToken`（终端模式，宿主下发 token）；E0.5 验证 |
+| R7 | ~~**Login 需要 admin bootstrap**~~ **已实现双模式并经 E0 验证**：`ClientConfig.AdminSecret`（受信环境自动 bootstrap：GetAdminToken → 挂载 → GetUserToken）+ `LoginWithToken`（终端模式，宿主下发）+ `TokenProvider`（终端模式过期续期回调，见 docs/DEVELOPMENT.md §5.3） | `im-api/middlewares/auth.go`、`im-rpc/auth/logic/get_user_token.go` | ~~P0~~ 已闭环 | ✅ `TestE0_LoginFullFlow` bootstrap 全链路回归通过 |
 | R8 | **`get_user_token` 不校验用户存在性**：未注册用户也能获取 token 并完成 WS 连接（E0 实测），"未注册登录失败"场景不成立；SDK 层登录成功与否不构成注册校验手段 | E0 实测（TestE0_LoginFailedUnregistered 日志） | 低：业务侧需自行保证先注册后登录 | 已确认服务端行为；E1.2 改为错误凭证场景 |
 | R9 | ~~`get_admin_token` 不校验 secret~~ **已修复**：服务端恢复 secret 校验（`subtle.ConstantTimeCompare` 常量时间比较 + 管理员列表双重校验）。遗留建议：① 启动时校验 AdminSecret 非空且 >= 16 字符（空 secret 与空请求 `ConstantTimeCompare` 返回 1）；② secret 错误与非管理员错误对外统一返回 `NoPermissionError`，避免差异成为 secret 猜测的 oracle | 服务端 `get_admin_token.go` 代码评审 | 中：已消除；两点建议落地后闭环 | E0/E1 用例两种失败路径均可用；部署后回归 |
-| R10 | **HTTP 请求 JSON 字段名必须与服务端 proto json 名一致**：服务端字段名不统一（`fromUserID`/`ownerUserID`/`userID` 混用，见 GetJoinedGroupListReq/GetAllConversationsReq/GetIncrementalConversationReq），SDK 侧发错名字段会被静默忽略并报 "xxx is required" | E0 实测 + `pkg/protocol/**/*.pb.go` 比对 | 同步链路各接口逐一踩坑；跨语言封装后更难排查 | 已全量核对同步链路并修复 3 处；后续新增接口须先查 pb.go 字段名再写 tag |
+| R10 | **HTTP 请求字段名/响应包装必须与服务端 proto 一致**：服务端字段名不统一（`fromUserID`/`ownerUserID`/`userID` 混用），且所有列表响应均为包装对象（`conversations`/`usersInfo`/`groupInfos` 等）而非裸数组，SDK 发错名字段会被静默忽略并报 "xxx is required" | E0 实测 + `pkg/protocol/**/*.pb.go` 比对 | 同步链路各接口逐一踩坑；跨语言封装后更难排查 | ✅ 已全量核对并修复：3 处请求字段名 + 10 处响应包装解析；后续新增接口须先查 pb.go 字段名与 Resp 结构再写 tag |
 
 ---
 
@@ -232,9 +237,9 @@ go test ./test/integration/... -v -count=1
 ## 7. 执行顺序
 
 ```
-① 环境搭建 + 测试基建（test/integration 骨架 + helper）
-② E0 冒烟（含 R1 修复回归）
-③ E1 → E2 → E3 → E4（核心功能，双客户端为主）
+① 环境搭建 + 测试基建（test/integration 骨架 + helper）  ✅ 已完成
+② E0 冒烟（含 R1/R7 修复回归）                          ✅ 已完成（2026-10-28）
+③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ⏳ 当前阶段 ← 下一步
 ④ E5 异常场景（需要操作服务端组件）
 ⑤ E6 存储（依赖 E2/E4 数据）
 ⑥ E7 稳定性（可选）
