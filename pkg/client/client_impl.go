@@ -77,11 +77,13 @@ func NewClient(cfg *ClientConfig) Client {
 	}
 	bus := eventbus.New(eventbus.WithLogger(l))
 
-	// TokenStore 刷新闭包：token 过期时重新走 bootstrap 获取新 token。
-	// AdminSecret 模式下完整可用（admin token 过期时 get_admin_token 白名单可重取）；
-	// 终端模式（LoginWithToken）下无法自行刷新，返回错误由上层触发宿主重新下发。
+	// TokenStore 刷新闭包：token 过期时获取新 token。
+	// 优先级：TokenProvider 宿主回调（终端模式）> AdminSecret 自动 bootstrap > 失败
 	var c *DefaultClient
 	refresh := func(ctx context.Context, userID string, platformID int32) (string, int64, error) {
+		if cfg.TokenProvider != nil {
+			return cfg.TokenProvider(ctx, userID, platformID)
+		}
 		if c == nil || c.auth == nil {
 			return "", 0, fmt.Errorf("token refresh: client not initialized")
 		}

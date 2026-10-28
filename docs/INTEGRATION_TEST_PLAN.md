@@ -103,7 +103,7 @@ go test ./test/integration/... -v -count=1
 
 | # | 用例 | 步骤 | 预期 |
 |---|---|---|---|
-| E1.1 | 错误 secret（已失效，见 R9） | GetAdminToken 传错 secret | ~~返回 `SDKError`~~ 实测服务端不校验 secret，请求成功；保留用例观察服务端后续是否恢复校验 |
+| E1.1 | 错误 secret | GetAdminToken 传错 secret | 返回 `NoPermissionError`；服务端已恢复 secret 校验（常量时间比较），E1.2 错误 AdminUserID 与错误 secret 均可触发登录失败 |
 | E1.2 | 错误管理员凭证登录（原"未注册用户登录"） | Login + 不在服务端管理员列表的 AdminUserID | `EventLoginFailed`，错误信息可读。**实测发现**：R8（get_user_token 不校验用户注册态）、R9（GetAdminToken 不校验 secret，仅校验 userID 是否管理员） |
 | E1.3 | 重复 Login | 已登录状态下再次 Login | 状态一致，不产生脏游标 |
 | E1.4 | 未登录直接 Connect | 不 Login，直接 Connect（DefaultPlatformID 兜底） | WS 握手行为符合服务端约定（明确接受/拒绝即可，记录结论） |
@@ -193,7 +193,7 @@ go test ./test/integration/... -v -count=1
 | R6 | 事件订阅 channel 满时静默丢弃（与 eventbus 策略一致），测试断言必须先起订阅者再触发操作 | `client/client_impl.go` Subscribe | 测试假阳性/漏收 | helper 统一在操作前订阅，并留足 buffer |
 | R7 | **Login 需要 admin bootstrap**：服务端 `get_user_token` 要求调用方具备 admin 身份（middleware 全路径验 token + `requireUserIsAdmin`），裸调必然 401 | `im-api/middlewares/auth.go`、`im-rpc/auth/logic/get_user_token.go` | **P0**：E0.5 Login 失败 | 已实现双模式：`ClientConfig.AdminSecret`（受信环境自动 bootstrap）+ `LoginWithToken`（终端模式，宿主下发 token）；E0.5 验证 |
 | R8 | **`get_user_token` 不校验用户存在性**：未注册用户也能获取 token 并完成 WS 连接（E0 实测），"未注册登录失败"场景不成立；SDK 层登录成功与否不构成注册校验手段 | E0 实测（TestE0_LoginFailedUnregistered 日志） | 低：业务侧需自行保证先注册后登录 | 已确认服务端行为；E1.2 改为错误凭证场景 |
-| R9 | **`get_admin_token` 不校验 secret**：服务端仅校验 userID 是否在管理员配置列表（`im-rpc/auth/logic/get_admin_token.go` `GetAdminToken` 首步 `requireUserIsAdmin(req.UserID)`），SDK 的 `AdminSecret` 配置实际不被服务端使用 | E0 实测 + 服务端代码走查 | 中：secret 配置形同虚设，管理员列表即权限边界；跨语言封装时勿向宿主承诺"secret 校验"语义 | E1.2 用错误 AdminUserID 触发失败；后续可与服务端确认是否补回 secret 校验 |
+| R9 | ~~`get_admin_token` 不校验 secret~~ **已修复**：服务端恢复 secret 校验（`subtle.ConstantTimeCompare` 常量时间比较 + 管理员列表双重校验）。遗留建议：① 启动时校验 AdminSecret 非空且 >= 16 字符（空 secret 与空请求 `ConstantTimeCompare` 返回 1）；② secret 错误与非管理员错误对外统一返回 `NoPermissionError`，避免差异成为 secret 猜测的 oracle | 服务端 `get_admin_token.go` 代码评审 | 中：已消除；两点建议落地后闭环 | E0/E1 用例两种失败路径均可用；部署后回归 |
 | R10 | **HTTP 请求 JSON 字段名必须与服务端 proto json 名一致**：服务端字段名不统一（`fromUserID`/`ownerUserID`/`userID` 混用，见 GetJoinedGroupListReq/GetAllConversationsReq/GetIncrementalConversationReq），SDK 侧发错名字段会被静默忽略并报 "xxx is required" | E0 实测 + `pkg/protocol/**/*.pb.go` 比对 | 同步链路各接口逐一踩坑；跨语言封装后更难排查 | 已全量核对同步链路并修复 3 处；后续新增接口须先查 pb.go 字段名再写 tag |
 
 ---

@@ -141,4 +141,11 @@ type ClientConfig struct {
 	AdminSecret string
 	// AdminUserID 管理员账号（默认 "imAdmin"，必须在服务端管理员列表内，否则 Login 失败）
 	AdminUserID string
+
+	// TokenProvider 终端模式 token 刷新回调（LoginWithToken 模式推荐配置）。
+	// token 过期时 SDK 自动调用，宿主应向自己的业务服务端请求新 token 后返回
+	// （业务服务端持有 secret / 管理员凭证，通过 IM 管理接口换取新 token）。
+	// 返回 (token, 剩余有效秒数, error)；error 非空时该次请求/重连失败并上报事件。
+	// 未配置时：AdminSecret 模式自动 bootstrap，LoginWithToken 模式刷新失败
+	TokenProvider func(ctx context.Context, userID string, platformID int32) (token string, expireTimeSeconds int64, err error)
 }

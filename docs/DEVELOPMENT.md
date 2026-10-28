@@ -975,6 +975,37 @@ func (d *Dispatcher) RegisterCallback(cb CallBack) // 内部 = SubscribeAll → 
 iOS / Android 侧实现 CallBack 代理对象（Java interface / OC protocol）注册一次即可收全量事件；
 按 eventType 字符串自行分发到各 UI 处理器。区分事件的枚举值清单随 SDK 文档生成。
 
+##### TokenProvider 跨语言映射（终端模式 token 续期）
+
+`ClientConfig.TokenProvider` 是 Go 函数类型字段（`func(ctx, userID, platformID) (token, expire, err)`），
+**gomobile 无法绑定函数类型，Native 也无法实现 Go 的 func 字段**——必须像 CallBack 一样桥接成
+单方法 interface（gomobile 约束：Native 实现 Go interface 仅支持单方法 + 基本类型参数）：
+
+```go
+// call/token.go —— TokenProvider 的跨语言契约（Native 实现此 interface）
+type TokenProviderBridge interface {
+    // FetchToken 同步跨语言回调：SDK token 过期时调用
+    // Native 侧应向宿主业务服务端请求新 token；
+    // 返回 JSON：{"token":"...","expireTimeSeconds":3600}
+    FetchToken(userID string, platformID int32) (string, error)
+}
+
+// call 层注册 API：内部把 bridge 包装成 ClientConfig.TokenProvider
+func (d *Dispatcher) SetTokenProvider(p TokenProviderBridge)
+```
+
+映射与注意事项：
+
+| 事项 | 约定 |
+|---|---|
+| 桥接形态 | 与 CallBack 同构：单方法 + 基本类型参数，返回 JSON string |
+| 调用方向 | Go → Native 的**同步**回调（TokenProvider 语义就是同步取 token），gomobile 支持 |
+| ⚠️ 线程约束 | FetchToken 在 SDK 的刷新 goroutine 里被调用，Native 侧**禁止在 Android 主线程做网络请求**——桥接生成的代理已在后台线程，Native 实现里自行同步请求宿主接口即可 |
+| 失败语义 | FetchToken 返回 error → 该次请求/重连失败并上报事件，宿主可监听后引导重新登录 |
+| 首次登录 | 与 Go 版一致：Native 先自己向宿主要 token，再走 `loginWithToken(userID, platformID, token, expire)` |
+| wasm | JS 侧无同步跨语言回调——用「预取模式」：JS 刷新 token 后调用 call 层暴露的 `updateToken(token, expire)`，等价于宿主主动注入而非回调 |
+| cgo | C/C++ 侧注册函数指针包装成 TokenProviderBridge，同步语义天然匹配 |
+
 #### 5.4 四平台桥接
 
 ##### iOS / Android（gomobile bind）
@@ -1083,6 +1114,7 @@ func init() {
 | wasm 浏览器能跑 | chrome://inspect → 调试 JS 调用 |
 | 事件能送达 | iOS `onEvent` 回调里打印 payload，收到新消息推送 |
 | 错误能正确归一化 | Mock error code 1501 → iOS `onError(1501, "token expired")` |
+| TokenProvider 能回调续期 | Native 实现 `FetchToken`，人为制造 token 过期 → 自动续期后消息收发不中断（§5.3 TokenProvider 映射） |
 | panic 不穿透 | call 层 middleware 捕获 panic → onError(90001, "internal") |
 
 #### 5.7 交付产物
