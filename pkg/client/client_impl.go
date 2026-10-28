@@ -87,6 +87,10 @@ func NewClient(cfg *ClientConfig) Client {
 		if c == nil || c.auth == nil {
 			return "", 0, fmt.Errorf("token refresh: client not initialized")
 		}
+		// 先失效本地缓存再重取：服务端可能已清除 token 记录（如 Redis TTL 先于
+		// expireTimeSeconds 到期）而本地仍视为有效；若带着旧缓存走 admin bootstrap，
+		// 旧 admin token 会被原样复用 → 刷新结果与旧 token 相同 → 刷新/重试死循环
+		_ = c.tokens.Delete(userID, platformID)
 		resp, err := c.acquireUserToken(ctx, userID, platformID)
 		if err != nil {
 			return "", 0, err
@@ -254,6 +258,8 @@ func (c *DefaultClient) LoginWithToken(ctx context.Context, userID string, platf
 //
 //   - 配置 AdminSecret → admin bootstrap：复用/重取 admin token → 挂载 → GetUserToken
 //     （服务端 get_user_token 要求调用方具备 admin 身份，见 docs/INTEGRATION_TEST_PLAN.md §4）
+//   - 刷新目标为 admin 凭证本身 (adminUserID, AdminPlatformID) → 仅重取 admin token，
+//     不为 admin 签发 user token（否则会覆盖 admin token 缓存槽）
 //   - 未配置 AdminSecret → 直接 GetUserToken（依赖当前已注入的凭证）
 func (c *DefaultClient) acquireUserToken(ctx context.Context, userID string, platformID int32) (*transport.TokenResult, error) {
 	if c.cfg.AdminSecret != "" {
@@ -262,19 +268,39 @@ func (c *DefaultClient) acquireUserToken(ctx context.Context, userID string, pla
 			adminUserID = defaultAdminUserID
 		}
 		// admin token 缓存有效则复用，缺失/过期则重取（get_admin_token 为白名单接口，无需凭证）
+		var adminResult *transport.TokenResult
 		if cached, _ := c.tokens.Get(adminUserID, pbconstant.AdminPlatformID); cached == "" {
 			adminResp, err := c.auth.GetAdminToken(ctx, c.cfg.AdminSecret, adminUserID)
 			if err != nil {
 				return nil, fmt.Errorf("admin bootstrap: %w", err)
 			}
 			_ = c.tokens.Set(adminUserID, pbconstant.AdminPlatformID, adminResp.Token, adminResp.ExpireTimeSeconds)
+			adminResult = adminResp
+		}
+		// 刷新目标就是 admin 凭证本身（服务端清除 admin token 记录后，HTTP 层会以
+		// (admin, AdminPlatformID) 触发 Refresh）：GetAdminToken 即完成刷新，到此返回。
+		// 若继续为 admin 走 GetUserToken，admin 的 user token 会写进 admin token
+		// 缓存槽，污染后续 bootstrap 的凭证选路
+		if isAdminSelf := userID == adminUserID && platformID == pbconstant.AdminPlatformID; isAdminSelf {
+			if adminResult != nil {
+				return adminResult, nil
+			}
+			cached, _ := c.tokens.Get(adminUserID, pbconstant.AdminPlatformID)
+			return &transport.TokenResult{Token: cached}, nil
 		}
 		if setter, ok := c.http.(transport.CurrentUserSetter); ok {
 			setter.SetCurrentUser(adminUserID, pbconstant.AdminPlatformID)
 		}
 	}
 	// 内部 TokenStore.Set(userID, platformID) + Publish EventLoginSuccess
-	return c.auth.GetUserToken(ctx, userID, platformID)
+	resp, err := c.auth.GetUserToken(ctx, userID, platformID)
+	// 无论成败都把 HTTP 选路切回目标用户：上面的 admin 挂载只是调用 get_user_token
+	// 的临时现场，残留会让重试及后续业务请求以 admin 身份发送。Login 场景由
+	// loginFlow 兜底切回，但刷新场景没有兜底，必须在此恢复
+	if setter, ok := c.http.(transport.CurrentUserSetter); ok {
+		setter.SetCurrentUser(userID, platformID)
+	}
+	return resp, err
 }
 
 // loginFlow token 就绪后的公共登录链路：HTTP 选路 → WS 参数 → 连接 → 同步 → 事件

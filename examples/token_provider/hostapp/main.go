@@ -25,7 +25,7 @@ import (
 
 const (
 	hostTokenURL = "http://127.0.0.1:8081/im/token" // 宿主业务服务端的发 token 接口
-	imAPIURL     = "http://192.168.241.128:10002"   // goim im-api 地址（不含 /api/v1）
+	imAPIURL     = "http://192.168.241.128:10002/api/v1" // goim im-api 地址（含 /api/v1，与 SDK BaseURL 约定一致）
 	imWSEndpoint = "ws://192.168.241.128:50001/ws"  // goim gateway 地址
 	demoUserID   = "it_demo_user_1"
 )

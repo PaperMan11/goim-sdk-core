@@ -158,7 +158,8 @@ func TestHTTPClient_TokenExpiredRetriesOnce(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// refresh 未配置 → Refresh 返回 error → 外层仍会重试一次后放弃
+	// 刷新闭包未配置 → Refresh 必然失败 → 返回原始认证错误，不再空转重试
+	// （R2 修复后的契约：重试只在真正拿到新 token 后发生，见 http_refresh_test.go）
 	c := NewHTTPClient(srv.URL, NewTokenStore(nil), &logger.NopLogger{})
 
 	err := c.Post(context.Background(), "/test", nil, nil)
@@ -169,8 +170,7 @@ func TestHTTPClient_TokenExpiredRetriesOnce(t *testing.T) {
 	if !ok || se.Code != model.ErrCodeTokenExpiredError {
 		t.Fatalf("err = %v", err)
 	}
-	// tokenRefreshed 逻辑会让外层重试一次 → 共 2 次请求
-	if calls != 2 {
-		t.Fatalf("server called %d times, want 2 (initial + 1 retry)", calls)
+	if calls != 1 {
+		t.Fatalf("server called %d times, want 1 (no refresh closure → no retry)", calls)
 	}
 }

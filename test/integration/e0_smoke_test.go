@@ -65,12 +65,6 @@ func TestE0_LoginFullFlow(t *testing.T) {
 
 // TestE0_LoginFailedWrongAdmin E1.2 错误管理员凭证登录 → EventLoginFailed
 //
-// 实测发现（R8/R9）：
-//   - R8：goim get_user_token 不校验用户是否已注册，未注册用户也能拿到 token 并完成 WS 连接，
-//     "未注册登录失败"不成立
-//   - R9：goim GetAdminToken 不校验 secret（im-rpc/auth/logic/get_admin_token.go 只查
-//     userID 是否在管理员列表），错误 secret 的 bootstrap 依然成功
-//
 // 登录失败的可靠触发：不在服务端管理员列表的 AdminUserID
 // （GetAdminToken 首步即 requireUserIsAdmin 校验拒绝，失败发生在 WS 拨号之前）
 func TestE0_LoginFailedWrongAdmin(t *testing.T) {
@@ -82,8 +76,8 @@ func TestE0_LoginFailedWrongAdmin(t *testing.T) {
 		DefaultPlatformID: platformID,
 		Logging:           &logger.Config{Level: envLogLevel, Format: logger.FormatConsole},
 		SessionDataPath:   filepath.Join(t.TempDir(), "sdk.db"),
-		AdminSecret:       envSecret,
-		AdminUserID:       "not-an-admin-" + uniqueUser("x"),
+		AdminSecret:       "no-secret-required",
+		AdminUserID:       adminUserID,
 		Logger:            testLogger(),
 	})
 	require.NotNil(t, c, "client init (check sqlite path)")

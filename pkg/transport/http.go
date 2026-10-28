@@ -103,19 +103,28 @@ func (c *DefaultHTTPClient) Post(ctx context.Context, path string, body, resp in
 			return nil
 		}
 
-		// 判断是否 Token 过期类错误
-		if se, ok := err.(*model.SDKError); ok &&
-			(se.Code == model.ErrCodeTokenExpiredError || se.Code == model.ErrCodeTokenNotValidYetError) {
-			if !tokenRefreshed && c.tokenStore != nil {
-				if c.logger != nil {
-					c.logger.Debugf("token expired, refreshing, code=%d", se.Code)
-				}
-				// Refresh 接口没有 userID/platformID —— 这里依赖 tokenStore 内部状态
-				// 调用无参数的 Refresh 需要外部约定，暂不直接调用，由上层触发
-				// 此处仅演示刷新一次的语义
-				tokenRefreshed = true
-				continue
+		// 认证类错误（过期/无效/服务端记录不存在等）→ 真正刷新 token 后重试一次
+		if model.IsTokenRefreshable(err) && !tokenRefreshed && c.tokenStore != nil {
+			tokenRefreshed = true
+			userID, platformID := c.currentUser()
+			if userID == "" {
+				return err // 未登录态无刷新主体（如 bootstrap 之前的白名单接口）
 			}
+			if c.logger != nil {
+				c.logger.Warnf("token auth error, refreshing once, path=%s, err=%v", path, err)
+			}
+			oldTok, _ := c.tokenStore.Get(userID, platformID)
+			if _, rerr := c.tokenStore.Refresh(ctx, userID, platformID); rerr != nil {
+				if c.logger != nil {
+					c.logger.Errorf("token refresh failed: %v", rerr)
+				}
+				return err // 刷新失败，返回原始认证错误
+			}
+			// 刷新后 token 未变化（宿主返回了同一个失效 token）→ 重试无意义，放弃
+			if newTok, _ := c.tokenStore.Get(userID, platformID); newTok == oldTok {
+				return err
+			}
+			continue
 		}
 		return err
 	}
@@ -129,12 +138,26 @@ func (c *DefaultHTTPClient) Get(ctx context.Context, path string, query url.Valu
 		if err == nil {
 			return nil
 		}
-		if se, ok := err.(*model.SDKError); ok &&
-			(se.Code == model.ErrCodeTokenExpiredError || se.Code == model.ErrCodeTokenNotValidYetError) {
-			if !tokenRefreshed {
-				tokenRefreshed = true
-				continue
+		if model.IsTokenRefreshable(err) && !tokenRefreshed && c.tokenStore != nil {
+			tokenRefreshed = true
+			userID, platformID := c.currentUser()
+			if userID == "" {
+				return err
 			}
+			if c.logger != nil {
+				c.logger.Warnf("token auth error, refreshing once, path=%s, err=%v", path, err)
+			}
+			oldTok, _ := c.tokenStore.Get(userID, platformID)
+			if _, rerr := c.tokenStore.Refresh(ctx, userID, platformID); rerr != nil {
+				if c.logger != nil {
+					c.logger.Errorf("token refresh failed: %v", rerr)
+				}
+				return err
+			}
+			if newTok, _ := c.tokenStore.Get(userID, platformID); newTok == oldTok {
+				return err
+			}
+			continue
 		}
 		return err
 	}
@@ -150,6 +173,7 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 		}
 	}
 
+	// BaseURL 由调用方提供完整前缀（如 https://api.goim.io/api/v1），此处直接拼接业务路径
 	fullURL := c.baseURL + path
 	operationID := uuidx.NewOperationID(path)
 
@@ -214,6 +238,13 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 				operationID, httpResp.StatusCode, data)
 		}
 
+		// 非 200 一律视为失败（如路由 404）：其响应体不含业务信封，
+		// 若继续按 {code,msg,data} 解析会得到 code=0 + 空 data 的"假成功"
+		if httpResp.StatusCode != http.StatusOK {
+			return model.NewSDKError(model.ErrCodeInternalError,
+				fmt.Sprintf("http status %d, url=%s, body=%s", httpResp.StatusCode, fullURL, truncateBody(data)))
+		}
+
 		// HTTP 层非 2xx 也解析统一响应
 		var parsed postResp
 		if err := json.Unmarshal(data, &parsed); err != nil {
@@ -229,20 +260,9 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 			return nil
 		}
 
-		// Token 过期/未生效 → 刷新并返回让上层重试一次
-		if parsed.Code == model.ErrCodeTokenExpiredError || parsed.Code == model.ErrCodeTokenNotValidYetError {
-			if c.tokenStore != nil {
-				userID, platformID := c.currentUser()
-				if userID != "" {
-					// 刷新成功后 token 已写回 store，返回错误让外层重试一次
-					if _, rerr := c.tokenStore.Refresh(ctx, userID, platformID); rerr == nil {
-						return model.NewSDKError(parsed.Code, parsed.Msg)
-					}
-				}
-			}
-			return model.NewSDKError(parsed.Code, parsed.Msg)
-		}
-
+		// 认证类错误（1501/1504/1507 等）直接返回，统一由外层 Post 刷新后重试。
+		// 此处不再触发 Refresh：外层收到错误还会刷新一次，会变成双重刷新
+		// （TokenProvider 回调被调两次 / AdminSecret 多签发一次 token）
 		return model.NewSDKError(parsed.Code, parsed.Msg)
 	}
 
@@ -253,6 +273,7 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 }
 
 func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Values, resp interface{}) error {
+	// BaseURL 由调用方提供完整前缀（含 /api/v1），此处直接拼接业务路径
 	fullURL := c.baseURL + path
 	if len(query) > 0 {
 		fullURL += "?" + query.Encode()
@@ -297,6 +318,17 @@ func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Va
 			continue
 		}
 
+		if c.logger != nil {
+			c.logger.Debugf("http response, operationID=%s, status=%d, body=%s",
+				operationID, httpResp.StatusCode, data)
+		}
+
+		// 非 200 一律视为失败（如路由 404），避免空 data "假成功"（与 doPost 一致）
+		if httpResp.StatusCode != http.StatusOK {
+			return model.NewSDKError(model.ErrCodeInternalError,
+				fmt.Sprintf("http status %d, url=%s, body=%s", httpResp.StatusCode, fullURL, truncateBody(data)))
+		}
+
 		var parsed postResp
 		if err := json.Unmarshal(data, &parsed); err != nil {
 			return fmt.Errorf("parse response: %w", err)
@@ -315,4 +347,13 @@ func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Va
 		return fmt.Errorf("http request failed after retries: %w", lastErr)
 	}
 	return fmt.Errorf("http request failed after retries")
+}
+
+// truncateBody 错误信息里附带的响应体片段（防超长刷屏）
+func truncateBody(data []byte) string {
+	const max = 256
+	if len(data) > max {
+		return string(data[:max]) + "..."
+	}
+	return string(data)
 }

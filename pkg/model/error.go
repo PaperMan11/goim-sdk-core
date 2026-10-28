@@ -104,3 +104,25 @@ func IsTokenKicked(err error) bool {
 	}
 	return false
 }
+
+// IsTokenRefreshable 判断是否可通过刷新 token 恢复的认证错误。
+// 覆盖：过期(1501)/无效(1502)/格式错(1503)/未生效(1504)/服务端记录不存在(1507，如
+// 服务端 Redis TTL 先于 JWT exp 到期)。1506 被踢(1506) 不可刷新——刷新会对抗踢出逻辑。
+func IsTokenRefreshable(err error) bool {
+	if err == nil {
+		return false
+	}
+	se, ok := err.(*SDKError)
+	if !ok {
+		return false
+	}
+	switch se.Code {
+	case ErrCodeTokenExpiredError,
+		ErrCodeTokenInvalidError,
+		ErrCodeTokenMalformedError,
+		ErrCodeTokenNotValidYetError,
+		ErrCodeTokenNotExistError:
+		return true
+	}
+	return false
+}

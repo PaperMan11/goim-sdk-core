@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	imAPIURL   = "http://192.168.241.128:10002" // goim im-api 地址
+	imAPIURL   = "http://192.168.241.128:10002" // goim im-api 地址（postIMRaw 手动拼 /api/v1 前缀）
 	adminUser  = "imAdmin"                      // 服务端管理员列表中的账号
 	adminPass  = "your-admin-secret"            // ⚠️ 生产环境从配置中心/环境变量读取
 	listenAddr = ":8081"
@@ -114,8 +114,9 @@ func postIM(path, body, token string) (string, error) {
 	return resp.Data.Token, nil
 }
 
-// postIMRaw 调 IM HTTP API。⚠️ 路由与响应字段以实际服务端为准（SDK 侧 /api/v1 前缀由
-// goim-sdk-core 自动拼接；这里是宿主服务端直调，手动带全路径）。
+// postIMRaw 调 IM HTTP API（宿主服务端直调，不经 SDK，手动拼全路径：
+// imAPIURL + "/api/v1" + path，与 SDK 的 BaseURL+业务路径 约定一致）。
+// ⚠️ 路由与响应字段以实际服务端为准
 func postIMRaw(path, body, token string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, imAPIURL+"/api/v1"+path, nil)
 	if err != nil {

@@ -25,6 +25,9 @@ var (
 	envWSURL    = os.Getenv("GOIM_WS_URL")
 	envSecret   = os.Getenv("GOIM_SECRET")
 	envLogLevel = os.Getenv("GOIM_LOG_LEVEL")
+	// envShortTTL 标记服务端已把 token 有效期调短（如 60s），E1.5 用例启用该开关
+	// （服务端恢复常规有效期时保持未设置，E1.5 自动 Skip）
+	envShortTTL = os.Getenv("GOIM_SHORT_TTL")
 )
 
 func TestMain(m *testing.M) {

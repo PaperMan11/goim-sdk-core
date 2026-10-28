@@ -103,7 +103,8 @@ type Client interface {
 
 // ClientConfig Client 构造配置
 type ClientConfig struct {
-	// HTTP API 基础地址（如 https://api.goim.io，不含 /api/v1 前缀，SDK 自动拼接）
+	// HTTP API 基础地址，需包含 /api/v1 前缀（如 https://api.goim.io/api/v1），
+	// SDK 在其上直接拼接业务路径（/auth/... /user/... 等）
 	BaseURL string
 	// 传输层连接目标（如 ws://api.goim.io:10001/ws 或 wss://...）
 	// 当前默认传输层是 WebSocket，scheme 为 ws/wss；未来 TCP 实现复用同一字段（tcp://host:port）。

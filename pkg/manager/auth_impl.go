@@ -59,15 +59,9 @@ func (m *DefaultAuthMgr) GetUserToken(ctx context.Context, userID string, platfo
 		_ = m.tokens.Set(userID, platformID, resp.Token, resp.ExpireTimeSeconds)
 	}
 
-	// 派发登录成功事件
-	if m.bus != nil {
-		m.bus.Publish(events.EventLoginSuccess, events.Event{
-			Type:      events.EventLoginSuccess,
-			Timestamp: timex.UnixMilli(),
-			Payload:   &resp,
-		})
-	}
-
+	// 注意：这里不发布 EventLoginSuccess —— token 获取只是登录链路的内部一步，
+	// 完整的登录成功事件（Token+WS+同步全部就绪）由 client 层在 loginFlow 末尾统一发布，
+	// 避免上层收到两次 EventLoginSuccess（第二次在数据未就绪时到达，语义误导）
 	return &resp, nil
 }
 
