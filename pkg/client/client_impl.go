@@ -134,7 +134,7 @@ func NewClient(cfg *ClientConfig) Client {
 		DeviceID:    deviceID,
 		SDKVersion:  cfg.DefaultSDKVersion,
 		Compression: cfg.DefaultCompression,
-		OperationID: uuidx.New(),
+		OperationID: uuidx.NewOperationID("connect"),
 	}
 	if params.SDKVersion == "" {
 		params.SDKVersion = Version
@@ -289,7 +289,7 @@ func (c *DefaultClient) loginFlow(ctx context.Context, userID string, platformID
 	c.params.UserID = userID
 	c.params.Token = token
 	c.params.PlatformID = convert.ToInt(platformID)
-	c.params.OperationID = uuidx.New()
+	c.params.OperationID = uuidx.NewOperationID("login")
 
 	// 同步到 WS transport
 	c.transport.SetConnectParams(c.params)

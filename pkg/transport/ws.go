@@ -73,7 +73,7 @@ var _ MessageTransport = (*DefaultWSClient)(nil)
 func NewWSClient(wsURL string, params ConnectParams, l logger.Logger) *DefaultWSClient {
 	params = params.withDefaults()
 	if params.OperationID == "" {
-		params.OperationID = uuidx.New()
+		params.OperationID = uuidx.NewOperationID("connect")
 	}
 
 	w := &DefaultWSClient{
@@ -161,7 +161,7 @@ func (w *DefaultWSClient) SendRequestAndWait(ctx context.Context, req *Request) 
 		return nil, fmt.Errorf("request is nil")
 	}
 	if req.OperationID == "" {
-		req.OperationID = uuidx.New()
+		req.OperationID = uuidx.NewOperationID(reqIDOpName(req.ReqIdentifier))
 	}
 
 	ch := w.router.waitResponse(req.OperationID)

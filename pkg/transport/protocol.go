@@ -6,6 +6,8 @@
 //	WriteMessage ← compressor.Compress ← encoder.Marshal(Request/Response) ← proto.Marshal(业务对象) → Data
 package transport
 
+import "fmt"
+
 // SDK类型常量定义
 const (
 	GoSDK = "go" // Go语言SDK
@@ -41,6 +43,30 @@ const (
 	// WSDataError 数据错误消息
 	WSDataError = 3001
 )
+
+// reqIDOpName 将 WS ReqIdentifier 映射为操作语义名（用于 operationID 前缀，便于日志定位）。
+func reqIDOpName(reqID int) string {
+	switch reqID {
+	case WSGetNewestSeq:
+		return "getNewestSeq"
+	case WSPullMsgBySeqList:
+		return "pullMsgBySeqList"
+	case WSSendMsg:
+		return "sendMsg"
+	case WSSendSignalMsg:
+		return "sendSignalMsg"
+	case WSPullMsg:
+		return "pullMsg"
+	case WSGetConvMaxReadSeq:
+		return "getConvMaxReadSeq"
+	case WSSetBackgroundStatus:
+		return "setBackgroundStatus"
+	case WSSubUserOnlineStatus:
+		return "subUserOnlineStatus"
+	default:
+		return fmt.Sprintf("wsReq%d", reqID)
+	}
+}
 
 // Request 客户端向服务端发送的请求包（对齐服务端定义）
 type Request struct {

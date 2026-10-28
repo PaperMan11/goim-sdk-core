@@ -151,7 +151,7 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 	}
 
 	fullURL := c.baseURL + path
-	operationID := "sdk:" + uuidx.New()
+	operationID := uuidx.NewOperationID(path)
 
 	var lastErr error
 	for attempt := 0; attempt < maxRetry; attempt++ {
@@ -257,7 +257,7 @@ func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Va
 	if len(query) > 0 {
 		fullURL += "?" + query.Encode()
 	}
-	operationID := "sdk:" + uuidx.New()
+	operationID := uuidx.NewOperationID(path)
 
 	var lastErr error
 	for attempt := 0; attempt < maxRetry; attempt++ {
