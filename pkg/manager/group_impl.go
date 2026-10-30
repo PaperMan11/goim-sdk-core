@@ -32,7 +32,10 @@ func (m *DefaultGroupMgr) CreateGroup(ctx context.Context, groupInfo *model.Grou
 		OwnerUserID   string           `json:"ownerUserID"`
 		SendMessage   bool             `json:"sendMessage"`
 	}{GroupInfo: groupInfo, MemberUserIDs: memberUserIDs, AdminUserIDs: adminUserIDs, OwnerUserID: ownerUserID, SendMessage: sendMessage}
-	var resp model.GroupInfo
+	// 服务端 CreateGroupResp 结构为 { groupInfo: {...} }（im-rpc/group group_logic.go）
+	var resp struct {
+		GroupInfo *model.GroupInfo `json:"groupInfo"`
+	}
 	if err := m.http.Post(ctx, "/group/create_group", req, &resp); err != nil {
 		return nil, fmt.Errorf("create group: %w", err)
 	}
@@ -40,10 +43,10 @@ func (m *DefaultGroupMgr) CreateGroup(ctx context.Context, groupInfo *model.Grou
 		m.bus.Publish(events.EventGroupCreated, events.Event{
 			Type:      events.EventGroupCreated,
 			Timestamp: timex.UnixMilli(),
-			Payload:   &resp,
+			Payload:   resp.GroupInfo,
 		})
 	}
-	return &resp, nil
+	return resp.GroupInfo, nil
 }
 
 func (m *DefaultGroupMgr) SetGroupInfo(ctx context.Context, groupInfo *model.GroupInfoForSet) error {

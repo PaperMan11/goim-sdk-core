@@ -3,7 +3,7 @@ package model
 // SessionType
 const (
 	SessionTypeC2C   = 1 // 单聊
-	SessionTypeGroup = 2 // 群聊
+	SessionTypeGroup = 3 // 读扩散群聊
 )
 
 // MsgFrom

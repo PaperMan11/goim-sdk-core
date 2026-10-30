@@ -108,13 +108,13 @@ func TestOnNewMessage(t *testing.T) {
 	done := make(chan *model.MsgData, 1)
 	cli.OnNewMessage(func(msg *model.MsgData) { done <- msg })
 
-	// 模拟服务端 2001 推送 MsgData（handleMessagePush probe 命中 RecvID != "" → EventNewMsg）
-	data, err := proto.Marshal(&pbsdk.MsgData{
+	// 模拟服务端 2001 推送：PushMessages 包装（会话ID → PullMsgs）
+	data, err := proto.Marshal(pushEnvelope(&pbsdk.MsgData{
 		RecvID:      "me",
 		SendID:      "alice",
 		Content:     "hello",
 		ContentType: 101,
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +125,11 @@ func TestOnNewMessage(t *testing.T) {
 		if msg.Content != "hello" || msg.SendID != "alice" {
 			t.Fatalf("unexpected msg: %+v", msg)
 		}
-		if msg.MsgType != 101 { // proto.ContentType → model.MsgType 转换正确性
-			t.Fatalf("MsgType = %d, want 101", msg.MsgType)
+		if msg.ContentType != 101 { // proto.ContentType → model.ContentType 直通
+			t.Fatalf("ContentType = %d, want 101", msg.ContentType)
+		}
+		if msg.ConversationID != "si_c2c_test" { // 推送 map key → 本地 ConversationID
+			t.Fatalf("ConversationID = %q, want si_c2c_test", msg.ConversationID)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("OnNewMessage not triggered within 2s")
@@ -148,10 +151,10 @@ func TestOnMessageRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := proto.Marshal(&pbsdk.MsgData{
+	data, err := proto.Marshal(pushEnvelope(&pbsdk.MsgData{
 		ContentType: pbconstant.MsgRevokeNotification,
 		Content:     string(content),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,10 +185,10 @@ func TestNotificationUnmapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := proto.Marshal(&pbsdk.MsgData{
+	data, err := proto.Marshal(pushEnvelope(&pbsdk.MsgData{
 		ContentType: 1666, // 未映射通知
 		Content:     string(content),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +198,16 @@ func TestNotificationUnmapped(t *testing.T) {
 	case <-normalCh:
 		t.Fatal("unmapped notification must not be published as EventNewMsg")
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// pushEnvelope 按服务端 msggateway 真实形态包装 2001 推送载荷
+// （PushMessages{Msgs: {convID → PullMsgs{Msgs: [...]}}}）
+func pushEnvelope(msg *pbsdk.MsgData) *pbsdk.PushMessages {
+	return &pbsdk.PushMessages{
+		Msgs: map[string]*pbsdk.PullMsgs{
+			"si_c2c_test": {Msgs: []*pbsdk.MsgData{msg}},
+		},
 	}
 }
 

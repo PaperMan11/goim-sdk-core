@@ -24,7 +24,7 @@ type GroupMemberFullInfo struct {
 	UserID         string `json:"userID"`
 	Nickname       string `json:"nickname"`
 	FaceURL        string `json:"faceURL"`
-	RoleLevel      int32  `json:"roleLevel"`       // RoleOwner / RoleAdmin / RoleMember
+	RoleLevel      int32  `json:"roleLevel"` // RoleOwner / RoleAdmin / RoleMember
 	JoinTime       int64  `json:"joinTime"`
 	OperatorUserID string `json:"operatorUserID"`
 	Ex             string `json:"ex"`
@@ -62,19 +62,19 @@ type SetGroupMemberInfo struct {
 
 // GroupRequest 入群申请
 type GroupRequest struct {
-	GroupID     string `json:"groupID"`
-	GroupName   string `json:"groupName"`
-	GroupFaceURL string `json:"groupFaceURL,omitempty"`
-	FromUserID  string `json:"fromUserID"`
-	Nickname    string `json:"nickname"`
-	FaceURL     string `json:"faceURL"`
-	ReqMsg      string `json:"reqMsg"`
-	HandleResult int32 `json:"handleResult"` // HandleResult*
-	HandledUserID string `json:"handledUserID,omitempty"`
+	GroupID         string `json:"groupID"`
+	GroupName       string `json:"groupName"`
+	GroupFaceURL    string `json:"groupFaceURL,omitempty"`
+	FromUserID      string `json:"fromUserID"`
+	Nickname        string `json:"nickname"`
+	FaceURL         string `json:"faceURL"`
+	ReqMsg          string `json:"reqMsg"`
+	HandleResult    int32  `json:"handleResult"` // HandleResult*
+	HandledUserID   string `json:"handledUserID,omitempty"`
 	HandledNickname string `json:"handledNickname,omitempty"`
-	Reason      string `json:"reason,omitempty"`
-	CreateTime  int64  `json:"createTime"`
-	HandleTime  int64  `json:"handleTime,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	CreateTime      int64  `json:"createTime"`
+	HandleTime      int64  `json:"handleTime,omitempty"`
 }
 
 // IncrementalGroups 增量群组列表
@@ -115,11 +115,9 @@ type FullGroupIDs struct {
 	GroupIDs  []string `json:"groupIDs"`
 }
 
-// GroupAbstractInfo 群摘要
+// GroupAbstractInfo 群摘要（对齐服务端 group.GroupAbstractInfo）
 type GroupAbstractInfo struct {
-	GroupID      string `json:"groupID"`
-	GroupName    string `json:"groupName"`
-	GroupFaceURL string `json:"groupFaceURL,omitempty"`
-	MemberCount  int32  `json:"memberCount"`
-	MaxMemberCount int32 `json:"maxMemberCount"`
+	GroupID             string `json:"groupID"`
+	GroupMemberNumber   uint32 `json:"groupMemberNumber"`
+	GroupMemberListHash uint64 `json:"groupMemberListHash"`
 }

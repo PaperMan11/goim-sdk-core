@@ -136,7 +136,7 @@ func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 				break
 			}
 			last := pr.Msgs[len(pr.Msgs)-1]
-			localMax[convID] = max(localMax[convID], convert.ToInt64(last.Seqs))
+			localMax[convID] = max(localMax[convID], last.Seq)
 
 			if err := saveCursor(); err != nil {
 				errs = append(errs, fmt.Errorf("conversation %s: %w", convID, err))

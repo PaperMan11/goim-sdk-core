@@ -548,11 +548,11 @@ func (c *DefaultClient) onEvent(et events.EventType, fn func(events.Event)) {
 
 // === 高频业务回调（Subscribe 语法糖，payload 做好类型断言后回调） ===
 
-// OnNewMessage 收到新消息（EventNewMsg payload: *pbsdk.MsgData → *model.MsgData）
+// OnNewMessage 收到新消息（EventNewMsg payload: *model.MsgData，含本地 ConversationID）
 func (c *DefaultClient) OnNewMessage(h func(msg *model.MsgData)) {
 	c.onEvent(events.EventNewMsg, func(ev events.Event) {
-		if pm, ok := ev.Payload.(*pbsdk.MsgData); ok {
-			h(manager.ConvProtoMsgData(pm))
+		if mm, ok := ev.Payload.(*model.MsgData); ok {
+			h(mm)
 		}
 	})
 }
@@ -628,26 +628,44 @@ func (c *DefaultClient) handleMessagePush(resp *transport.Response) {
 	data := resp.Data
 	timestamp := timex.UnixMilli()
 
-	msgData := &pbsdk.MsgData{}
-	if err := proto.Unmarshal(data, msgData); err != nil {
-		c.logger.Warnf("handleMessagePush: unmarshal MsgData failed, reqIdentifier=%d, error=%v",
+	// 服务端 2001 推送载荷是 PushMessages（会话ID → PullMsgs），非裸 MsgData
+	// （msggateway hub_server.go SuperGroupOnlineBatchPushOneMsg：notification 走 NotificationMsgs）
+	push := &pbsdk.PushMessages{}
+	if err := proto.Unmarshal(data, push); err != nil {
+		c.logger.Warnf("handleMessagePush: unmarshal PushMessages failed, reqIdentifier=%d, error=%v",
 			resp.ReqIdentifier, err.Error())
 		return
 	}
 
-	// 系统通知：NotificationElem 两段 JSON 解出 tips，按 ContentType 分流
-	if msgData.ContentType >= pbconstant.NotificationBegin {
-		c.dispatchNotification(msgData, timestamp)
-		return
+	handle := func(convID string, msgData *pbsdk.MsgData) {
+		if msgData == nil {
+			return
+		}
+		// 系统通知：NotificationElem 两段 JSON 解出 tips，按 ContentType 分流
+		if msgData.ContentType >= pbconstant.NotificationBegin {
+			c.dispatchNotification(msgData, timestamp)
+			return
+		}
+		// 普通消息 → EventNewMsg（payload 为已转换的 model，携带推送 map key 得到的 ConversationID）
+		mm := manager.ConvProtoMsgData(msgData)
+		mm.ConversationID = convID
+		c.bus.Publish(events.EventNewMsg, events.Event{
+			Type:       events.EventNewMsg,
+			Payload:    mm,
+			RawPayload: data,
+			Timestamp:  timestamp,
+		})
 	}
-
-	// 普通消息 → EventNewMsg
-	c.bus.Publish(events.EventNewMsg, events.Event{
-		Type:       events.EventNewMsg,
-		Payload:    msgData,
-		RawPayload: data,
-		Timestamp:  timestamp,
-	})
+	for convID, pull := range push.Msgs {
+		for _, msgData := range pull.GetMsgs() {
+			handle(convID, msgData)
+		}
+	}
+	for convID, pull := range push.NotificationMsgs {
+		for _, msgData := range pull.GetMsgs() {
+			handle(convID, msgData)
+		}
+	}
 }
 
 // dispatchNotification 按 ContentType 分流系统通知

@@ -14,10 +14,10 @@ package storage
 
 import (
 	"context"
+	"strconv"
 	"sync"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
-	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
 )
 
 // 实体游标 key（GetVersion / SetVersion 的 entity 参数）
@@ -216,7 +216,7 @@ func (s *MemoryStorage) ListVersions(owner string) (map[string]VersionInfo, erro
 // === 消息 ===
 
 func msgKey(m *model.MsgData) string {
-	return m.ConversationID + "#" + m.Seqs
+	return m.ConversationID + "#" + strconv.FormatInt(m.Seq, 10)
 }
 
 func (s *MemoryStorage) UpsertMsgs(owner string, msgs []*model.MsgData) error {
@@ -226,7 +226,7 @@ func (s *MemoryStorage) UpsertMsgs(owner string, msgs []*model.MsgData) error {
 		s.msgs[owner] = make(map[string]*model.MsgData)
 	}
 	for _, m := range msgs {
-		if m == nil || convert.ToInt64(m.Seqs) <= 0 {
+		if m == nil || m.Seq <= 0 {
 			continue
 		}
 		s.msgs[owner][msgKey(m)] = m
@@ -246,7 +246,7 @@ func (s *MemoryStorage) ListMsgsByConversation(owner, conversationID string) ([]
 	// seq 升序
 	for i := 0; i < len(out); i++ {
 		for j := i + 1; j < len(out); j++ {
-			if convert.ToInt64(out[j].Seqs) < convert.ToInt64(out[i].Seqs) {
+			if out[j].Seq < out[i].Seq {
 				out[i], out[j] = out[j], out[i]
 			}
 		}

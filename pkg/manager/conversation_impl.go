@@ -41,11 +41,14 @@ func (m *DefaultConvMgr) GetConversation(ctx context.Context, conversationID str
 	req := struct {
 		ConversationID string `json:"conversationID"`
 	}{ConversationID: conversationID}
-	var resp model.Conversation
+	// 服务端 GetConversationResp：{conversation: {...}}
+	var resp struct {
+		Conversation *model.Conversation `json:"conversation"`
+	}
 	if err := m.http.Post(ctx, "/conversation/get_conversation", req, &resp); err != nil {
 		return nil, fmt.Errorf("get conversation: %w", err)
 	}
-	return &resp, nil
+	return resp.Conversation, nil
 }
 
 func (m *DefaultConvMgr) GetConversations(ctx context.Context, conversationIDs []string) ([]*model.Conversation, error) {

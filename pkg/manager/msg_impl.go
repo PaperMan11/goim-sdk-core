@@ -14,7 +14,6 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 
-	pbmsg "github.com/PaperMan11/goim/pkg/protocol/msg"
 	pbsdk "github.com/PaperMan11/goim/pkg/protocol/sdkws"
 )
 
@@ -59,10 +58,10 @@ func (m *DefaultMsgMgr) sendWSMsg(ctx context.Context, msg *model.MsgData, reqID
 		return nil, fmt.Errorf("websocket transport is nil")
 	}
 
-	req := &pbmsg.SendMsgReq{
-		MsgData: toProtoMsgData(msg),
-	}
-	data, err := proto.Marshal(req)
+	// 服务端 msggateway handleSendMsg 直接 proto.Unmarshal(req.Data, &sdkws.MsgData)，
+	// 不接受 SendMsgReq 包装（SendMsgReq.MsgData 在 field 3，会被服务端误读为
+	// MsgData.GroupID string → "string field contains invalid UTF-8"）。
+	data, err := proto.Marshal(toProtoMsgData(msg))
 	if err != nil {
 		return nil, fmt.Errorf("marshal send msg req: %w", err)
 	}
@@ -232,16 +231,20 @@ func (m *DefaultMsgMgr) MarkConversationAsRead(ctx context.Context, conversation
 	return nil
 }
 
-func (m *DefaultMsgMgr) GetConversationsHasReadAndMaxSeq(ctx context.Context, conversationIDs []string, returnPinned bool) (*model.SeqInfo, error) {
+func (m *DefaultMsgMgr) GetConversationsHasReadAndMaxSeq(ctx context.Context, conversationIDs []string, returnPinned bool) (map[string]*model.SeqInfo, []string, error) {
 	req := struct {
 		ConversationIDs []string `json:"conversationIDs"`
 		ReturnPinned    bool     `json:"returnPinned"`
 	}{ConversationIDs: conversationIDs, ReturnPinned: returnPinned}
-	var resp model.SeqInfo
-	if err := m.http.Post(ctx, "/msg/get_conversations_has_read_and_max_seq", req, &resp); err != nil {
-		return nil, fmt.Errorf("get conversations has read and max seq: %w", err)
+	// 服务端 GetConversationsHasReadAndMaxSeqResp：{seqs: {convID → Seqs}, pinnedConversationIDs}
+	var resp struct {
+		Seqs                  map[string]*model.SeqInfo `json:"seqs"`
+		PinnedConversationIDs []string                  `json:"pinnedConversationIDs"`
 	}
-	return &resp, nil
+	if err := m.http.Post(ctx, "/msg/get_conversations_has_read_and_max_seq", req, &resp); err != nil {
+		return nil, nil, fmt.Errorf("get conversations has read and max seq: %w", err)
+	}
+	return resp.Seqs, resp.PinnedConversationIDs, nil
 }
 
 func (m *DefaultMsgMgr) ClearConversationMsg(ctx context.Context, conversationIDs []string, syncOpt *model.DeleteSyncOpt) error {
@@ -309,17 +312,19 @@ func (m *DefaultMsgMgr) CheckMsgIsSendSuccess(ctx context.Context, clientMsgID s
 	req := struct {
 		ClientMsgID string `json:"clientMsgID"`
 	}{ClientMsgID: clientMsgID}
-	var resp model.MsgSendStatus
+	// 服务端 GetSendMsgStatusResp 仅返回 {status}
+	var resp struct {
+		Status int32 `json:"status"`
+	}
 	if err := m.http.Post(ctx, "/msg/check_msg_is_send_success", req, &resp); err != nil {
 		return nil, fmt.Errorf("check msg is send success: %w", err)
 	}
-	return &resp, nil
+	return &model.MsgSendStatus{ClientMsgID: clientMsgID, Status: resp.Status}, nil
 }
 
 // —— 辅助：model.MsgData ↔ proto sdkws.MsgData ——
 //
-// 注意：model.MsgData 是 SDK 本地 DTO，sdkws.MsgData 是服务端传输协议。
-// 两者字段并非一一对应（如 model.MsgType 对应 proto.ContentType，model.Seqs 存 proto.Seq 的字符串形式）。
+// model.MsgData 字段与 JSON tag 已对齐服务端 sdkws.MsgData（ConversationID 为本地字段除外）。
 
 func toProtoMsgData(m *model.MsgData) *pbsdk.MsgData {
 	if m == nil {
@@ -328,6 +333,7 @@ func toProtoMsgData(m *model.MsgData) *pbsdk.MsgData {
 	return &pbsdk.MsgData{
 		SendID:           m.SendID,
 		RecvID:           m.RecvID,
+		GroupID:          m.GroupID,
 		ClientMsgID:      m.ClientMsgID,
 		ServerMsgID:      m.ServerMsgID,
 		SenderPlatformID: m.SenderPlatformID,
@@ -335,13 +341,30 @@ func toProtoMsgData(m *model.MsgData) *pbsdk.MsgData {
 		SenderFaceURL:    m.SenderFaceURL,
 		SessionType:      m.SessionType,
 		MsgFrom:          m.MsgFrom,
-		ContentType:      m.MsgType, // model.MsgType → proto.ContentType
+		ContentType:      m.ContentType,
 		Content:          m.Content,
-		SendTime:         m.CreateTime,
+		SendTime:         m.SendTime,
+		CreateTime:       m.CreateTime,
 		Status:           m.Status,
 		IsRead:           m.IsRead,
+		Options:          m.Options,
+		OfflinePushInfo:  toProtoOfflinePush(m.OfflinePushInfo),
+		AtUserIDList:     m.AtUserIDList,
 		AttachedInfo:     m.AttachedInfo,
 		Ex:               m.Ex,
+	}
+}
+
+func toProtoOfflinePush(m *model.OfflinePushInfo) *pbsdk.OfflinePushInfo {
+	if m == nil {
+		return nil
+	}
+	return &pbsdk.OfflinePushInfo{
+		Title:         m.Title,
+		Desc:          m.Desc,
+		Ex:            m.Ex,
+		IOSPushSound:  m.IOSPushSound,
+		IOSBadgeCount: m.IOSBadgeCount,
 	}
 }
 
@@ -352,6 +375,7 @@ func fromProtoMsgData(pm *pbsdk.MsgData) *model.MsgData {
 	return &model.MsgData{
 		SendID:           pm.SendID,
 		RecvID:           pm.RecvID,
+		GroupID:          pm.GroupID,
 		ClientMsgID:      pm.ClientMsgID,
 		ServerMsgID:      pm.ServerMsgID,
 		SenderPlatformID: pm.SenderPlatformID,
@@ -359,14 +383,31 @@ func fromProtoMsgData(pm *pbsdk.MsgData) *model.MsgData {
 		SenderFaceURL:    pm.SenderFaceURL,
 		SessionType:      pm.SessionType,
 		MsgFrom:          pm.MsgFrom,
-		MsgType:          pm.ContentType, // proto.ContentType → model.MsgType
+		ContentType:      pm.ContentType,
 		Content:          pm.Content,
-		CreateTime:       pm.SendTime,
-		Seqs:             convert.ToString(pm.Seq),
+		Seq:              pm.Seq,
+		SendTime:         pm.SendTime,
+		CreateTime:       pm.CreateTime,
 		Status:           pm.Status,
 		IsRead:           pm.IsRead,
+		Options:          pm.Options,
+		OfflinePushInfo:  fromProtoOfflinePush(pm.OfflinePushInfo),
+		AtUserIDList:     pm.AtUserIDList,
 		AttachedInfo:     pm.AttachedInfo,
 		Ex:               pm.Ex,
+	}
+}
+
+func fromProtoOfflinePush(pm *pbsdk.OfflinePushInfo) *model.OfflinePushInfo {
+	if pm == nil {
+		return nil
+	}
+	return &model.OfflinePushInfo{
+		Title:         pm.Title,
+		Desc:          pm.Desc,
+		Ex:            pm.Ex,
+		IOSPushSound:  pm.IOSPushSound,
+		IOSBadgeCount: pm.IOSBadgeCount,
 	}
 }
 

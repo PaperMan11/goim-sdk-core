@@ -92,15 +92,15 @@ func TestSQLiteStorage_Messages(t *testing.T) {
 	s := newSQLiteForTest(t)
 
 	msgs := []*model.MsgData{
-		{ClientMsgID: "c1", Seqs: "1", ConversationID: "si_a", SendID: "u1", RecvID: "u2", Content: "first", MsgType: 101, CreateTime: 100},
-		{ClientMsgID: "c2", Seqs: "2", ConversationID: "si_a", SendID: "u2", RecvID: "u1", Content: "second", MsgType: 101, CreateTime: 200},
-		{ClientMsgID: "c3", Seqs: "3", ConversationID: "si_b", SendID: "u1", RecvID: "u2", Content: "other conv", MsgType: 101, CreateTime: 300},
+		{ClientMsgID: "c1", Seq: 1, ConversationID: "si_a", SendID: "u1", RecvID: "u2", Content: "first", ContentType: 101, CreateTime: 100},
+		{ClientMsgID: "c2", Seq: 2, ConversationID: "si_a", SendID: "u2", RecvID: "u1", Content: "second", ContentType: 101, CreateTime: 200},
+		{ClientMsgID: "c3", Seq: 3, ConversationID: "si_b", SendID: "u1", RecvID: "u2", Content: "other conv", ContentType: 101, CreateTime: 300},
 	}
 	if err := s.UpsertMsgs("u1", msgs); err != nil {
 		t.Fatal(err)
 	}
 	// 重复 seq upsert（ClientMsgID 相同）→ 不报错不重复
-	if err := s.UpsertMsgs("u1", []*model.MsgData{{ClientMsgID: "c1", Seqs: "1", ConversationID: "si_a", Content: "first-edited", MsgType: 101}}); err != nil {
+	if err := s.UpsertMsgs("u1", []*model.MsgData{{ClientMsgID: "c1", Seq: 1, ConversationID: "si_a", Content: "first-edited", ContentType: 101}}); err != nil {
 		t.Fatal(err)
 	}
 

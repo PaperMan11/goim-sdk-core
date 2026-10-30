@@ -28,7 +28,7 @@ const (
 	adminUserID = "imAdmin"
 
 	loginTimeout  = 30 * time.Second // Login 含同步流程
-	eventTimeout  = 10 * time.Second
+	eventTimeout  = 20 * time.Second
 	evWaitTimeout = 10 * time.Second
 )
 

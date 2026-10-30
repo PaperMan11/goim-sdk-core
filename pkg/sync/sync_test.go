@@ -79,7 +79,7 @@ func (m *mockMsgSource) PullMsgBySeq(ctx context.Context, userID string, seqRang
 		for i := begin; i <= end; i++ {
 			pr.Msgs = append(pr.Msgs, &model.MsgData{
 				ConversationID: r.ConversationID,
-				Seqs:           convert.ToString(i),
+				Seq:            i,
 			})
 		}
 		out[r.ConversationID] = pr
@@ -353,8 +353,8 @@ func TestSeqSync_GapPull(t *testing.T) {
 	if len(msgs) != 250 {
 		t.Fatalf("conv1 msgs = %d, want 250", len(msgs))
 	}
-	if msgs[0].Seqs != "1" || msgs[len(msgs)-1].Seqs != "250" {
-		t.Errorf("first/last seq = %s/%s, want 1/250", msgs[0].Seqs, msgs[len(msgs)-1].Seqs)
+	if msgs[0].Seq != 1 || msgs[len(msgs)-1].Seq != 250 {
+		t.Errorf("first/last seq = %d/%d, want 1/250", msgs[0].Seq, msgs[len(msgs)-1].Seq)
 	}
 
 	// 游标前移
@@ -437,7 +437,7 @@ func TestSeqSync_NonAdvancingCursorGuard(t *testing.T) {
 		genFull:   true,
 		// 第 2 批 [101,200] 返回滞后 seq=100（游标停滞），其余批次正常
 		script: map[int]*model.PullMsgsResult{
-			2: {Msgs: []*model.MsgData{{ConversationID: "conv1", Seqs: "100"}}},
+			2: {Msgs: []*model.MsgData{{ConversationID: "conv1", Seq: 100}}},
 		},
 	}
 	stor := storage.NewMemoryStorage()

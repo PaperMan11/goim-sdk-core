@@ -23,7 +23,7 @@ type MsgMgr interface {
 	RevokeMsg(ctx context.Context, conversationID string, seq int64) error
 	MarkMsgsAsRead(ctx context.Context, conversationID string, seqs []int64) error
 	MarkConversationAsRead(ctx context.Context, conversationID string, hasReadSeq int64, seqs []int64) error
-	GetConversationsHasReadAndMaxSeq(ctx context.Context, conversationIDs []string, returnPinned bool) (*model.SeqInfo, error)
+	GetConversationsHasReadAndMaxSeq(ctx context.Context, conversationIDs []string, returnPinned bool) (seqs map[string]*model.SeqInfo, pinnedConversationIDs []string, err error)
 	ClearConversationMsg(ctx context.Context, conversationIDs []string, syncOpt *model.DeleteSyncOpt) error
 	DeleteMsgs(ctx context.Context, conversationID string, seqs []int64, syncOpt *model.DeleteSyncOpt) error
 	DeleteMsgPhysicalBySeq(ctx context.Context, conversationID string, seqs []int64) error

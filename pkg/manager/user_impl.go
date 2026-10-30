@@ -127,13 +127,14 @@ func (m *DefaultUserMgr) GetUsersOnlineStatus(ctx context.Context, userID string
 		UserID  string   `json:"userID"`
 		UserIDs []string `json:"userIDs"`
 	}{UserID: userID, UserIDs: userIDs}
+	// 服务端 GetUserStatusResp 字段为 statusList（handler: a2r → UserService.GetUserStatus）
 	var resp struct {
-		SuccessResult []*model.OnlineStatus `json:"successResult"`
+		StatusList []*model.OnlineStatus `json:"statusList"`
 	}
 	if err := m.http.Post(ctx, "/user/get_users_online_status", req, &resp); err != nil {
 		return nil, fmt.Errorf("get users online status: %w", err)
 	}
-	return resp.SuccessResult, nil
+	return resp.StatusList, nil
 }
 
 func (m *DefaultUserMgr) SubscribeUsersStatus(ctx context.Context, userID string, userIDs []string, genre int32) ([]*model.OnlineStatus, error) {
@@ -168,11 +169,14 @@ func (m *DefaultUserMgr) GetUserClientConfig(ctx context.Context, userID string)
 	req := struct {
 		UserID string `json:"userID"`
 	}{UserID: userID}
-	var resp map[string]string
+	// 服务端 GetUserClientConfigResp：{configs map[string]string}
+	var resp struct {
+		Configs map[string]string `json:"configs"`
+	}
 	if err := m.http.Post(ctx, "/user/get_user_client_config", req, &resp); err != nil {
 		return nil, fmt.Errorf("get user client config: %w", err)
 	}
-	return resp, nil
+	return resp.Configs, nil
 }
 
 func (m *DefaultUserMgr) SetUserClientConfig(ctx context.Context, userID string, configs map[string]string) error {

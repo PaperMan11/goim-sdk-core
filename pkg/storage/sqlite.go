@@ -14,7 +14,6 @@ import (
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
-	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
 )
 
 // SQLiteStorage SQLite 实现（gorm + glebarez/sqlite 纯 Go 驱动，无 CGO）
@@ -156,13 +155,13 @@ func msgDataToRow(owner string, m *model.MsgData) (*MessageRow, error) {
 		OwnerUserID:    owner,
 		ClientMsgID:    m.ClientMsgID,
 		ServerMsgID:    m.ServerMsgID,
-		Seq:            convert.ToInt64(m.Seqs),
+		Seq:            m.Seq,
 		ConversationID: m.ConversationID,
 		SenderID:       m.SendID,
 		RecvID:         m.RecvID,
-		ContentType:    m.MsgType,
+		ContentType:    m.ContentType,
 		Status:         m.Status,
-		SendTime:       m.CreateTime,
+		SendTime:       m.SendTime,
 		Content:        m.Content,
 		DataJSON:       string(b),
 	}, nil
@@ -171,7 +170,7 @@ func msgDataToRow(owner string, m *model.MsgData) (*MessageRow, error) {
 func (s *SQLiteStorage) UpsertMsgs(owner string, msgs []*model.MsgData) error {
 	rows := make([]*MessageRow, 0, len(msgs))
 	for _, m := range msgs {
-		if m == nil || convert.ToInt64(m.Seqs) <= 0 {
+		if m == nil || m.Seq <= 0 {
 			continue
 		}
 		row, err := msgDataToRow(owner, m)

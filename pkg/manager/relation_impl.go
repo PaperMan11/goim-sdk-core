@@ -64,14 +64,15 @@ func (m *DefaultRelMgr) GetFriendList(ctx context.Context, userID string, pagina
 		UserID     string                   `json:"userID"`
 		Pagination *model.RequestPagination `json:"pagination"`
 	}{UserID: userID, Pagination: pagination}
+	// 服务端 GetPaginationFriendsResp 字段为 friendsInfo（非 friends）
 	var resp struct {
-		Total   int32               `json:"total"`
-		Friends []*model.FriendInfo `json:"friends"`
+		Total       int32               `json:"total"`
+		FriendsInfo []*model.FriendInfo `json:"friendsInfo"`
 	}
 	if err := m.http.Post(ctx, "/relation/get_friend_list", req, &resp); err != nil {
 		return 0, nil, fmt.Errorf("get friend list: %w", err)
 	}
-	return resp.Total, resp.Friends, nil
+	return resp.Total, resp.FriendsInfo, nil
 }
 
 func (m *DefaultRelMgr) GetFriendApplyList(ctx context.Context, userID string, pagination *model.RequestPagination, handleResults []int32) (int32, []*model.FriendRequest, error) {
@@ -80,14 +81,15 @@ func (m *DefaultRelMgr) GetFriendApplyList(ctx context.Context, userID string, p
 		Pagination    *model.RequestPagination `json:"pagination"`
 		HandleResults []int32                  `json:"handleResults"`
 	}{UserID: userID, Pagination: pagination, HandleResults: handleResults}
+	// 服务端 GetPaginationFriendsApplyToResp 字段为 FriendRequests（proto name 首字母大写）
 	var resp struct {
-		Total    int32                  `json:"total"`
-		Requests []*model.FriendRequest `json:"requests"`
+		Total          int32                  `json:"total"`
+		FriendRequests []*model.FriendRequest `json:"FriendRequests"`
 	}
 	if err := m.http.Post(ctx, "/relation/get_friend_apply_list", req, &resp); err != nil {
 		return 0, nil, fmt.Errorf("get friend apply list: %w", err)
 	}
-	return resp.Total, resp.Requests, nil
+	return resp.Total, resp.FriendRequests, nil
 }
 
 func (m *DefaultRelMgr) GetSelfFriendApplyList(ctx context.Context, userID string, pagination *model.RequestPagination, handleResults []int32) (int32, []*model.FriendRequest, error) {
@@ -96,14 +98,15 @@ func (m *DefaultRelMgr) GetSelfFriendApplyList(ctx context.Context, userID strin
 		Pagination    *model.RequestPagination `json:"pagination"`
 		HandleResults []int32                  `json:"handleResults"`
 	}{UserID: userID, Pagination: pagination, HandleResults: handleResults}
+	// 服务端 GetPaginationFriendsApplyFromResp 字段为 friendRequests
 	var resp struct {
-		Total    int32                  `json:"total"`
-		Requests []*model.FriendRequest `json:"requests"`
+		Total          int32                  `json:"total"`
+		FriendRequests []*model.FriendRequest `json:"friendRequests"`
 	}
 	if err := m.http.Post(ctx, "/relation/get_self_friend_apply_list", req, &resp); err != nil {
 		return 0, nil, fmt.Errorf("get self friend apply list: %w", err)
 	}
-	return resp.Total, resp.Requests, nil
+	return resp.Total, resp.FriendRequests, nil
 }
 
 func (m *DefaultRelMgr) SetFriendRemark(ctx context.Context, ownerUserID, friendUserID, remark string) error {
