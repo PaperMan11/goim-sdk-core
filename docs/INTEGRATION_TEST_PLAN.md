@@ -126,20 +126,22 @@ go test ./test/integration/... -v -count=1
 | E2.5 | PullMsgBySeq（1002） | 指定 seq 范围/分页/order 拉取 | 返回条数与范围一致，`IsEnd`/`EndSeq` 正确 |
 | E2.6 | 历史消息落库 | 收发 N 条后查 SQLite | 消息与 seq 完整、可按会话查询 |
 | E2.7 | 消息持久化参数 | 验证服务端在线/离线推送均可达 | 在线走 gateway 推送，离线登录后走 sync，两条路径都拿到同一 clientMsgID |
+| E2.8 | 推送消息落库（2001 实时持久化） | B 在线，A 发 1 条消息 | B 收到 `OnNewMessage` 后直接查 B 的 SQLite：该消息已存在（clientMsgID 匹配、内容一致）；且 maxSeqs 游标**未**被推送推进（推送可能丢失/乱序，游标仅由 gap 拉取推进） |
 
 ### E3 推送事件（WS 2001 系统通知分流）
 
 | # | 用例 | 触发方 | 预期事件（接收方断言） |
 |---|---|---|---|
 | E3.1 | 普通消息推送 | A 发消息 | B `EventNewMsg` |
-| E3.2 | 撤回（2101） | A `Msg().RevokeMsg` | B `OnMessageRevoked(clientMsgID)` |
-| E3.3 | 已读（2200） | B `Msg().MarkConversationAsRead` | A `EventMarkAsRead`，seq 正确 |
-| E3.4 | 删除（2102） | `DeleteMsgs` | `EventDeleteMsgs` |
+| E3.2 | 撤回（2101） | A `Msg().RevokeMsg` | B `OnMessageRevoked(clientMsgID)`；且 B 的 SQLite 中该 seq 消息 Status=MsgStatusRevoked（SDK 先应用缓存再发布事件） |
+| E3.3 | 已读（2200） | B `Msg().MarkConversationAsRead` | A `EventMarkAsRead`，seq 正确；且 A 的 SQLite 中对应消息 IsRead=true（seqs 列表与 HasReadSeq 兜底两种形态均验证） |
+| E3.4 | 删除（2102） | `DeleteMsgs` | `EventDeleteMsgs`；且接收方 SQLite 中该 seq 消息已删除 |
 | E3.5 | 好友事件（1201-1210） | A 加 B 好友 / 同意 / 备注 / 删除 | B 对应 Friend 事件（EventFriendApplication / EventFriendAdded / EventFriendInfoChanged / EventFriendDeleted） |
 | E3.6 | 群事件（1501-1515） | 建群 / 邀请 / 踢人 / 退群 / 禁言 / 解散 | 各 Group 事件 payload 中群 ID 与成员正确 |
 | E3.7 | 用户资料变更（1303） | A 更新资料 | 已订阅方 `EventUserInfoUpdated` |
 | E3.8 | 在线状态订阅（2005） | B `User().SubscribeUsersStatus(u1)` → u1 上/下线 | `EventUserStatusChange`（2004 后台状态同法验证） |
 | E3.9 | 未映射 contentType | 人为构造未知通知（或记录服务端既有类型） | SDK warn 日志 `unmapped contentType`，不 panic |
+| E3.10 | 实体类通知触发增量同步 | A 加好友 / 建群（产生 1201-1210/1501-1515 通知） | B **不重连**，约 500ms 去抖后 B 的 SQLite friend/group 缓存自动更新（通知 Detail 仅含 ID 列表，SDK 须自行拉取增量补全实体）；与登录同步互斥不冲突 |
 
 ### E4 五类实体增量同步（EntitySync）
 
@@ -172,7 +174,7 @@ go test ./test/integration/... -v -count=1
 | # | 用例 | 步骤 | 预期 |
 |---|---|---|---|
 | E6.1 | SQLite 重启恢复 | 收发消息 → 销毁 Client → 新建同路径 Client → Login | 游标保留，登录走增量（对比首登日志确认未全量重拉），消息完整 |
-| E6.2 | 多账号 owner 隔离 | 同一 DB 路径先后登录 u1、u2 | 数据按 owner 隔离，互不污染 |
+| E6.2 | 多账号 owner 隔离 | 同一 DB 路径先后登录 u1、u2 | 数据按 owner 隔离，互不污染；u1/u2 同 C2C 会话同 seq 的消息共存（消息唯一索引含 owner_user_id，C2C 会话 ID 双方一致、seq 服务端共享） |
 | E6.3 | clearData 全量重同步 | `Logout(true)` → 重登 | 本地清空后走 full 同步，数据最终一致 |
 | E6.4 | 内存存储模式 | `ClientConfig` 不配 Storage/SessionDataPath | 功能可用，重启数据丢失（行为符合文档） |
 
