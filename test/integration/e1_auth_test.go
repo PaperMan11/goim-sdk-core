@@ -1,7 +1,8 @@
 package integration
 
 // E1 认证与连接（docs/INTEGRATION_TEST_PLAN.md §3 E1）
-// 覆盖：E1.1 错误 secret / E1.3 重复 Login / E1.4 未登录直连 / E1.5 token 过期 / E1.6 Logout
+// 覆盖：E1.1 错误 secret / E1.3 重复 Login / E1.4 未登录直连 / E1.5 token 过期 /
+// E1.6 Logout / E1.7 登录与同步解耦契约
 //
 // 实测背景（E0 阶段）：
 //   - R8：get_user_token 不校验用户注册态，"未注册登录失败"不成立（用例已移至错误凭证场景）
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/PaperMan11/goim-sdk-core/pkg/client"
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
@@ -51,6 +53,10 @@ func TestE1_RepeatedLogin(t *testing.T) {
 	// 重复 Login（同账号同平台）
 	require.NoError(t, c.Login(ctx, userID, platformID), "repeated login should not fail")
 	assert.Equal(t, transport.TransportStatusConnected, c.Status())
+
+	// E1.3 解耦语义：重复登录取消旧轮后台同步、重新拉起，最终收敛 Synced
+	ec.wait(t, events.EventSyncFinish, eventTimeout)
+	assert.Equal(t, client.SyncStateSynced, c.SyncState())
 
 	// 登录态可用：鉴权 HTTP 正常返回（游标/存储未被二次登录破坏的间接验证）
 	infos, err := c.User().GetUsersInfo(ctx, []string{userID})
@@ -124,17 +130,43 @@ func TestE1_LogoutKeepAndClear(t *testing.T) {
 	require.NoError(t, c.Login(ctx, userID, platformID))
 	ec.wait(t, events.EventLoginSuccess, eventTimeout)
 
-	// Logout(false)：断连 + 保留本地数据
+	// Logout(false)：断连 + 保留本地数据 + 取消在途后台同步（E1.6 解耦语义：状态复位 None）
 	// 结论（E1.6 实测）：主动 Disconnect 不发布 EventDisconnect（transport 仅对被动断开
 	// 发事件，见 Client 接口注释）——登出是宿主主动调用的，用返回值 + Status() 断言即可
 	require.NoError(t, c.Logout(false))
 	assert.Equal(t, transport.TransportStatusDisconnected, c.Status())
+	assert.Equal(t, client.SyncStateNone, c.SyncState())
 
-	// 重新登录（数据保留，走增量同步）
+	// 重新登录（数据保留，走增量同步）；等后台同步完成再清数据
 	require.NoError(t, c.Login(ctx, userID, platformID))
 	ec.wait(t, events.EventLoginSuccess, eventTimeout)
+	ec.wait(t, events.EventSyncFinish, eventTimeout)
 
 	// Logout(true)：断连 + 清除本地数据（下次登录走 full 同步，E6.3 深入验证）
 	require.NoError(t, c.Logout(true))
 	assert.Equal(t, transport.TransportStatusDisconnected, c.Status())
+}
+
+// TestE1_LoginSyncDecoupling E1.7 登录与同步解耦契约：Login 立即返回（不等数据就绪），
+// 后台同步以 EventSyncStart → EventSyncFinish 事件序列收尾，SyncState 流转 Syncing → Synced
+func TestE1_LoginSyncDecoupling(t *testing.T) {
+	requireEnv(t)
+
+	userID := uniqueUser("u1")
+	registerUsers(t, userID)
+
+	c, ec := newTestClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), loginTimeout)
+	defer cancel()
+
+	require.NoError(t, c.Login(ctx, userID, platformID))
+
+	// 登录返回时刻：连接已就绪、同步在后台进行中（未阻塞等待数据）
+	assert.Equal(t, transport.TransportStatusConnected, c.Status())
+	assert.Equal(t, client.SyncStateSyncing, c.SyncState())
+
+	// 后台同步事件序列与状态收敛
+	ec.wait(t, events.EventSyncStart, eventTimeout)
+	ec.wait(t, events.EventSyncFinish, eventTimeout)
+	assert.Equal(t, client.SyncStateSynced, c.SyncState())
 }

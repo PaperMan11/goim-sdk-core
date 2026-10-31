@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
+	sdkSync "github.com/PaperMan11/goim-sdk-core/pkg/sync"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 
 	pbconstant "github.com/PaperMan11/goim/pkg/protocol/constant"
@@ -29,6 +31,9 @@ type mockTransport struct {
 	onConnecting   func()
 	onReconnected  func(ctx context.Context)
 	onDisconnected func()
+	// sendAndWait 可注入 WS 请求-应答行为（SeqSync 的 NewestSeq/PullMsgBySeq 走此路径）；
+	// nil 时返回空 Response（proto 全零值 → 空会话列表 → 无 gap）
+	sendAndWait func(ctx context.Context, req *transport.Request) (*transport.Response, error)
 }
 
 func newMockTransport() *mockTransport {
@@ -48,7 +53,10 @@ func (m *mockTransport) SendRequest(ctx context.Context, req *transport.Request)
 	return nil
 }
 func (m *mockTransport) SendRequestAndWait(ctx context.Context, req *transport.Request) (*transport.Response, error) {
-	return nil, nil
+	if m.sendAndWait != nil {
+		return m.sendAndWait(ctx, req)
+	}
+	return &transport.Response{ReqIdentifier: req.ReqIdentifier}, nil
 }
 func (m *mockTransport) Router() *transport.MessageRouter { return m.router }
 func (m *mockTransport) SetConnectParams(p transport.ConnectParams) {
@@ -477,6 +485,91 @@ func TestPushNotificationTriggersEntitySync(t *testing.T) {
 	}
 }
 
+// TestTargetedEntitySync 定向增量同步：通知只拉对应实体类型的增量，
+// 去抖窗口内未变更的类型不发请求（每次突发 5 个增量请求 → 1 个）
+func TestTargetedEntitySync(t *testing.T) {
+	var mu sync.Mutex
+	requested := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requested[r.URL.Path]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		write := func(data interface{}) {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "msg": "", "data": data})
+		}
+		switch r.URL.Path {
+		case "/relation/get_incremental_friends":
+			write(map[string]interface{}{
+				"versionID": "fv1", "version": 1,
+				"insert": []map[string]interface{}{
+					{"ownerUserID": "u1", "friendUserID": "bob", "createTime": 1},
+				},
+			})
+		default:
+			write(map[string]interface{}{"versionID": "v1", "version": 1})
+		}
+	}))
+	defer srv.Close()
+
+	m := newMockTransport()
+	cli := NewClient(&ClientConfig{BaseURL: srv.URL, Transport: m}).(*DefaultClient)
+	loginTestClient(cli, "u1")
+
+	waitEvent := func(et events.EventType) {
+		t.Helper()
+		done := make(chan struct{}, 1)
+		ch, unsub := cli.Subscribe(et)
+		defer unsub()
+		go func() {
+			for range ch {
+				done <- struct{}{}
+			}
+		}()
+		waitForSubscribe(t, done)
+	}
+
+	// 1204 好友通知 → 仅请求好友增量
+	data, err := proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.FriendAddedNotification,
+		&pbsdk.FromToUserID{FromUserID: "alice", ToUserID: "u1"},
+		9)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+	waitEvent(events.EventFriendListSynced)
+
+	// 1300 会话通知（下一个去抖窗口）→ 仅请求会话增量
+	data, err = proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.ConversationChangeNotification,
+		&pbsdk.ConversationUpdateTips{UserID: "u1", ConversationIDList: []string{"si_c2c_alice"}},
+		10)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+	waitEvent(events.EventConversationSynced)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requested["/relation/get_incremental_friends"] != 1 {
+		t.Fatalf("friends incremental requested %d times, want 1", requested["/relation/get_incremental_friends"])
+	}
+	if requested["/conversation/get_incremental_conversations"] != 1 {
+		t.Fatalf("conversations incremental requested %d times, want 1",
+			requested["/conversation/get_incremental_conversations"])
+	}
+	for _, path := range []string{
+		"/relation/get_incremental_blacks",
+		"/group/get_incremental_join_groups",
+	} {
+		if requested[path] != 0 {
+			t.Fatalf("unchanged entity must not be requested: path=%s count=%d", path, requested[path])
+		}
+	}
+}
+
 // TestAcquireUserTokenStoresToken 登录链路 token 存取验证（排查"登录成功后未保存 token"报告）：
 //  1. AdminSecret bootstrap：get_user_token 请求携带 admin token（R7）
 //  2. 响应 token/expireTimeSeconds 正确解析（服务端字段名 token/expireTimeSeconds 已比对 pb.go）
@@ -614,5 +707,222 @@ func TestRefreshRecoversFromServerSideInvalidation(t *testing.T) {
 	}
 	if got, _ := lastBizToken.Load().(string); got != "user-tok-2" {
 		t.Errorf("post-acquire business token = %q, want user-tok-2 (curUser must be restored)", got)
+	}
+}
+
+// syncMockServer 实体增量同步 mock 服务端（seq 走 WS mock，实体走 HTTP）
+func syncMockServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		write := func(data interface{}) {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "msg": "", "data": data})
+		}
+		switch r.URL.Path {
+		case "/relation/get_incremental_friends",
+			"/relation/get_incremental_blacks",
+			"/group/get_incremental_join_groups",
+			"/conversation/get_incremental_conversations":
+			write(map[string]interface{}{"versionID": "v1", "version": 1})
+		default:
+			write(map[string]interface{}{})
+		}
+	}))
+}
+
+// TestLoginSyncDecoupled 登录与数据同步解耦：Login 在 Token+WS 就绪后立即返回，
+// 同步在后台执行（SyncState: Syncing → Synced，EventSyncStart/EventSyncFinish 顺序到达）。
+// Seq 端点故意延迟，保证 Login 返回时同步仍在进行，时序可断言。
+func TestLoginSyncDecoupled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		write := func(data interface{}) {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "msg": "", "data": data})
+		}
+		switch r.URL.Path {
+		case "/auth/get_user_token":
+			write(map[string]interface{}{"token": "user-tok", "expireTimeSeconds": 3600})
+		case "/relation/get_incremental_friends",
+			"/relation/get_incremental_blacks",
+			"/group/get_incremental_join_groups",
+			"/conversation/get_incremental_conversations":
+			time.Sleep(200 * time.Millisecond) // 拖慢实体同步，Login 返回时同步应仍在进行
+			write(map[string]interface{}{"versionID": "v1", "version": 1})
+		default:
+			write(map[string]interface{}{})
+		}
+	}))
+	defer srv.Close()
+
+	m := newMockTransport()
+	cli := NewClient(&ClientConfig{BaseURL: srv.URL, Transport: m}).(*DefaultClient)
+
+	var mu sync.Mutex
+	started, finished, loginOK := false, false, false
+	cli.OnSyncStart(func() { mu.Lock(); started = true; mu.Unlock() })
+	cli.OnSyncFinish(func() { mu.Lock(); finished = true; mu.Unlock() })
+	cli.OnLoginSuccess(func() { mu.Lock(); loginOK = true; mu.Unlock() })
+
+	if err := cli.LoginWithToken(context.Background(), "u1", 1, "user-tok", 3600); err != nil {
+		t.Fatalf("LoginWithToken: %v", err)
+	}
+
+	// 登录立即返回：不等同步（Seq 端点延迟 200ms，此时同步必然未完成）
+	if got := cli.SyncState(); got != SyncStateSyncing {
+		t.Fatalf("SyncState right after login = %v, want SyncStateSyncing", got)
+	}
+
+	// 等待后台同步完成
+	deadline := time.After(3 * time.Second)
+	for cli.SyncState() != SyncStateSynced {
+		select {
+		case <-deadline:
+			t.Fatalf("sync not finished within 3s, state=%v", cli.SyncState())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !loginOK || !started || !finished {
+		t.Fatalf("events not all fired: loginSuccess=%v syncStart=%v syncFinish=%v", loginOK, started, finished)
+	}
+	// 事件顺序：EventLoginSuccess 先于 EventSyncFinish（同步不回灌登录事件）
+	if !loginOK {
+		t.Fatal("EventLoginSuccess must fire")
+	}
+}
+
+// TestBackgroundSyncFailed 后台同步失败：发 EventSyncFailed（不再伪装成 EventLoginFailed），
+// SyncState 置 Failed；登录本身仍成功
+func TestBackgroundSyncFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "msg": "", "data": map[string]interface{}{}})
+	}))
+	defer srv.Close()
+
+	// NewestSeq（WS 1001）返回错误 → SeqSync 失败 → 整轮同步失败
+	m := newMockTransport()
+	m.sendAndWait = func(ctx context.Context, req *transport.Request) (*transport.Response, error) {
+		if req.ReqIdentifier == transport.WSGetNewestSeq {
+			return nil, fmt.Errorf("mock: ws closed")
+		}
+		return &transport.Response{ReqIdentifier: req.ReqIdentifier}, nil
+	}
+	cli := NewClient(&ClientConfig{BaseURL: srv.URL, Transport: m}).(*DefaultClient)
+
+	failed := make(chan error, 1)
+	cli.OnSyncFailed(func(err error) { failed <- err })
+	loginOK := make(chan struct{}, 1)
+	cli.OnLoginSuccess(func() { loginOK <- struct{}{} })
+
+	if err := cli.LoginWithToken(context.Background(), "u1", 1, "user-tok", 3600); err != nil {
+		t.Fatalf("LoginWithToken must still succeed, err=%v", err)
+	}
+	select {
+	case <-loginOK:
+	case <-time.After(2 * time.Second):
+		t.Fatal("EventLoginSuccess not fired")
+	}
+
+	select {
+	case err := <-failed:
+		if err == nil {
+			t.Fatal("EventSyncFailed payload err is nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EventSyncFailed not fired")
+	}
+	if got := cli.SyncState(); got != SyncStateFailed {
+		t.Fatalf("SyncState = %v, want SyncStateFailed", got)
+	}
+}
+
+// TestLogoutCancelsBackgroundSync 登出取消在途后台同步：SyncState 复位 None，
+// 取消后不再发 EventSyncFinish / EventSyncFailed
+func TestLogoutCancelsBackgroundSync(t *testing.T) {
+	release := make(chan struct{})
+	srv := syncMockServer()
+	defer srv.Close()
+
+	m := newMockTransport()
+	m.sendAndWait = func(ctx context.Context, req *transport.Request) (*transport.Response, error) {
+		if req.ReqIdentifier == transport.WSGetNewestSeq {
+			// 模拟慢请求：只有 Logout 的 ctx 取消能终结它
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-release:
+			}
+		}
+		return &transport.Response{ReqIdentifier: req.ReqIdentifier}, nil
+	}
+	cli := NewClient(&ClientConfig{BaseURL: srv.URL, Transport: m}).(*DefaultClient)
+	loginTestClient(cli, "u1")
+
+	started := make(chan struct{}, 1)
+	cli.OnSyncStart(func() { started <- struct{}{} })
+	cli.OnSyncFinish(func() { t.Error("EventSyncFinish must not fire after logout") })
+	cli.OnSyncFailed(func(err error) { t.Error("EventSyncFailed must not fire after logout") })
+
+	cli.startBackgroundSync("u1")
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("EventSyncStart not fired")
+	}
+	if got := cli.SyncState(); got != SyncStateSyncing {
+		t.Fatalf("SyncState = %v, want SyncStateSyncing", got)
+	}
+
+	if err := cli.Logout(false); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if got := cli.SyncState(); got != SyncStateNone {
+		t.Fatalf("SyncState after logout = %v, want SyncStateNone", got)
+	}
+
+	// 放行阻塞请求：旧轮 goroutine 退出时须因 gen 过期而静默（不发事件）
+	close(release)
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestStopPendingEntitySyncOnTeardown Logout / Close 必须停止未触发的通知去抖同步：
+// 定时器与 pending 清除；极端时序下回调仍被触发时，登录态门禁直接返回、不访问存储
+// （回归：集成测试 t.Cleanup(Close) 无 Logout 的路径曾报 "sql: database is closed"）
+func TestStopPendingEntitySyncOnTeardown(t *testing.T) {
+	for _, teardown := range []struct {
+		name string
+		fn   func(c *DefaultClient) error
+	}{
+		{"logout", func(c *DefaultClient) error { return c.Logout(false) }},
+		{"close", func(c *DefaultClient) error { return c.Close() }},
+	} {
+		t.Run(teardown.name, func(t *testing.T) {
+			m := newMockTransport()
+			cli := NewClient(&ClientConfig{Transport: m}).(*DefaultClient)
+			loginTestClient(cli, "u1")
+
+			// 通知触发去抖（定时器 500ms 后才会执行）
+			cli.triggerEntitySync(sdkSync.KindFriend, sdkSync.KindGroup)
+			if cli.entitySyncTimer == nil || len(cli.entitySyncPending) != 2 {
+				t.Fatal("debounce timer/pending not armed")
+			}
+
+			if err := teardown.fn(cli); err != nil {
+				t.Fatalf("%s: %v", teardown.name, err)
+			}
+			if cli.entitySyncTimer != nil || cli.entitySyncPending != nil {
+				t.Fatalf("%s must stop debounce timer and drop pending kinds", teardown.name)
+			}
+			if got := cli.SyncState(); got != SyncStateNone {
+				t.Fatalf("SyncState after %s = %v, want SyncStateNone", teardown.name, got)
+			}
+
+			// 极端时序兜底：假设 Stop 与定时器触发竞态，pending 复活，
+			// 回调必须被登录态门禁拦下（Logout/Close 已置 loggedIn=false），不触碰存储
+			cli.entitySyncPending = map[sdkSync.EntityKind]struct{}{sdkSync.KindFriend: {}}
+			cli.runEntitySyncDebounced()
+		})
 	}
 }

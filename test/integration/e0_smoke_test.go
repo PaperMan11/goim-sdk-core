@@ -33,7 +33,8 @@ func TestE0_RegisterUsers(t *testing.T) {
 	t.Logf("registered users: %v", users)
 }
 
-// TestE0_LoginFullFlow E0.5 Login 全链路：GetUserToken → WS Connect → SeqSync → EntitySync
+// TestE0_LoginFullFlow E0.5 Login 全链路：GetUserToken → WS Connect 即成功返回
+// （数据同步移入后台，以 SyncStart → SyncFinish 收尾，见 E1.7 解耦契约）
 // 同时回归 R1 修复：登录后 HTTP 请求按 (userID, platformID) 带上 token
 func TestE0_LoginFullFlow(t *testing.T) {
 	requireEnv(t)
@@ -45,7 +46,7 @@ func TestE0_LoginFullFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), loginTimeout)
 	defer cancel()
 
-	// Login 全链路（内部完成同步，失败即 EventLoginFailed + error）
+	// Login：Token + WS 就绪即返回（不等同步）
 	require.NoError(t, c.Login(ctx, userID, platformID))
 
 	// 传输层状态与事件顺序：Connecting → Connect → LoginSuccess
@@ -53,14 +54,21 @@ func TestE0_LoginFullFlow(t *testing.T) {
 	ec.wait(t, events.EventConnect, eventTimeout)
 	ec.wait(t, events.EventLoginSuccess, eventTimeout)
 
+	// 解耦契约：登录返回时同步进行中，后台同步完成后收敛 Synced
+	assert.Equal(t, client.SyncStateSyncing, c.SyncState())
+	ec.wait(t, events.EventSyncStart, eventTimeout)
+	ec.wait(t, events.EventSyncFinish, eventTimeout)
+	assert.Equal(t, client.SyncStateSynced, c.SyncState())
+
 	// R1 回归：已登录 client 发起需鉴权 HTTP 请求，token 应正确注入
 	infos, err := c.User().GetUsersInfo(ctx, []string{userID})
 	require.NoError(t, err, "R1 regression: authenticated HTTP after login")
 	t.Logf("GetUsersInfo: %+v", infos)
 
-	// Logout 断连
+	// Logout 断连 + 取消在途同步（状态复位 None）
 	require.NoError(t, c.Logout(false))
 	assert.Equal(t, transport.TransportStatusDisconnected, c.Status())
+	assert.Equal(t, client.SyncStateNone, c.SyncState())
 }
 
 // TestE0_LoginFailedWrongAdmin E1.2 错误管理员凭证登录 → EventLoginFailed

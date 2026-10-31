@@ -34,10 +34,25 @@ import (
 //	go build -ldflags "-X github.com/PaperMan11/goim-sdk-core/pkg/client.Version=x.y.z" ./...
 var Version = version.Version
 
+// SyncState 数据同步状态（登录/重连触发的后台同步，与登录流程解耦）
+type SyncState int32
+
+const (
+	SyncStateNone    SyncState = iota // 未开始（未登录 / 已登出 / 被踢下线）
+	SyncStateSyncing                  // 后台同步进行中
+	SyncStateSynced                   // 同步完成，本地缓存与游标一致
+	SyncStateFailed                   // 同步失败（下轮重连或通知触发自动重试）
+)
+
 // Client SDK 统一入口接口
 type Client interface {
 	// —— 生命周期 ——
-	// Login 获取 User Token + 建立 WS 连接 + 触发 SeqSync
+	// Login 获取 User Token + 建立 WS 连接，数据同步移入后台执行（与登录解耦：
+	// 对齐微信/Telegram 做法，登录成功即返回，不等全量同步）。
+	//
+	// 同步进度经 EventSyncStart / EventSyncFinish / EventSyncFailed 事件与
+	// SyncState() 查询暴露；收到 EventLoginSuccess 时本地数据可能仍在同步，
+	// UI 全量刷新应等 EventSyncFinish（增量事件照常实时到达）。
 	//
 	// 两种凭证模式（二选一）：
 	//   - 受信环境（服务端集成/运维工具）：配置 ClientConfig.AdminSecret，
@@ -61,6 +76,8 @@ type Client interface {
 	Disconnect() error
 	// Status 当前传输层状态
 	Status() transport.TransportStatus
+	// SyncState 当前数据同步状态（后台同步与登录解耦后的进度查询）
+	SyncState() SyncState
 
 	// —— Manager 聚合 ——
 	Auth() manager.AuthMgr
@@ -91,6 +108,12 @@ type Client interface {
 	OnLoginFailed(h func(err error))
 	// OnForceLogout 被踢下线（WSKickOnlineMsg / WSLogoutMsg 推送触发）
 	OnForceLogout(h func())
+	// OnSyncStart 登录/重连触发的后台数据同步开始
+	OnSyncStart(h func())
+	// OnSyncFinish 后台数据同步完成（本地数据就绪，UI 可全量刷新）
+	OnSyncFinish(h func())
+	// OnSyncFailed 后台数据同步失败（下轮重连或通知触发自动重试）
+	OnSyncFailed(h func(err error))
 
 	// —— 高频业务回调 ——
 	// OnNewMessage 收到新消息（WSPushMsg 2001 推送，payload 已转为 model.MsgData）

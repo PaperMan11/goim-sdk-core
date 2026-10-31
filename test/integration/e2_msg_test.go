@@ -171,7 +171,8 @@ func TestE2_GroupChatSend(t *testing.T) {
 // TestE2_OfflineSeqSync E2.3 离线消息 SeqSync 补齐 + E2.4 NewestSeq + E2.5 PullMsgBySeq
 //
 // 流程：A/B 在线预热 1 条（拿 conversationID 与基准 seq）→ B 登出 → A 发 10 条 →
-// B 重登 → NewestSeq 前进 10（E2.4）→ PullMsgBySeq 拉回 10 条比对 clientMsgID（E2.5）。
+// B 重登 → 等 EventSyncFinish（后台 SeqSync 补齐完成）→ NewestSeq 前进 10（E2.4）→
+// PullMsgBySeq 拉回 10 条比对 clientMsgID（E2.5）。
 func TestE2_OfflineSeqSync(t *testing.T) {
 	requireEnv(t)
 
@@ -212,12 +213,10 @@ func TestE2_OfflineSeqSync(t *testing.T) {
 		sent = append(sent, resp.ClientMsgID)
 	}
 
-	// B 重登 → 登录流程内 SeqSync 完成
+	// B 重登 → SeqSync 在后台执行（解耦契约），等 EventSyncFinish 补齐完成再断言
 	require.NoError(t, cb.Login(ctx, u2, platformID))
 	ecb.wait(t, events.EventLoginSuccess, eventTimeout)
-
-	// 等待持久化完成
-	// time.Sleep(time.Minute)
+	ecb.wait(t, events.EventSyncFinish, eventTimeout)
 
 	// E2.4：NewestSeq 前进 10
 	afterSeqs, _, err := cb.Msg().NewestSeq(ctx)

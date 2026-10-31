@@ -54,6 +54,9 @@ const (
 	EventTokenRefreshed // Token 刷新成功
 
 	// —— 同步引擎 ——
+	EventSyncStart            // 登录/重连触发的后台数据同步开始（同步与登录解耦，独立于登录结果）
+	EventSyncFinish           // 后台数据同步完成（本地数据就绪，UI 可全量刷新）
+	EventSyncFailed           // 后台数据同步失败（Payload: error；下轮重连或通知触发自动重试）
 	EventSeqSynced            // 消息 Seq gap 拉取完成
 	EventFriendListSynced     // 好友列表本地缓存已更新（增量/全量同步完成，可刷新 UI）
 	EventBlackListSynced      // 黑名单本地缓存已更新

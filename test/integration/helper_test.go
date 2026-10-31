@@ -27,7 +27,7 @@ const (
 	platformID  = 1
 	adminUserID = "imAdmin"
 
-	loginTimeout  = 30 * time.Second // Login 含同步流程
+	loginTimeout  = 30 * time.Second // Login（Token + WS 就绪即返回，同步在后台）
 	eventTimeout  = 20 * time.Second
 	evWaitTimeout = 10 * time.Second
 )

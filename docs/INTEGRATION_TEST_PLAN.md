@@ -16,7 +16,7 @@
 | 不在范围 | 跨语言封装（gomobile/wasm）、性能压测（列为可选附加）、服务端自身功能测试 |
 
 **验证目标（按优先级）**
-1. Login 全链路一次跑通（Token + WS + SeqSync + EntitySync）
+1. Login 全链路一次跑通（Token + WS 就绪即返回；SeqSync + EntitySync 后台完成）
 2. 消息收发与推送事件正确投递
 3. 五类实体（好友/黑名单/群组/群成员/会话）增量同步与游标推进
 4. 断线重连、被踢下线、多端互踢等异常场景恢复
@@ -97,7 +97,7 @@ go test ./test/integration/... -v -count=1
 | E0.2 | 用户注册 | 用 admin token 调 `User().Register(u1/u2/u3)` | 成功；服务端库可查到用户 |
 | E0.3 | GetUserToken | `Login` 内部触发 | token 写入 TokenStore，`EventLoginSuccess`（AuthMgr 层） |
 | E0.4 | WS 连接 | `Connect(ctx)` | `Status()==Connected`，`OnConnecting`→`OnConnect` 事件顺序正确 |
-| E0.5 | Login 全链路 | `Login(ctx, u1, platformID)` | `EventLoginSuccess`；SeqSync + EntitySync 无报错；SDK debug 日志无 error/warn |
+| E0.5 | Login 全链路 | `Login(ctx, u1, platformID)` | `EventLoginSuccess`（Token+WS 就绪即发，**不等同步**）；随后后台 `EventSyncStart` → `EventSyncFinish`（SyncState: Syncing→Synced），SeqSync + EntitySync 无报错；SDK debug 日志无 error/warn |
 
 > ⚠️ E0.1/E0.2 大概率率先暴露 §4 风险 R1（HTTP token 注入选路），先修复再继续。
 
@@ -110,10 +110,21 @@ go test ./test/integration/... -v -count=1
 |---|---|---|---|
 | E1.1 | 错误 secret | GetAdminToken 传错 secret | 返回 `NoPermissionError`；服务端已恢复 secret 校验（常量时间比较），E1.2 错误 AdminUserID 与错误 secret 均可触发登录失败 |
 | E1.2 | 错误管理员凭证登录（原"未注册用户登录"） | Login + 不在服务端管理员列表的 AdminUserID | `EventLoginFailed`，错误信息可读。**实测发现**：R8（get_user_token 不校验用户注册态）、R9（GetAdminToken 不校验 secret，仅校验 userID 是否管理员） |
-| E1.3 | 重复 Login | 已登录状态下再次 Login | 状态一致，不产生脏游标 |
+| E1.3 | 重复 Login | 已登录状态下再次 Login | 状态一致，不产生脏游标；同步已解耦进后台，重复 Login 取消上一轮后台同步（syncGen 递增）并重新拉起，旧轮 goroutine 结束不发事件 |
 | E1.4 | 未登录直接 Connect | 不 Login，直接 Connect（DefaultPlatformID 兜底） | WS 握手行为符合服务端约定（明确接受/拒绝即可，记录结论） |
 | E1.5 | Token 过期 | 服务端配置超短有效期（如 60s）→ 等 90s → 发 HTTP 请求 | 触发 401 类错误码 → SDK 刷新/重试路径；最终成功或给出明确错误 |
-| E1.6 | Logout | `Logout(false)` / `Logout(true)` | 断连 + `EventDisconnect`；clearData=true 后 SQLite 该 owner 数据清空 |
+| E1.6 | Logout | `Logout(false)` / `Logout(true)` | 断连 + `EventDisconnect`；在途后台同步被取消（SyncState→None，不发 EventSyncFinish/Failed）；clearData=true 后 SQLite 该 owner 数据清空 |
+| E1.7 | 登录与同步解耦 | `Login` 返回后立即查 `SyncState()`，再等 `EventSyncFinish` | 登录返回时同步尚未完成（`SyncState()==Syncing`，大首拉场景可观测）；事件序列 `EventLoginSuccess` → `EventSyncStart` → `EventSyncFinish`；完成后 `SyncState()==Synced`，SDK 日志无 error |
+
+> **登录与同步解耦后的预期行为（2026-10-31 起，凡涉及登录/同步的用例均按此语义执行）**：
+>
+> 1. `Login` / `LoginWithToken` 在 Token + WS 就绪后**立即返回**并发 `EventLoginSuccess`，不等数据同步；同步耗时不再拉长登录。
+> 2. 数据同步（SeqSync gap 拉取 + 五类实体增量）在后台 goroutine 执行，事件序列：`EventSyncStart` → `EventSyncFinish`（成功）或 `EventSyncFailed`（失败，Payload 为 error）。
+> 3. 同步状态经 `SyncState()` 查询：`None`（未登录/已登出/被踢）→ `Syncing` → `Synced` / `Failed`；登录返回时必为 `Syncing`。
+> 4. 同步失败**不影响登录成功**——不再伪装成 `EventLoginFailed`；由下轮重连或通知触发的同步自动重试（游标幂等，只补未完成部分）。
+> 5. 断言「本地数据已就绪」的用例（E4.x 首拉、E4.6 全量回退、E5.2 补齐、E6.1/E6.3）须等 `EventSyncFinish`（或轮询 `SyncState()==Synced`），**不得**只等 `EventLoginSuccess`。
+> 6. 重连后的 resync 走同一后台同步：新一轮启动会取消上一轮在途同步（旧轮结束不发事件）；重复 Login 同理。
+> 7. 同步期间 `EventNewMsg` 等实时事件照常到达（推送入库与 gap 拉取同路径幂等，不推进游标）；UI 全量刷新以 `EventSyncFinish` 为信号。
 
 ### E2 消息链路（核心）
 
@@ -145,7 +156,8 @@ go test ./test/integration/... -v -count=1
 
 ### E4 五类实体增量同步（EntitySync）
 
-每类实体走「登录首拉 → 对端操作产生增量 → 重连/重登增量补齐」三步：
+每类实体走「登录后台首拉 → 对端操作产生增量 → 重连/重登增量补齐」三步。
+（登录首拉为后台同步：断言前须等 `EventSyncFinish` 或 `SyncState()==Synced`，见 E1 节说明）
 
 | # | 实体 | 对端操作 | 断言 |
 |---|---|---|---|
@@ -161,9 +173,9 @@ go test ./test/integration/... -v -count=1
 
 | # | 用例 | 步骤 | 预期 |
 |---|---|---|---|
-| E5.1 | 服务端主动断连 | gateway 侧 kill 连接（或重启 msggateway） | SDK 自动重连 → `EventReconnect` → 触发 resync（gap 拉取 + 五类增量） |
-| E5.2 | 断连期间消息补齐 | 断 A 连接 → B 发 5 条 → A 重连 | 重连后 5 条全部补齐 |
-| E5.3 | 多端互踢 | u1 在 platformID=1 在线 → 同账号 platformID=2 登录 | 旧端收到 `OnForceLogout` + 断连（2002/2003），新端正常 |
+| E5.1 | 服务端主动断连 | gateway 侧 kill 连接（或重启 msggateway） | SDK 自动重连 → `EventReconnect` → 触发后台 resync（`EventSyncStart`→`EventSyncFinish`，SyncState: Syncing→Synced；gap 拉取 + 五类增量） |
+| E5.2 | 断连期间消息补齐 | 断 A 连接 → B 发 5 条 → A 重连 | 等待 `EventSyncFinish` 后断言：5 条全部补齐 |
+| E5.3 | 多端互踢 | u1 在 platformID=1 在线 → 同账号 platformID=2 登录 | 旧端收到 `OnForceLogout` + 断连（2002/2003），在途后台同步被取消（SyncState→None，不发 EventSyncFinish/Failed）；新端正常 |
 | E5.4 | 心跳保活 | 连接静置 3 分钟不做任何操作 | 30s ping 周期维持，连接不断（pong 续期 deadline 生效） |
 | E5.5 | 网络中断恢复 | 断网 30s → 恢复 | 重连成功，无 goroutine 泄漏（`Status()` 流转 Disconnected→Connecting→Connected） |
 | E5.6 | 重连期间请求 | 重连窗口内调 `SendMsg` | 返回 notConnected 类明确错误，不挂死（SendRequestAndWait 被唤醒） |
@@ -173,9 +185,9 @@ go test ./test/integration/... -v -count=1
 
 | # | 用例 | 步骤 | 预期 |
 |---|---|---|---|
-| E6.1 | SQLite 重启恢复 | 收发消息 → 销毁 Client → 新建同路径 Client → Login | 游标保留，登录走增量（对比首登日志确认未全量重拉），消息完整 |
+| E6.1 | SQLite 重启恢复 | 收发消息 → 销毁 Client → 新建同路径 Client → Login | 等 `EventSyncFinish` 后断言：游标保留，登录走增量（对比首登日志确认未全量重拉），消息完整 |
 | E6.2 | 多账号 owner 隔离 | 同一 DB 路径先后登录 u1、u2 | 数据按 owner 隔离，互不污染；u1/u2 同 C2C 会话同 seq 的消息共存（消息唯一索引含 owner_user_id，C2C 会话 ID 双方一致、seq 服务端共享） |
-| E6.3 | clearData 全量重同步 | `Logout(true)` → 重登 | 本地清空后走 full 同步，数据最终一致 |
+| E6.3 | clearData 全量重同步 | `Logout(true)` → 重登 | 等 `EventSyncFinish` 后断言：本地清空后走 full 同步，数据最终一致 |
 | E6.4 | 内存存储模式 | `ClientConfig` 不配 Storage/SessionDataPath | 功能可用，重启数据丢失（行为符合文档） |
 
 ### E7 稳定性（可选，对接通过后执行）

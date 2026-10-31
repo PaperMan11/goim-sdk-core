@@ -53,14 +53,20 @@ type DefaultClient struct {
 	loggedIn      bool
 	connectCancel context.CancelFunc // 连接相关 goroutine 的 cancel
 
+	// 后台数据同步（登录/重连触发，与登录流程解耦；mu 保护）
+	syncState  SyncState          // 同步状态（SyncStateNone/Syncing/Synced/Failed）
+	syncGen    uint64             // 同步轮次（start/stopBackgroundSync 递增，防旧轮 goroutine 覆盖新状态）
+	syncCancel context.CancelFunc // 后台同步 goroutine 的 cancel（Logout/被踢/Close/新一轮同步时取消）
+
 	// 同步引擎（Login / 重连后执行）
 	seqSync    *sdkSync.SeqSyncEngine
 	entitySync *sdkSync.EntitySyncEngine
 
-	// 通知驱动的实体增量同步（去抖定时器 + 同步执行互斥）
-	entitySyncMu    sync.Mutex
-	entitySyncTimer *time.Timer
-	syncRunMu       sync.Mutex
+	// 通知驱动的定向实体增量同步（去抖定时器 + 窗口内待同步类型累积 + 执行互斥）
+	entitySyncMu      sync.Mutex
+	entitySyncTimer   *time.Timer
+	entitySyncPending map[sdkSync.EntityKind]struct{} // 去抖窗口内累积的待同步实体类型
+	syncRunMu         sync.Mutex
 }
 
 // NewClient 构造 DefaultClient
@@ -194,7 +200,8 @@ func NewClient(cfg *ClientConfig) Client {
 			Type:      events.EventReconnect,
 			Timestamp: timex.UnixMilli(),
 		})
-		// 重连后：gap 拉取 + 五类实体带游标增量（异步，失败只 warn，下轮重连再补）
+		// 重连后：gap 拉取 + 五类实体带游标增量，走后台同步（进度经
+		// EventSyncStart/EventSyncFinish/EventSyncFailed 暴露；失败下轮重连再补）
 		c.mu.RLock()
 		owner := c.userID
 		loggedIn := c.loggedIn
@@ -202,11 +209,7 @@ func NewClient(cfg *ClientConfig) Client {
 		if !loggedIn || owner == "" {
 			return
 		}
-		go func() {
-			if err := c.runSyncFlow(context.Background(), owner); err != nil {
-				c.logger.Warnf("client: resync after reconnect, owner=%s, error=%v", owner, err.Error())
-			}
-		}()
+		c.startBackgroundSync(owner)
 	})
 	ws.SetOnDisconnected(func() {
 		bus.Publish(events.EventDisconnect, events.Event{
@@ -309,7 +312,7 @@ func (c *DefaultClient) acquireUserToken(ctx context.Context, userID string, pla
 	return resp, err
 }
 
-// loginFlow token 就绪后的公共登录链路：HTTP 选路 → WS 参数 → 连接 → 同步 → 事件
+// loginFlow token 就绪后的公共登录链路：HTTP 选路 → WS 参数 → 连接 → 事件 → 后台同步
 func (c *DefaultClient) loginFlow(ctx context.Context, userID string, platformID int32, token string) error {
 	// 1. HTTP 层 token 选路：TokenStore 按 (userID, platformID) 存取，
 	//    后续 HTTP 请求（实体同步等）按当前用户取 token
@@ -338,26 +341,22 @@ func (c *DefaultClient) loginFlow(ctx context.Context, userID string, platformID
 	// 4. 注入 MsgMgr senderID
 	c.msg.SetSenderID(userID)
 
-	// 5. 数据同步：消息 Seq gap 拉取 + 五类实体游标增量
-	//    全部完成才算登录成功（上层收到 EventLoginSuccess 时本地数据已就绪）
+	// 5. 登录成功：登录语义收敛为「Token + WS 就绪」即返回（对齐微信/Telegram 做法，
+	//    避免全量同步阻塞登录、拉长登录耗时）
 	c.mu.Lock()
 	c.userID = userID
 	c.platformID = platformID
 	c.loggedIn = true
 	c.mu.Unlock()
-	if err := c.runSyncFlow(ctx, userID); err != nil {
-		c.bus.Publish(events.EventLoginFailed, events.Event{
-			Type:      events.EventLoginFailed,
-			Timestamp: timex.UnixMilli(),
-		})
-		return fmt.Errorf("login: sync data: %w", err)
-	}
-
-	// 6. 完整登录成功事件（Token + WS + SeqSync + EntitySync 全部完成）
 	c.bus.Publish(events.EventLoginSuccess, events.Event{
 		Type:      events.EventLoginSuccess,
 		Timestamp: timex.UnixMilli(),
 	})
+
+	// 6. 数据同步移入后台：消息 Seq gap 拉取 + 五类实体游标增量。
+	//    进度经 EventSyncStart/EventSyncFinish/EventSyncFailed 与 SyncState() 暴露，
+	//    失败不再伪装成 EventLoginFailed（连接本身已成功）
+	c.startBackgroundSync(userID)
 
 	return nil
 }
@@ -386,27 +385,129 @@ func (c *DefaultClient) runEntitySync(ctx context.Context, owner string) error {
 	return entitySync.SyncAll(ctx)
 }
 
+// startBackgroundSync 启动后台数据同步（登录 / 重连后调用）
+//
+// 同步在独立 goroutine 执行，与登录流程解耦；进度经 EventSyncStart /
+// EventSyncFinish / EventSyncFailed 事件与 SyncState() 状态暴露。
+// 每轮同步递增 syncGen：新一轮启动或 stopBackgroundSync 取消后，
+// 旧轮 goroutine 结束时不覆盖状态、不发事件，静默退出。
+func (c *DefaultClient) startBackgroundSync(owner string) {
+	c.mu.Lock()
+	if c.syncCancel != nil {
+		c.syncCancel() // 取消在途同步（如重连时上一轮同步仍在拉取）
+	}
+	c.syncGen++
+	gen := c.syncGen
+	ctx, cancel := context.WithCancel(context.Background())
+	c.syncCancel = cancel
+	c.syncState = SyncStateSyncing
+	c.mu.Unlock()
+
+	c.bus.Publish(events.EventSyncStart, events.Event{
+		Type:      events.EventSyncStart,
+		Timestamp: timex.UnixMilli(),
+	})
+
+	go func() {
+		err := c.runSyncFlow(ctx, owner)
+
+		c.mu.Lock()
+		stale := c.syncGen != gen
+		if !stale {
+			if err != nil {
+				c.syncState = SyncStateFailed
+			} else {
+				c.syncState = SyncStateSynced
+			}
+		}
+		c.mu.Unlock()
+		if stale {
+			return
+		}
+		if err != nil {
+			c.logger.Warnf("client: background sync failed, owner=%s, error=%v", owner, err.Error())
+			c.bus.Publish(events.EventSyncFailed, events.Event{
+				Type:      events.EventSyncFailed,
+				Payload:   err,
+				Timestamp: timex.UnixMilli(),
+			})
+			return
+		}
+		c.bus.Publish(events.EventSyncFinish, events.Event{
+			Type:      events.EventSyncFinish,
+			Timestamp: timex.UnixMilli(),
+		})
+	}()
+}
+
+// stopBackgroundSync 取消在途后台同步并复位状态（Logout / 被踢下线 / Close）
+func (c *DefaultClient) stopBackgroundSync() {
+	c.mu.Lock()
+	if c.syncCancel != nil {
+		c.syncCancel()
+		c.syncCancel = nil
+	}
+	c.syncGen++ // 在途同步 goroutine 结束时视为过期，不覆盖状态/不发事件
+	c.syncState = SyncStateNone
+	c.mu.Unlock()
+}
+
+// stopEntitySyncDebounce 停止通知去抖定时器并丢弃 pending 类型（Logout / 被踢 / Close）
+//
+// 不停止的话，Close 关闭存储后定时器仍会触发同步，读到已关闭的数据库
+// （"sql: database is closed"，集成测试 t.Cleanup(Close) 无 Logout 的路径必现）
+func (c *DefaultClient) stopEntitySyncDebounce() {
+	c.entitySyncMu.Lock()
+	defer c.entitySyncMu.Unlock()
+	if c.entitySyncTimer != nil {
+		c.entitySyncTimer.Stop()
+		c.entitySyncTimer = nil
+	}
+	c.entitySyncPending = nil
+}
+
+// SyncState 当前数据同步状态
+func (c *DefaultClient) SyncState() SyncState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.syncState
+}
+
 // entitySyncDebounce 通知驱动的实体同步去抖窗口：突发通知合并为一次增量同步
 const entitySyncDebounce = 500 * time.Millisecond
 
-// triggerEntitySync 收到实体类变更通知（好友/黑名单/群/会话）后去抖触发增量同步，
+// triggerEntitySync 实体类变更通知触发定向增量同步
+//
+// 通知类型映射到具体实体（好友/黑名单/群/会话），去抖窗口内多条通知累积的
+// 类型合并为一次同步，只拉窗口内变更类型的增量，未变更类型不发请求。
 // 让本地缓存在连接期间实时跟进，无需等待下次重连。失败仅告警——缓存最终由
 // 下次触发或重连同步的游标增量收敛。
-func (c *DefaultClient) triggerEntitySync() {
+func (c *DefaultClient) triggerEntitySync(kinds ...sdkSync.EntityKind) {
 	c.entitySyncMu.Lock()
 	defer c.entitySyncMu.Unlock()
+	if c.entitySyncPending == nil {
+		c.entitySyncPending = make(map[sdkSync.EntityKind]struct{}, 4)
+	}
+	for _, k := range kinds {
+		c.entitySyncPending[k] = struct{}{}
+	}
 	if c.entitySyncTimer != nil {
 		c.entitySyncTimer.Stop()
 	}
 	c.entitySyncTimer = time.AfterFunc(entitySyncDebounce, c.runEntitySyncDebounced)
 }
 
-// runEntitySyncDebounced 去抖窗口结束后执行实体增量同步（含登出/执行互斥防护）
+// runEntitySyncDebounced 去抖窗口结束后执行定向实体增量同步（含登出/执行互斥防护）
 func (c *DefaultClient) runEntitySyncDebounced() {
 	c.entitySyncMu.Lock()
 	c.entitySyncTimer = nil
+	pending := c.entitySyncPending
+	c.entitySyncPending = nil
 	c.entitySyncMu.Unlock()
 
+	if len(pending) == 0 {
+		return
+	}
 	c.mu.RLock()
 	owner, loggedIn := c.userID, c.loggedIn
 	c.mu.RUnlock()
@@ -414,12 +515,28 @@ func (c *DefaultClient) runEntitySyncDebounced() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	kinds := make([]sdkSync.EntityKind, 0, len(pending))
+	for k := range pending {
+		kinds = append(kinds, k)
+	}
 	c.syncRunMu.Lock()
 	defer c.syncRunMu.Unlock()
-	if err := c.runEntitySync(ctx, owner); err != nil {
-		c.logger.Warnf("client: entity resync after notification, owner=%s, error=%v", owner, err.Error())
+	// 拿锁后复查登录态：前面读取登录态与真正执行之间可能已 Logout/Close，
+	// 复查与 syncRunMu 握手共同保证不会访问已关闭的存储
+	c.mu.RLock()
+	loggedIn = c.loggedIn
+	c.mu.RUnlock()
+	if !loggedIn {
+		return
+	}
+	// 超时预算在拿到锁之后才开始计：首轮大同步可能持锁很久，
+	// 若在排队前创建 ctx，醒来即超时，pending 已清空导致这批变更被丢弃
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	entitySync := sdkSync.NewEntitySyncEngine(c.rel, c.group, c.conv, c.storage, owner, c.bus, c.logger)
+	if err := entitySync.SyncKinds(ctx, kinds...); err != nil {
+		c.logger.Warnf("client: entity resync after notification, owner=%s, kinds=%v, error=%v",
+			owner, kinds, err.Error())
 	}
 }
 
@@ -430,6 +547,10 @@ func (c *DefaultClient) Logout(clearData bool) error {
 	c.loggedIn = false
 	c.userID = ""
 	c.mu.Unlock()
+
+	// 取消在途后台同步并复位同步状态；停掉未触发的通知去抖同步
+	c.stopBackgroundSync()
+	c.stopEntitySyncDebounce()
 
 	// 主动 Disconnect（不会触发 OnDisconnected，因为 actorsExited 里 stillConnected=false）
 	_ = c.Disconnect()
@@ -453,9 +574,19 @@ func (c *DefaultClient) Logout(clearData bool) error {
 	return nil
 }
 
-// Close 释放资源：断开 WS + 关闭底层存储（SQLite 句柄，Windows 下不关闭会锁文件）
+// Close 释放资源：断开 WS + 停止全部同步 + 关闭底层存储（SQLite 句柄，Windows 下不关闭会锁文件）
 func (c *DefaultClient) Close() error {
+	// 复位登录态：去抖同步的登录态门禁在 Close 后必须关闭
+	c.mu.Lock()
+	c.loggedIn = false
+	c.userID = ""
+	c.mu.Unlock()
+
+	// 停掉未触发的通知去抖同步与在途后台同步
+	c.stopEntitySyncDebounce()
+	c.stopBackgroundSync()
 	_ = c.Disconnect()
+
 	if cl, ok := c.storage.(io.Closer); ok {
 		return cl.Close()
 	}
@@ -588,6 +719,21 @@ func (c *DefaultClient) OnLoginFailed(h func(err error)) {
 func (c *DefaultClient) OnForceLogout(h func()) {
 	c.onEvent(events.EventForceLogout, func(events.Event) { h() })
 }
+func (c *DefaultClient) OnSyncStart(h func()) {
+	c.onEvent(events.EventSyncStart, func(events.Event) { h() })
+}
+func (c *DefaultClient) OnSyncFinish(h func()) {
+	c.onEvent(events.EventSyncFinish, func(events.Event) { h() })
+}
+func (c *DefaultClient) OnSyncFailed(h func(err error)) {
+	c.onEvent(events.EventSyncFailed, func(ev events.Event) {
+		if err, _ := ev.Payload.(error); err != nil {
+			h(err)
+		} else {
+			h(fmt.Errorf("sync failed"))
+		}
+	})
+}
 
 func (c *DefaultClient) onEvent(et events.EventType, fn func(events.Event)) {
 	ch, unsub := c.Subscribe(et)
@@ -628,6 +774,8 @@ func (c *DefaultClient) OnMessageRevoked(h func(clientMsgID string)) {
 
 // handleKick 处理踢下线推送（WSKickOnlineMsg + WSLogoutMsg）
 func (c *DefaultClient) handleKick(resp *transport.Response) {
+	// 取消在途后台同步并复位同步状态（会话已结束，同步无意义）
+	c.stopBackgroundSync()
 	c.mu.Lock()
 	c.loggedIn = false
 	c.mu.Unlock()
@@ -804,74 +952,74 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 		pbconstant.FriendApplicationApprovedNotification,
 		pbconstant.FriendApplicationRejectedNotification: // 1203 / 1201 / 1202
 		decodeTip(events.EventFriendApplication, &pbsdk.FriendApplicationTips{})
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.FriendAddedNotification: // 1204
 		publish(events.EventFriendAdded, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.FriendDeletedNotification: // 1205
 		publish(events.EventFriendDeleted, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.FriendRemarkSetNotification,
 		pbconstant.FriendInfoUpdatedNotification,
 		pbconstant.FriendsInfoUpdateNotification: // 1206 / 1209 / 1210
 		publish(events.EventFriendInfoChanged, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.BlackAddedNotification: // 1207
 		publish(events.EventBlackAdded, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindBlack)
 	case pbconstant.BlackDeletedNotification: // 1208
 		publish(events.EventBlackDeleted, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindBlack)
 
 	// —— 会话 ——
 	case pbconstant.ConversationChangeNotification: // 1300
 		publish(events.EventConversationUpdate, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindConversation)
 
 	// —— 群组 ——
 	case pbconstant.GroupCreatedNotification: // 1501
 		decodeTip(events.EventGroupCreated, &pbsdk.GroupCreatedTips{})
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupInfoSetNotification: // 1502
 		decodeTip(events.EventGroupInfoSet, &pbsdk.GroupInfoSetTips{})
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.JoinGroupApplicationNotification: // 1503
 		publish(events.EventJoinGroupApplication, detail)
 	case pbconstant.GroupApplicationAcceptedNotification: // 1505
 		publish(events.EventGroupApplicationAccepted, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupApplicationRejectedNotification: // 1506
 		publish(events.EventGroupApplicationRejected, detail)
 	case pbconstant.GroupOwnerTransferredNotification: // 1507
 		publish(events.EventGroupOwnerTransferred, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberKickedNotification: // 1508
 		publish(events.EventMemberKicked, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberInvitedNotification: // 1509
 		publish(events.EventMemberInvited, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberEnterNotification: // 1510
 		publish(events.EventMemberEnter, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberQuitNotification: // 1504
 		publish(events.EventMemberQuit, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupDismissedNotification: // 1511
 		publish(events.EventGroupDismissed, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupMemberMutedNotification: // 1512
 		publish(events.EventGroupMemberMuted, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupMemberCancelMutedNotification: // 1513
 		publish(events.EventGroupMemberCancelMuted, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupMutedNotification: // 1514
 		publish(events.EventGroupMuted, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupCancelMutedNotification: // 1515
 		publish(events.EventGroupCancelMuted, detail)
-		c.triggerEntitySync()
+		c.triggerEntitySync(sdkSync.KindGroup)
 
 	default:
 		c.logger.Warnf("dispatchNotification: unmapped contentType=%d, clientMsgID=%s",

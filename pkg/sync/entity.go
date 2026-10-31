@@ -16,6 +16,16 @@ import (
 // 全量拉取分页大小
 const fullPageSize = 500
 
+// EntityKind 实体同步类型（通知驱动的定向增量同步用）
+type EntityKind uint8
+
+const (
+	KindFriend       EntityKind = iota + 1 // 好友
+	KindBlack                              // 黑名单
+	KindGroup                              // 群（含变更群的成员增量与游标补偿）
+	KindConversation                       // 会话
+)
+
 // RelSource 好友/黑名单同步最小依赖（manager.RelMgr 子集）
 type RelSource interface {
 	GetIncrementalFriends(ctx context.Context, userID, versionID string, version uint64) (*model.IncrementalFriends, error)
@@ -75,6 +85,39 @@ func (e *EntitySyncEngine) SyncAll(ctx context.Context) error {
 	}
 	if err := e.SyncConversations(ctx); err != nil {
 		return fmt.Errorf("sync conversations: %w", err)
+	}
+	return nil
+}
+
+// SyncKinds 按类型定向增量同步（通知驱动）
+//
+// 仅拉取指定类型的增量，kinds 自动去重，执行顺序固定（好友 → 黑名单 → 群 →
+// 会话，与 SyncAll 一致）；窗口内未变更的类型不发请求。
+// 群类型等价 SyncGroups（含变更群成员同步与游标补偿）。
+func (e *EntitySyncEngine) SyncKinds(ctx context.Context, kinds ...EntityKind) error {
+	want := make(map[EntityKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		want[k] = struct{}{}
+	}
+	if _, ok := want[KindFriend]; ok {
+		if err := e.SyncFriends(ctx); err != nil {
+			return fmt.Errorf("sync friends: %w", err)
+		}
+	}
+	if _, ok := want[KindBlack]; ok {
+		if err := e.SyncBlacks(ctx); err != nil {
+			return fmt.Errorf("sync blacks: %w", err)
+		}
+	}
+	if _, ok := want[KindGroup]; ok {
+		if err := e.SyncGroups(ctx); err != nil {
+			return fmt.Errorf("sync groups: %w", err)
+		}
+	}
+	if _, ok := want[KindConversation]; ok {
+		if err := e.SyncConversations(ctx); err != nil {
+			return fmt.Errorf("sync conversations: %w", err)
+		}
 	}
 	return nil
 }
