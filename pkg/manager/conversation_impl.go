@@ -37,10 +37,12 @@ func (m *DefaultConvMgr) GetSortedConversationList(ctx context.Context, userID s
 	return &resp, nil
 }
 
-func (m *DefaultConvMgr) GetConversation(ctx context.Context, conversationID string) (*model.Conversation, error) {
+func (m *DefaultConvMgr) GetConversation(ctx context.Context, ownerUserID string, conversationID string) (*model.Conversation, error) {
+	// 服务端 GetConversationReq{conversationID, ownerUserID}
 	req := struct {
 		ConversationID string `json:"conversationID"`
-	}{ConversationID: conversationID}
+		OwnerUserID    string `json:"ownerUserID"`
+	}{ConversationID: conversationID, OwnerUserID: ownerUserID}
 	// 服务端 GetConversationResp：{conversation: {...}}
 	var resp struct {
 		Conversation *model.Conversation `json:"conversation"`
@@ -51,10 +53,12 @@ func (m *DefaultConvMgr) GetConversation(ctx context.Context, conversationID str
 	return resp.Conversation, nil
 }
 
-func (m *DefaultConvMgr) GetConversations(ctx context.Context, conversationIDs []string) ([]*model.Conversation, error) {
+func (m *DefaultConvMgr) GetConversations(ctx context.Context, ownerUserID string, conversationIDs []string) ([]*model.Conversation, error) {
+	// 服务端 GetConversationsReq{ownerUserID, conversationIDs}
 	req := struct {
+		OwnerUserID     string   `json:"ownerUserID"`
 		ConversationIDs []string `json:"conversationIDs"`
-	}{ConversationIDs: conversationIDs}
+	}{OwnerUserID: ownerUserID, ConversationIDs: conversationIDs}
 
 	var resp struct {
 		Conversations []*model.Conversation `json:"conversations"`
@@ -80,10 +84,11 @@ func (m *DefaultConvMgr) GetAllConversations(ctx context.Context, ownerUserID st
 }
 
 func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string, conversationReq *model.ConversationReq) error {
+	// 服务端 SetConversationsReq{userIDs, conversation}
 	req := struct {
-		UserIDs         []string               `json:"userIDs"`
-		ConversationReq *model.ConversationReq `json:"conversationReq"`
-	}{UserIDs: userIDs, ConversationReq: conversationReq}
+		UserIDs      []string               `json:"userIDs"`
+		Conversation *model.ConversationReq `json:"conversation"`
+	}{UserIDs: userIDs, Conversation: conversationReq}
 	if err := m.http.Post(ctx, "/conversation/set_conversations", req, nil); err != nil {
 		return fmt.Errorf("set conversations: %w", err)
 	}
@@ -121,11 +126,13 @@ func (m *DefaultConvMgr) GetIncrementalConversations(ctx context.Context, userID
 	return &resp, nil
 }
 
-func (m *DefaultConvMgr) DeleteConversations(ctx context.Context, needDeleteTime int64, conversationIDs []string) error {
+func (m *DefaultConvMgr) DeleteConversations(ctx context.Context, ownerUserID string, needDeleteTime int64, conversationIDs []string) error {
+	// 服务端 DeleteConversationsReq{ownerUserID, needDeleteTime, conversationIDs}
 	req := struct {
+		OwnerUserID     string   `json:"ownerUserID"`
 		NeedDeleteTime  int64    `json:"needDeleteTime"`
 		ConversationIDs []string `json:"conversationIDs"`
-	}{NeedDeleteTime: needDeleteTime, ConversationIDs: conversationIDs}
+	}{OwnerUserID: ownerUserID, NeedDeleteTime: needDeleteTime, ConversationIDs: conversationIDs}
 	if err := m.http.Post(ctx, "/conversation/delete_conversations", req, nil); err != nil {
 		return fmt.Errorf("delete conversations: %w", err)
 	}

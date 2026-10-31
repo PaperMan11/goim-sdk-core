@@ -98,8 +98,8 @@ type FullConversationIDs struct {
 	ConversationIDs []string `json:"conversationIDs"` // 服务端 GetFullOwnerConversationIDsResp 字段名
 }
 
-// DeleteSyncOpt 删除同步选项
+// DeleteSyncOpt 删除同步选项（对齐服务端 msg.DeleteSyncOpt，tag 首字母大写）
 type DeleteSyncOpt struct {
-	IsSyncSelf  bool `json:"isSyncSelf"`
-	IsSyncOther bool `json:"isSyncOther"`
+	IsSyncSelf  bool `json:"IsSyncSelf"`
+	IsSyncOther bool `json:"IsSyncOther"`
 }

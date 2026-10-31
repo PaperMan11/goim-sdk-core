@@ -13,6 +13,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/uuidx"
 
 	pbsdk "github.com/PaperMan11/goim/pkg/protocol/sdkws"
 )
@@ -97,15 +98,24 @@ func (m *DefaultMsgMgr) sendWSMsg(ctx context.Context, msg *model.MsgData, reqID
 }
 
 func (m *DefaultMsgMgr) BatchSendMsg(ctx context.Context, recvIDList []string, msg *model.MsgData) (*model.SendMsgResp, error) {
-	req := struct {
-		RecvIDList []string       `json:"recvIDList"`
-		Msg        *model.MsgData `json:"msg"`
-	}{RecvIDList: recvIDList, Msg: msg}
-	var resp model.SendMsgResp
-	if err := m.http.Post(ctx, "/msg/batch_send_msg", req, &resp); err != nil {
-		return nil, fmt.Errorf("batch send msg: %w", err)
+	// 服务端 /msg/send_msg 与 /msg/batch_send_msg 同走 SendMsg RPC（Req=SendMsgReq{msgData}），
+	// 无多接收者字段——批量语义由 SDK 循环逐个发送实现
+	for _, recvID := range recvIDList {
+		single := *msg
+		single.RecvID = recvID
+		single.GroupID = ""
+		single.ClientMsgID = uuidx.New()
+		if _, err := m.SendMsg(ctx, &single); err != nil {
+			return nil, fmt.Errorf("batch send to %s: %w", recvID, err)
+		}
 	}
-	return &resp, nil
+	if len(recvIDList) == 0 {
+		return &model.SendMsgResp{}, nil
+	}
+	return &model.SendMsgResp{
+		ClientMsgID: msg.ClientMsgID,
+		SendTime:    timex.UnixMilli(),
+	}, nil
 }
 
 // NewestSeq 获取各会话最大/最小序列号（WS: WSGetNewestSeq=1001）
@@ -192,10 +202,12 @@ func (m *DefaultMsgMgr) PullMsgBySeq(ctx context.Context, userID string, seqRang
 // —— HTTP 接口 ——
 
 func (m *DefaultMsgMgr) RevokeMsg(ctx context.Context, conversationID string, seq int64) error {
+	// 服务端 RevokeMsgReq{conversationID, seq, userID}，userID 用于权限校验
 	req := struct {
 		ConversationID string `json:"conversationID"`
 		Seq            int64  `json:"seq"`
-	}{ConversationID: conversationID, Seq: seq}
+		UserID         string `json:"userID"`
+	}{ConversationID: conversationID, Seq: seq, UserID: m.senderID}
 	if err := m.http.Post(ctx, "/msg/revoke_msg", req, nil); err != nil {
 		return fmt.Errorf("revoke msg: %w", err)
 	}
@@ -209,10 +221,12 @@ func (m *DefaultMsgMgr) RevokeMsg(ctx context.Context, conversationID string, se
 }
 
 func (m *DefaultMsgMgr) MarkMsgsAsRead(ctx context.Context, conversationID string, seqs []int64) error {
+	// 服务端 MarkMsgsAsReadReq{conversationID, seqs, userID}
 	req := struct {
 		ConversationID string  `json:"conversationID"`
 		Seqs           []int64 `json:"seqs"`
-	}{ConversationID: conversationID, Seqs: seqs}
+		UserID         string  `json:"userID"`
+	}{ConversationID: conversationID, Seqs: seqs, UserID: m.senderID}
 	if err := m.http.Post(ctx, "/msg/mark_msgs_as_read", req, nil); err != nil {
 		return fmt.Errorf("mark msgs as read: %w", err)
 	}
@@ -220,11 +234,13 @@ func (m *DefaultMsgMgr) MarkMsgsAsRead(ctx context.Context, conversationID strin
 }
 
 func (m *DefaultMsgMgr) MarkConversationAsRead(ctx context.Context, conversationID string, hasReadSeq int64, seqs []int64) error {
+	// 服务端 MarkConversationAsReadReq{conversationID, userID, hasReadSeq, seqs}
 	req := struct {
 		ConversationID string  `json:"conversationID"`
+		UserID         string  `json:"userID"`
 		HasReadSeq     int64   `json:"hasReadSeq"`
 		Seqs           []int64 `json:"seqs"`
-	}{ConversationID: conversationID, HasReadSeq: hasReadSeq, Seqs: seqs}
+	}{ConversationID: conversationID, UserID: m.senderID, HasReadSeq: hasReadSeq, Seqs: seqs}
 	if err := m.http.Post(ctx, "/msg/mark_conversation_as_read", req, nil); err != nil {
 		return fmt.Errorf("mark conversation as read: %w", err)
 	}
@@ -248,10 +264,12 @@ func (m *DefaultMsgMgr) GetConversationsHasReadAndMaxSeq(ctx context.Context, co
 }
 
 func (m *DefaultMsgMgr) ClearConversationMsg(ctx context.Context, conversationIDs []string, syncOpt *model.DeleteSyncOpt) error {
+	// 服务端 ClearConversationsMsgReq{conversationIDs, userID, deleteSyncOpt}
 	req := struct {
 		ConversationIDs []string             `json:"conversationIDs"`
-		SyncOpt         *model.DeleteSyncOpt `json:"syncOpt"`
-	}{ConversationIDs: conversationIDs, SyncOpt: syncOpt}
+		UserID          string               `json:"userID"`
+		DeleteSyncOpt   *model.DeleteSyncOpt `json:"deleteSyncOpt"`
+	}{ConversationIDs: conversationIDs, UserID: m.senderID, DeleteSyncOpt: syncOpt}
 	if err := m.http.Post(ctx, "/msg/clear_conversation_msg", req, nil); err != nil {
 		return fmt.Errorf("clear conversation msg: %w", err)
 	}
@@ -259,11 +277,13 @@ func (m *DefaultMsgMgr) ClearConversationMsg(ctx context.Context, conversationID
 }
 
 func (m *DefaultMsgMgr) DeleteMsgs(ctx context.Context, conversationID string, seqs []int64, syncOpt *model.DeleteSyncOpt) error {
+	// 服务端 DeleteMsgsReq{conversationID, seqs, userID, deleteSyncOpt}
 	req := struct {
 		ConversationID string               `json:"conversationID"`
 		Seqs           []int64              `json:"seqs"`
-		SyncOpt        *model.DeleteSyncOpt `json:"syncOpt"`
-	}{ConversationID: conversationID, Seqs: seqs, SyncOpt: syncOpt}
+		UserID         string               `json:"userID"`
+		DeleteSyncOpt  *model.DeleteSyncOpt `json:"deleteSyncOpt"`
+	}{ConversationID: conversationID, Seqs: seqs, UserID: m.senderID, DeleteSyncOpt: syncOpt}
 	if err := m.http.Post(ctx, "/msg/delete_msgs", req, nil); err != nil {
 		return fmt.Errorf("delete msgs: %w", err)
 	}

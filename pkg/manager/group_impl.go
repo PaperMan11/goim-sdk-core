@@ -50,7 +50,11 @@ func (m *DefaultGroupMgr) CreateGroup(ctx context.Context, groupInfo *model.Grou
 }
 
 func (m *DefaultGroupMgr) SetGroupInfo(ctx context.Context, groupInfo *model.GroupInfoForSet) error {
-	if err := m.http.Post(ctx, "/group/set_group_info", groupInfo, nil); err != nil {
+	// 服务端 SetGroupInfoReq：{groupInfoForSet: {...}}
+	req := struct {
+		GroupInfoForSet *model.GroupInfoForSet `json:"groupInfoForSet"`
+	}{GroupInfoForSet: groupInfo}
+	if err := m.http.Post(ctx, "/group/set_group_info", req, nil); err != nil {
 		return fmt.Errorf("set group info: %w", err)
 	}
 	if m.bus != nil {
@@ -63,11 +67,12 @@ func (m *DefaultGroupMgr) SetGroupInfo(ctx context.Context, groupInfo *model.Gro
 	return nil
 }
 
-func (m *DefaultGroupMgr) SetGroupInfoEx(ctx context.Context, groupID string, groupInfoEx *model.GroupInfoEx) error {
+func (m *DefaultGroupMgr) SetGroupInfoEx(ctx context.Context, groupID string, groupInfoEx *model.GroupInfoExOptions) error {
+	// 服务端 SetGroupInfoExReq：{groupID: "...", groupName: {value...}, ...} 全 wrapperspb 扁平字段
 	req := struct {
-		GroupID     string             `json:"groupID"`
-		GroupInfoEx *model.GroupInfoEx `json:"groupInfoEx"`
-	}{GroupID: groupID, GroupInfoEx: groupInfoEx}
+		GroupID string `json:"groupID"`
+		*model.GroupInfoExOptions
+	}{GroupID: groupID, GroupInfoExOptions: groupInfoEx}
 	if err := m.http.Post(ctx, "/group/set_group_info_ex", req, nil); err != nil {
 		return fmt.Errorf("set group info ex: %w", err)
 	}

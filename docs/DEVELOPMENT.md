@@ -393,7 +393,7 @@ type MsgMgr interface {
 type GroupMgr interface {
     CreateGroup(ctx context.Context, groupInfo *model.GroupInfo, memberUserIDs, adminUserIDs []string, ownerUserID string, sendMessage bool) (*model.GroupInfo, error)
     SetGroupInfo(ctx context.Context, groupInfo *model.GroupInfoForSet) error
-    SetGroupInfoEx(ctx context.Context, groupID string, groupInfoEx *model.GroupInfoEx) error
+    SetGroupInfoEx(ctx context.Context, groupID string, groupInfoEx *model.GroupInfoExOptions) error
     JoinGroup(ctx context.Context, groupID, reqMessage string, joinSource int32, inviterUserID, ex string) error
     QuitGroup(ctx context.Context, groupID, userID string) error
     GroupApplicationResponse(ctx context.Context, groupID, fromUserID, handledMsg string, handleResult int32) error

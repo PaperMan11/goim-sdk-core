@@ -35,7 +35,11 @@ func (m *DefaultUserMgr) Register(ctx context.Context, users []*model.UserInfo) 
 }
 
 func (m *DefaultUserMgr) UpdateUserInfo(ctx context.Context, userInfo *model.UserInfo) error {
-	if err := m.http.Post(ctx, "/user/update_user_info", userInfo, nil); err != nil {
+	// 服务端 UpdateUserInfoReq：{userInfo: {...}}
+	req := struct {
+		UserInfo *model.UserInfo `json:"userInfo"`
+	}{UserInfo: userInfo}
+	if err := m.http.Post(ctx, "/user/update_user_info", req, nil); err != nil {
 		return fmt.Errorf("update user info: %w", err)
 	}
 	if m.bus != nil {
@@ -49,7 +53,11 @@ func (m *DefaultUserMgr) UpdateUserInfo(ctx context.Context, userInfo *model.Use
 }
 
 func (m *DefaultUserMgr) UpdateUserInfoEx(ctx context.Context, userInfo *model.UserInfoWithEx) error {
-	if err := m.http.Post(ctx, "/user/update_user_info_ex", userInfo, nil); err != nil {
+	// 服务端 UpdateUserInfoExReq：{userInfo: {...}}
+	req := struct {
+		UserInfo *model.UserInfoWithEx `json:"userInfo"`
+	}{UserInfo: userInfo}
+	if err := m.http.Post(ctx, "/user/update_user_info_ex", req, nil); err != nil {
 		return fmt.Errorf("update user info ex: %w", err)
 	}
 	return nil
@@ -57,9 +65,9 @@ func (m *DefaultUserMgr) UpdateUserInfoEx(ctx context.Context, userInfo *model.U
 
 func (m *DefaultUserMgr) SetGlobalMsgRecvOpt(ctx context.Context, userID string, opt int32) error {
 	req := struct {
-		UserID string `json:"userID"`
-		Opt    int32  `json:"opt"`
-	}{UserID: userID, Opt: opt}
+		UserID           string `json:"userID"`
+		GlobalRecvMsgOpt int32  `json:"globalRecvMsgOpt"`
+	}{UserID: userID, GlobalRecvMsgOpt: opt}
 	if err := m.http.Post(ctx, "/user/set_global_msg_recv_opt", req, nil); err != nil {
 		return fmt.Errorf("set global msg recv opt: %w", err)
 	}

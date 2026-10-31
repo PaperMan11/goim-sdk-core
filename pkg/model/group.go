@@ -32,32 +32,41 @@ type GroupMemberFullInfo struct {
 	InviterUserID  string `json:"inviterUserID"`
 }
 
-// GroupInfoForSet 设置群组信息参数
+// GroupInfoForSet 设置群组信息参数（对齐服务端 sdkws.GroupInfoForSet：
+// 名称类字段为裸值，可选行为字段为 wrapperspb 指针形态）
 type GroupInfoForSet struct {
-	GroupID          string `json:"groupID"`
-	GroupName        string `json:"groupName,omitempty"`
-	Notification     string `json:"notification,omitempty"`
-	Introduction     string `json:"introduction,omitempty"`
-	FaceURL          string `json:"faceURL,omitempty"`
-	RecvMsgOpt       int32  `json:"recvMsgOpt,omitempty"`
-	LookMemberInfo   int32  `json:"lookMemberInfo,omitempty"`
-	ApplyMemberCheck int32  `json:"applyMemberCheck,omitempty"`
-	Ex               string `json:"ex,omitempty"`
+	GroupID           string       `json:"groupID"`
+	GroupName         string       `json:"groupName,omitempty"`
+	Notification      string       `json:"notification,omitempty"`
+	Introduction      string       `json:"introduction,omitempty"`
+	FaceURL           string       `json:"faceURL,omitempty"`
+	Ex                *StringValue `json:"ex,omitempty"`
+	NeedVerification  *Int32Value  `json:"needVerification,omitempty"`
+	LookMemberInfo    *Int32Value  `json:"lookMemberInfo,omitempty"`
+	ApplyMemberFriend *Int32Value  `json:"applyMemberFriend,omitempty"`
 }
 
-// GroupInfoEx 扩展群信息（带额外字段）
-type GroupInfoEx struct {
-	GroupInfo
-	NotificationUserInfo *PublicUserInfo `json:"notificationUserInfo,omitempty"`
+// GroupInfoExOptions 设置群信息扩展（对齐服务端 group.SetGroupInfoExReq，
+// 全部可选字段为 wrapperspb 指针形态；groupID 由 manager 层单独携带）
+type GroupInfoExOptions struct {
+	GroupName         *StringValue `json:"groupName,omitempty"`
+	Notification      *StringValue `json:"notification,omitempty"`
+	Introduction      *StringValue `json:"introduction,omitempty"`
+	FaceURL           *StringValue `json:"faceURL,omitempty"`
+	Ex                *StringValue `json:"ex,omitempty"`
+	NeedVerification  *Int32Value  `json:"needVerification,omitempty"`
+	LookMemberInfo    *Int32Value  `json:"lookMemberInfo,omitempty"`
+	ApplyMemberFriend *Int32Value  `json:"applyMemberFriend,omitempty"`
 }
 
-// SetGroupMemberInfo 设置群成员信息
+// SetGroupMemberInfo 设置群成员信息（对齐服务端 group.SetGroupMemberInfo，可选字段为 wrapperspb 形态）
 type SetGroupMemberInfo struct {
-	GroupID  string `json:"groupID"`
-	UserID   string `json:"userID"`
-	Nickname string `json:"nickname,omitempty"`
-	FaceURL  string `json:"faceURL,omitempty"`
-	Ex       string `json:"ex,omitempty"`
+	GroupID   string       `json:"groupID"`
+	UserID    string       `json:"userID"`
+	Nickname  *StringValue `json:"nickname,omitempty"`
+	FaceURL   *StringValue `json:"faceURL,omitempty"`
+	RoleLevel *Int32Value  `json:"roleLevel,omitempty"`
+	Ex        *StringValue `json:"ex,omitempty"`
 }
 
 // GroupRequest 入群申请
