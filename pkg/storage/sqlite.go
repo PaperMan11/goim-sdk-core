@@ -205,6 +205,80 @@ func (s *SQLiteStorage) ListMsgsByConversation(owner, conversationID string) ([]
 	return out, nil
 }
 
+func (s *SQLiteStorage) DeleteMsgs(owner, conversationID string, seqs []int64) error {
+	if conversationID == "" || len(seqs) == 0 {
+		return nil
+	}
+	if err := s.db.Where("owner_user_id = ? AND conversation_id = ? AND seq IN ?", owner, conversationID, seqs).
+		Delete(&MessageRow{}).Error; err != nil {
+		return fmt.Errorf("storage: delete msgs: %w", err)
+	}
+	return nil
+}
+
+// mutateMsgRows 按查询条件读-改-写消息缓存：mutate 修改 model 后同步 DataJSON 与冗余列
+// （通知实时应用，2101 撤回 / 2200 已读）
+func (s *SQLiteStorage) mutateMsgRows(query func(*gorm.DB) *gorm.DB, mutate func(*model.MsgData)) error {
+	var rows []MessageRow
+	if err := query(s.db).Find(&rows).Error; err != nil {
+		return fmt.Errorf("storage: query msgs: %w", err)
+	}
+	for i := range rows {
+		m := &model.MsgData{}
+		if err := jsonUnmarshal(rows[i].DataJSON, m); err != nil {
+			return fmt.Errorf("storage: unmarshal msg %s: %w", rows[i].ClientMsgID, err)
+		}
+		mutate(m)
+		b, err := jsonMarshal(m)
+		if err != nil {
+			return fmt.Errorf("storage: marshal msg %s: %w", rows[i].ClientMsgID, err)
+		}
+		rows[i].DataJSON = string(b)
+		rows[i].Status = m.Status
+		rows[i].Content = m.Content
+		if err := s.db.Save(&rows[i]).Error; err != nil {
+			return fmt.Errorf("storage: update msg %s: %w", rows[i].ClientMsgID, err)
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStorage) MarkMsgsRead(owner, conversationID string, seqs []int64) error {
+	if conversationID == "" || len(seqs) == 0 {
+		return nil
+	}
+	return s.mutateMsgRows(
+		func(db *gorm.DB) *gorm.DB {
+			return db.Where("owner_user_id = ? AND conversation_id = ? AND seq IN ?", owner, conversationID, seqs)
+		},
+		func(m *model.MsgData) { m.IsRead = true },
+	)
+}
+
+func (s *SQLiteStorage) MarkMsgsReadUpTo(owner, conversationID string, hasReadSeq int64) error {
+	if conversationID == "" || hasReadSeq <= 0 {
+		return nil
+	}
+	return s.mutateMsgRows(
+		func(db *gorm.DB) *gorm.DB {
+			return db.Where("owner_user_id = ? AND conversation_id = ? AND seq <= ?", owner, conversationID, hasReadSeq)
+		},
+		func(m *model.MsgData) { m.IsRead = true },
+	)
+}
+
+func (s *SQLiteStorage) MarkMsgsRevoked(owner, conversationID string, seqs []int64) error {
+	if conversationID == "" || len(seqs) == 0 {
+		return nil
+	}
+	return s.mutateMsgRows(
+		func(db *gorm.DB) *gorm.DB {
+			return db.Where("owner_user_id = ? AND conversation_id = ? AND seq IN ?", owner, conversationID, seqs)
+		},
+		func(m *model.MsgData) { m.Status = model.MsgStatusRevoked },
+	)
+}
+
 // === 会话 ===
 
 func convToRow(owner string, c *model.Conversation) (*ConversationRow, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -55,6 +56,11 @@ type DefaultClient struct {
 	// 同步引擎（Login / 重连后执行）
 	seqSync    *sdkSync.SeqSyncEngine
 	entitySync *sdkSync.EntitySyncEngine
+
+	// 通知驱动的实体增量同步（去抖定时器 + 同步执行互斥）
+	entitySyncMu    sync.Mutex
+	entitySyncTimer *time.Timer
+	syncRunMu       sync.Mutex
 }
 
 // NewClient 构造 DefaultClient
@@ -357,17 +363,64 @@ func (c *DefaultClient) loginFlow(ctx context.Context, userID string, platformID
 }
 
 // runSyncFlow 执行完整同步流程：消息 Seq gap 拉取 → 五类实体增量
+//
+// 与通知触发的实体同步（triggerEntitySync）互斥：游标读写串行化，
+// 避免重连同步与通知同步并发拉取同一增量段
 func (c *DefaultClient) runSyncFlow(ctx context.Context, owner string) error {
-	seqSync := sdkSync.NewSeqSyncEngine(c.msg, c.storage, owner, c.bus, c.logger)
-	entitySync := sdkSync.NewEntitySyncEngine(c.rel, c.group, c.conv, c.storage, owner, c.bus, c.logger)
+	c.syncRunMu.Lock()
+	defer c.syncRunMu.Unlock()
 
+	seqSync := sdkSync.NewSeqSyncEngine(c.msg, c.storage, owner, c.bus, c.logger)
 	if err := seqSync.Sync(ctx); err != nil {
 		return fmt.Errorf("seq sync: %w", err)
 	}
-	if err := entitySync.SyncAll(ctx); err != nil {
+	if err := c.runEntitySync(ctx, owner); err != nil {
 		return fmt.Errorf("entity sync: %w", err)
 	}
 	return nil
+}
+
+// runEntitySync 五类实体（好友/黑名单/群/群成员/会话）游标增量同步
+func (c *DefaultClient) runEntitySync(ctx context.Context, owner string) error {
+	entitySync := sdkSync.NewEntitySyncEngine(c.rel, c.group, c.conv, c.storage, owner, c.bus, c.logger)
+	return entitySync.SyncAll(ctx)
+}
+
+// entitySyncDebounce 通知驱动的实体同步去抖窗口：突发通知合并为一次增量同步
+const entitySyncDebounce = 500 * time.Millisecond
+
+// triggerEntitySync 收到实体类变更通知（好友/黑名单/群/会话）后去抖触发增量同步，
+// 让本地缓存在连接期间实时跟进，无需等待下次重连。失败仅告警——缓存最终由
+// 下次触发或重连同步的游标增量收敛。
+func (c *DefaultClient) triggerEntitySync() {
+	c.entitySyncMu.Lock()
+	defer c.entitySyncMu.Unlock()
+	if c.entitySyncTimer != nil {
+		c.entitySyncTimer.Stop()
+	}
+	c.entitySyncTimer = time.AfterFunc(entitySyncDebounce, c.runEntitySyncDebounced)
+}
+
+// runEntitySyncDebounced 去抖窗口结束后执行实体增量同步（含登出/执行互斥防护）
+func (c *DefaultClient) runEntitySyncDebounced() {
+	c.entitySyncMu.Lock()
+	c.entitySyncTimer = nil
+	c.entitySyncMu.Unlock()
+
+	c.mu.RLock()
+	owner, loggedIn := c.userID, c.loggedIn
+	c.mu.RUnlock()
+	if !loggedIn || owner == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c.syncRunMu.Lock()
+	defer c.syncRunMu.Unlock()
+	if err := c.runEntitySync(ctx, owner); err != nil {
+		c.logger.Warnf("client: entity resync after notification, owner=%s, error=%v", owner, err.Error())
+	}
 }
 
 func (c *DefaultClient) Logout(clearData bool) error {
@@ -641,14 +694,18 @@ func (c *DefaultClient) handleMessagePush(resp *transport.Response) {
 		if msgData == nil {
 			return
 		}
+		mm := manager.ConvProtoMsgData(msgData)
+		mm.ConversationID = convID
+		// 本地持久化：推送消息/通知实时写入消息缓存（与 SeqSyncEngine gap 拉取
+		// 入库同一路径，幂等；不推进 seq 游标——游标仍由同步引擎按缺口拉取推进，
+		// 避免推送丢失/乱序时跳号漏消息）
+		c.persistPushMsg(mm)
 		// 系统通知：NotificationElem 两段 JSON 解出 tips，按 ContentType 分流
 		if msgData.ContentType >= pbconstant.NotificationBegin {
-			c.dispatchNotification(msgData, timestamp)
+			c.dispatchNotification(msgData, mm, timestamp)
 			return
 		}
 		// 普通消息 → EventNewMsg（payload 为已转换的 model，携带推送 map key 得到的 ConversationID）
-		mm := manager.ConvProtoMsgData(msgData)
-		mm.ConversationID = convID
 		c.bus.Publish(events.EventNewMsg, events.Event{
 			Type:       events.EventNewMsg,
 			Payload:    mm,
@@ -672,7 +729,12 @@ func (c *DefaultClient) handleMessagePush(resp *transport.Response) {
 //
 // tips 解码策略：核心高频通知解码为具体 proto 类型；其余 payload 为 Detail JSON string，
 // RawPayload 始终保留 MsgData 原始 bytes，上层可自行解析。
-func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, timestamp int64) {
+//
+// 本地持久化：
+//   - 消息类通知（2101 撤回 / 2102 删除 / 2200 已读）实时应用到本地消息缓存
+//   - 实体类通知（好友/黑名单/群/会话）去抖触发实体增量同步（tips 不含完整实体数据，
+//     由同步引擎按游标从服务端拉取变更，如 1300 仅携带会话 ID 列表）
+func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.MsgData, timestamp int64) {
 	detail := extractNotificationDetail(msgData.Content)
 	data := convert.ToBytes(msgData.Content)
 
@@ -693,77 +755,158 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, timestamp i
 	}
 
 	switch msgData.ContentType {
-	// —— 消息类通知（tips 类型确定）——
+	// —— 消息类通知（tips 类型确定；先应用到本地消息缓存再发事件，
+	// 保证宿主在事件回调里读到最新缓存）——
 	case pbconstant.MsgRevokeNotification: // 2101
-		decodeTip(events.EventRevokeMsg, &pbsdk.RevokeMsgTips{})
+		tip := &pbsdk.RevokeMsgTips{}
+		if err := json.Unmarshal([]byte(detail), tip); err != nil {
+			c.logger.Warnf("dispatchNotification: unmarshal revoke tips failed, error=%v", err.Error())
+		}
+		if tip.Seq > 0 {
+			c.applyMsgCache("mark revoked", mm.ConversationID, func(owner string) error {
+				return c.storage.MarkMsgsRevoked(owner, mm.ConversationID, []int64{tip.Seq})
+			})
+		}
+		publish(events.EventRevokeMsg, tip)
 	case pbconstant.DeleteMsgsNotification: // 2102
-		decodeTip(events.EventDeleteMsgs, &pbsdk.DeleteMsgsTips{})
+		tip := &pbsdk.DeleteMsgsTips{}
+		if err := json.Unmarshal([]byte(detail), tip); err != nil {
+			c.logger.Warnf("dispatchNotification: unmarshal delete tips failed, error=%v", err.Error())
+		}
+		if len(tip.Seqs) > 0 {
+			c.applyMsgCache("delete msgs", mm.ConversationID, func(owner string) error {
+				return c.storage.DeleteMsgs(owner, mm.ConversationID, tip.Seqs)
+			})
+		}
+		publish(events.EventDeleteMsgs, tip)
 	case pbconstant.HasReadReceipt: // 2200
-		decodeTip(events.EventMarkAsRead, &pbsdk.MarkAsReadTips{})
+		tip := &pbsdk.MarkAsReadTips{}
+		if err := json.Unmarshal([]byte(detail), tip); err != nil {
+			c.logger.Warnf("dispatchNotification: unmarshal mark-as-read tips failed, error=%v", err.Error())
+		}
+		c.applyMsgCache("mark read", mm.ConversationID, func(owner string) error {
+			if len(tip.Seqs) > 0 {
+				return c.storage.MarkMsgsRead(owner, mm.ConversationID, tip.Seqs)
+			}
+			// 整会话已读：标记 hasReadSeq 及之前的消息
+			return c.storage.MarkMsgsReadUpTo(owner, mm.ConversationID, tip.HasReadSeq)
+		})
+		publish(events.EventMarkAsRead, tip)
 
-	// —— 用户 / 状态 ——
+	// —— 用户 / 状态（用户资料无本地缓存，仅事件）——
 	case pbconstant.UserInfoUpdatedNotification: // 1303
 		decodeTip(events.EventUserInfoUpdated, &pbsdk.UserInfoUpdatedTips{})
 	case pbconstant.UserStatusChangeNotification: // 1304
 		decodeTip(events.EventUserStatusChange, &pbsdk.UserStatusChangeTips{})
 
-	// —— 好友 ——
+	// —— 好友（好友/黑名单缓存随增量同步实时跟进）——
 	case pbconstant.FriendApplicationNotification,
 		pbconstant.FriendApplicationApprovedNotification,
 		pbconstant.FriendApplicationRejectedNotification: // 1203 / 1201 / 1202
 		decodeTip(events.EventFriendApplication, &pbsdk.FriendApplicationTips{})
+		c.triggerEntitySync()
 	case pbconstant.FriendAddedNotification: // 1204
 		publish(events.EventFriendAdded, detail)
+		c.triggerEntitySync()
 	case pbconstant.FriendDeletedNotification: // 1205
 		publish(events.EventFriendDeleted, detail)
+		c.triggerEntitySync()
 	case pbconstant.FriendRemarkSetNotification,
 		pbconstant.FriendInfoUpdatedNotification,
 		pbconstant.FriendsInfoUpdateNotification: // 1206 / 1209 / 1210
 		publish(events.EventFriendInfoChanged, detail)
+		c.triggerEntitySync()
 	case pbconstant.BlackAddedNotification: // 1207
 		publish(events.EventBlackAdded, detail)
+		c.triggerEntitySync()
 	case pbconstant.BlackDeletedNotification: // 1208
 		publish(events.EventBlackDeleted, detail)
+		c.triggerEntitySync()
 
 	// —— 会话 ——
 	case pbconstant.ConversationChangeNotification: // 1300
 		publish(events.EventConversationUpdate, detail)
+		c.triggerEntitySync()
 
 	// —— 群组 ——
 	case pbconstant.GroupCreatedNotification: // 1501
 		decodeTip(events.EventGroupCreated, &pbsdk.GroupCreatedTips{})
+		c.triggerEntitySync()
 	case pbconstant.GroupInfoSetNotification: // 1502
 		decodeTip(events.EventGroupInfoSet, &pbsdk.GroupInfoSetTips{})
+		c.triggerEntitySync()
 	case pbconstant.JoinGroupApplicationNotification: // 1503
 		publish(events.EventJoinGroupApplication, detail)
 	case pbconstant.GroupApplicationAcceptedNotification: // 1505
 		publish(events.EventGroupApplicationAccepted, detail)
+		c.triggerEntitySync()
 	case pbconstant.GroupApplicationRejectedNotification: // 1506
 		publish(events.EventGroupApplicationRejected, detail)
 	case pbconstant.GroupOwnerTransferredNotification: // 1507
 		publish(events.EventGroupOwnerTransferred, detail)
+		c.triggerEntitySync()
 	case pbconstant.MemberKickedNotification: // 1508
 		publish(events.EventMemberKicked, detail)
+		c.triggerEntitySync()
 	case pbconstant.MemberInvitedNotification: // 1509
 		publish(events.EventMemberInvited, detail)
+		c.triggerEntitySync()
 	case pbconstant.MemberEnterNotification: // 1510
 		publish(events.EventMemberEnter, detail)
+		c.triggerEntitySync()
 	case pbconstant.MemberQuitNotification: // 1504
 		publish(events.EventMemberQuit, detail)
+		c.triggerEntitySync()
 	case pbconstant.GroupDismissedNotification: // 1511
 		publish(events.EventGroupDismissed, detail)
+		c.triggerEntitySync()
 	case pbconstant.GroupMemberMutedNotification: // 1512
 		publish(events.EventGroupMemberMuted, detail)
+		c.triggerEntitySync()
 	case pbconstant.GroupMemberCancelMutedNotification: // 1513
 		publish(events.EventGroupMemberCancelMuted, detail)
+		c.triggerEntitySync()
 	case pbconstant.GroupMutedNotification: // 1514
 		publish(events.EventGroupMuted, detail)
+		c.triggerEntitySync()
 	case pbconstant.GroupCancelMutedNotification: // 1515
 		publish(events.EventGroupCancelMuted, detail)
+		c.triggerEntitySync()
 
 	default:
 		c.logger.Warnf("dispatchNotification: unmapped contentType=%d, clientMsgID=%s",
 			msgData.ContentType, msgData.ClientMsgID)
+	}
+}
+
+// persistPushMsg 服务端实时推送的消息/通知写入本地消息缓存（owner 未登录或 seq<=0 跳过，
+// 与存储层 UpsertMsgs 约定一致）
+func (c *DefaultClient) persistPushMsg(mm *model.MsgData) {
+	c.mu.RLock()
+	owner := c.userID
+	c.mu.RUnlock()
+	if owner == "" || mm == nil || mm.Seq <= 0 || mm.ConversationID == "" {
+		return
+	}
+	if err := c.storage.UpsertMsgs(owner, []*model.MsgData{mm}); err != nil {
+		c.logger.Warnf("client: persist pushed msg, conv=%s, seq=%d, error=%v",
+			mm.ConversationID, mm.Seq, err.Error())
+	}
+}
+
+// applyMsgCache 消息类通知应用到本地消息缓存
+//
+// 未登录/无会话上下文跳过；失败仅告警不阻断事件分发——缓存最终由
+// SeqSyncEngine 缺口拉取收敛（撤回/删除/已读状态在拉取时由服务端改写）。
+func (c *DefaultClient) applyMsgCache(name, conversationID string, fn func(owner string) error) {
+	c.mu.RLock()
+	owner := c.userID
+	c.mu.RUnlock()
+	if owner == "" || conversationID == "" {
+		return
+	}
+	if err := fn(owner); err != nil {
+		c.logger.Warnf("client: apply %s to msg cache, conv=%s, error=%v", name, conversationID, err.Error())
 	}
 }
 

@@ -52,6 +52,7 @@ const (
 	MsgStatusSuccess = 1
 	MsgStatusSending = 2
 	MsgStatusFailed  = 3
+	MsgStatusRevoked = 4 // 已撤回（2101 撤回通知的本地缓存标记）
 )
 
 // DeleteSyncOpt flag

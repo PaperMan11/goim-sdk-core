@@ -31,7 +31,7 @@ func (Version) TableName() string { return "versions" }
 
 // MessageRow 消息缓存（(owner, client_msg_id) 主键；(owner, conversation_id, seq) 唯一索引）
 type MessageRow struct {
-	OwnerUserID    string `gorm:"primaryKey;column:owner_user_id;size:128"`
+	OwnerUserID    string `gorm:"primaryKey;column:owner_user_id;size:128;index:idx_owner_conv_seq,unique"`
 	ClientMsgID    string `gorm:"primaryKey;column:client_msg_id;size:128"`
 	ServerMsgID    string `gorm:"column:server_msg_id;size:128"`
 	Seq            int64  `gorm:"column:seq;index:idx_owner_conv_seq,unique"`

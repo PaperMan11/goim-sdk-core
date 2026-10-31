@@ -47,12 +47,20 @@ type Storage interface {
 	// ListVersions 某用户全部游标（entity → 游标），用于同步引擎的补偿检查
 	ListVersions(ownerUserID string) (map[string]VersionInfo, error)
 
-	// === 消息缓存（SeqSyncEngine gap 拉取入库） ===
+	// === 消息缓存（SeqSyncEngine gap 拉取入库 + WS 推送实时入库） ===
 
 	// UpsertMsgs 按 (owner, seq) upsert；seq <= 0 的消息跳过
 	UpsertMsgs(ownerUserID string, msgs []*model.MsgData) error
 	// ListMsgsByConversation 按会话取消息缓存（seq 升序）
 	ListMsgsByConversation(ownerUserID, conversationID string) ([]*model.MsgData, error)
+	// DeleteMsgs 按 seq 删除消息缓存（2102 删除通知实时应用）
+	DeleteMsgs(ownerUserID, conversationID string, seqs []int64) error
+	// MarkMsgsRead 按 seq 标记已读（2200 已读回执实时应用）
+	MarkMsgsRead(ownerUserID, conversationID string, seqs []int64) error
+	// MarkMsgsReadUpTo 标记 seq <= hasReadSeq 的消息已读（2200 整会话已读）
+	MarkMsgsReadUpTo(ownerUserID, conversationID string, hasReadSeq int64) error
+	// MarkMsgsRevoked 按 seq 标记撤回（2101 撤回通知实时应用）
+	MarkMsgsRevoked(ownerUserID, conversationID string, seqs []int64) error
 
 	// === 会话 ===
 
@@ -252,6 +260,75 @@ func (s *MemoryStorage) ListMsgsByConversation(owner, conversationID string) ([]
 		}
 	}
 	return out, nil
+}
+
+// updateMsgs 按会话 + seq 集合原地修改消息（通知实时应用）
+func (s *MemoryStorage) updateMsgs(owner, conversationID string, seqs []int64, mutate func(*model.MsgData)) {
+	set := make(map[int64]struct{}, len(seqs))
+	for _, seq := range seqs {
+		set[seq] = struct{}{}
+	}
+	for _, m := range s.msgs[owner] {
+		if m.ConversationID == conversationID {
+			if _, ok := set[m.Seq]; ok {
+				mutate(m)
+			}
+		}
+	}
+}
+
+func (s *MemoryStorage) DeleteMsgs(owner, conversationID string, seqs []int64) error {
+	if conversationID == "" || len(seqs) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := make(map[int64]struct{}, len(seqs))
+	for _, seq := range seqs {
+		set[seq] = struct{}{}
+	}
+	for key, m := range s.msgs[owner] {
+		if m.ConversationID == conversationID {
+			if _, ok := set[m.Seq]; ok {
+				delete(s.msgs[owner], key)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStorage) MarkMsgsRead(owner, conversationID string, seqs []int64) error {
+	if conversationID == "" || len(seqs) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateMsgs(owner, conversationID, seqs, func(m *model.MsgData) { m.IsRead = true })
+	return nil
+}
+
+func (s *MemoryStorage) MarkMsgsReadUpTo(owner, conversationID string, hasReadSeq int64) error {
+	if conversationID == "" || hasReadSeq <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.msgs[owner] {
+		if m.ConversationID == conversationID && m.Seq <= hasReadSeq {
+			m.IsRead = true
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStorage) MarkMsgsRevoked(owner, conversationID string, seqs []int64) error {
+	if conversationID == "" || len(seqs) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateMsgs(owner, conversationID, seqs, func(m *model.MsgData) { m.Status = model.MsgStatusRevoked })
+	return nil
 }
 
 // === 会话 ===

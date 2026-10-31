@@ -119,6 +119,50 @@ func TestSQLiteStorage_Messages(t *testing.T) {
 	if len(got2) != 0 {
 		t.Fatalf("u2 should see nothing, got %d", len(got2))
 	}
+
+	// 标记已读：仅 seq=2
+	if err := s.MarkMsgsRead("u1", "si_a", []int64{2}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.ListMsgsByConversation("u1", "si_a")
+	if got[0].IsRead || !got[1].IsRead {
+		t.Fatalf("MarkMsgsRead: isRead = %v, %v; want false, true", got[0].IsRead, got[1].IsRead)
+	}
+
+	// 标记撤回：seq=1（DataJSON 与 status 列同步改写）
+	if err := s.MarkMsgsRevoked("u1", "si_a", []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.ListMsgsByConversation("u1", "si_a")
+	if got[0].Status != model.MsgStatusRevoked {
+		t.Fatalf("MarkMsgsRevoked: status = %d, want %d", got[0].Status, model.MsgStatusRevoked)
+	}
+
+	// 按 seq 删除：seq=2 删除后仅剩 si_a 的 seq=1
+	if err := s.DeleteMsgs("u1", "si_a", []int64{2}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.ListMsgsByConversation("u1", "si_a")
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("DeleteMsgs: %+v, want only seq=1", got)
+	}
+
+	// MarkMsgsReadUpTo：预置 3 条后标记 ≤2 已读
+	if err := s.UpsertMsgs("u1", []*model.MsgData{
+		{ClientMsgID: "c4", Seq: 4, ConversationID: "si_c", Content: "m4", ContentType: 101},
+		{ClientMsgID: "c5", Seq: 5, ConversationID: "si_c", Content: "m5", ContentType: 101},
+		{ClientMsgID: "c6", Seq: 6, ConversationID: "si_c", Content: "m6", ContentType: 101},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkMsgsReadUpTo("u1", "si_c", 5); err != nil {
+		t.Fatal(err)
+	}
+	got3, _ := s.ListMsgsByConversation("u1", "si_c")
+	if !got3[0].IsRead || !got3[1].IsRead || got3[2].IsRead {
+		t.Fatalf("MarkMsgsReadUpTo: isRead = %v, %v, %v; want true, true, false",
+			got3[0].IsRead, got3[1].IsRead, got3[2].IsRead)
+	}
 }
 
 func TestSQLiteStorage_Conversations(t *testing.T) {
@@ -300,5 +344,27 @@ func TestNewSQLiteStorage_FilePath(t *testing.T) {
 	vID, v, err := s2.GetVersion("u1", EntityFriends)
 	if err != nil || vID != "v" || v != 1 {
 		t.Fatalf("after reopen: %q %d %v", vID, v, err)
+	}
+}
+
+// TestSQLiteStorage_MultiOwnerSameConvSeq 多账号同会话同 seq 不应唯一约束冲突
+// （C2C 会话 ID 双方一致、seq 服务端共享，索引若无 owner 列会冲突）
+func TestSQLiteStorage_MultiOwnerSameConvSeq(t *testing.T) {
+	s := newSQLiteForTest(t)
+
+	if err := s.UpsertMsgs("u1", []*model.MsgData{{ClientMsgID: "c1", Seq: 1, ConversationID: "si_a_b", Content: "u1 copy", ContentType: 101}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertMsgs("u2", []*model.MsgData{{ClientMsgID: "c1", Seq: 1, ConversationID: "si_a_b", Content: "u2 copy", ContentType: 101}}); err != nil {
+		t.Fatalf("upsert same conv+seq for another owner: %v", err)
+	}
+
+	got1, _ := s.ListMsgsByConversation("u1", "si_a_b")
+	got2, _ := s.ListMsgsByConversation("u2", "si_a_b")
+	if len(got1) != 1 || got1[0].Content != "u1 copy" {
+		t.Fatalf("u1 msgs: %+v", got1)
+	}
+	if len(got2) != 1 || got2[0].Content != "u2 copy" {
+		t.Fatalf("u2 msgs: %+v", got2)
 	}
 }

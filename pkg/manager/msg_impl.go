@@ -190,8 +190,14 @@ func (m *DefaultMsgMgr) PullMsgBySeq(ctx context.Context, userID string, seqRang
 
 	result := make(map[string]*model.PullMsgsResult, len(pullResp.Msgs))
 	for convID, pbMsgs := range pullResp.Msgs {
+		msgs := fromProtoMsgList(pbMsgs.Msgs)
+		// 服务端 proto MsgData 无 conversation_id 字段，按响应 map key 回填，
+		// 否则入库后 conversation_id 为空，既查不到也破坏唯一索引
+		for _, mm := range msgs {
+			mm.ConversationID = convID
+		}
 		result[convID] = &model.PullMsgsResult{
-			Msgs:   fromProtoMsgList(pbMsgs.Msgs),
+			Msgs:   msgs,
 			IsEnd:  pbMsgs.IsEnd,
 			EndSeq: convert.ToString(pbMsgs.EndSeq),
 		}

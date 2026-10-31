@@ -211,6 +211,272 @@ func pushEnvelope(msg *pbsdk.MsgData) *pbsdk.PushMessages {
 	}
 }
 
+// loginTestClient 将 client 置为已登录态（推送持久化依赖 owner）
+func loginTestClient(cli *DefaultClient, owner string) {
+	cli.mu.Lock()
+	cli.userID = owner
+	cli.loggedIn = true
+	cli.mu.Unlock()
+}
+
+// seedMsg 预置消息到本地缓存（模拟此前 gap 拉取入库）
+func seedMsg(t *testing.T, cli *DefaultClient, owner, convID string, seq int64, content string) {
+	t.Helper()
+	if err := cli.storage.UpsertMsgs(owner, []*model.MsgData{{
+		ClientMsgID:    fmt.Sprintf("cm-%d", seq),
+		ConversationID: convID,
+		Seq:            seq,
+		SendID:         "alice",
+		RecvID:         owner,
+		Content:        content,
+		ContentType:    101,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// notificationMsg 构造系统通知推送（Content = JSON(NotificationElem{Detail: JSON(tips)})）
+func notificationMsg(t *testing.T, contentType int32, tips interface{}, seq int64) *pbsdk.MsgData {
+	t.Helper()
+	detail, err := json.Marshal(tips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := json.Marshal(&pbsdk.NotificationElem{Detail: string(detail)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &pbsdk.MsgData{ContentType: contentType, Content: string(content), Seq: seq}
+}
+
+// TestPushMessagePersisted 实时推送的普通消息应写入本地消息缓存（seq 游标不动，由同步引擎推进）
+func TestPushMessagePersisted(t *testing.T) {
+	cli, m := newTestClient(t)
+	loginTestClient(cli, "me")
+
+	done := make(chan *model.MsgData, 1)
+	cli.OnNewMessage(func(msg *model.MsgData) { done <- msg })
+
+	data, err := proto.Marshal(pushEnvelope(&pbsdk.MsgData{
+		RecvID: "me", SendID: "alice", Content: "hello", ContentType: 101, Seq: 5, ClientMsgID: "cm-5",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnNewMessage not triggered within 2s")
+	}
+
+	msgs, err := cli.storage.ListMsgsByConversation("me", "si_c2c_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Seq != 5 || msgs[0].Content != "hello" {
+		t.Fatalf("pushed msg not persisted: %+v", msgs)
+	}
+	// seq 游标不得被推送推进（推送可能丢失，缺口由同步引擎拉取补齐）
+	maxSeqs, _, err := cli.storage.GetMaxSeqs("me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := maxSeqs["si_c2c_test"]; ok {
+		t.Fatalf("push must not advance seq cursor, got maxSeq=%d", maxSeqs["si_c2c_test"])
+	}
+}
+
+// TestPushRevokeAppliesToCache 2101 撤回通知应实时改写本地缓存的消息状态
+func TestPushRevokeAppliesToCache(t *testing.T) {
+	cli, m := newTestClient(t)
+	loginTestClient(cli, "me")
+	seedMsg(t, cli, "me", "si_c2c_test", 3, "to-revoke")
+
+	done := make(chan string, 1)
+	cli.OnMessageRevoked(func(clientMsgID string) { done <- clientMsgID })
+
+	data, err := proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.MsgRevokeNotification,
+		&pbsdk.RevokeMsgTips{ClientMsgID: "cm-3", Seq: 3, ConversationID: "si_c2c_test", RevokerUserID: "alice"},
+		0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+
+	select {
+	case id := <-done:
+		if id != "cm-3" {
+			t.Fatalf("clientMsgID = %q, want cm-3", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnMessageRevoked not triggered within 2s")
+	}
+
+	msgs, err := cli.storage.ListMsgsByConversation("me", "si_c2c_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range msgs {
+		if msg.Seq == 3 && msg.Status != model.MsgStatusRevoked {
+			t.Fatalf("seq=3 status=%d, want MsgStatusRevoked(%d)", msg.Status, model.MsgStatusRevoked)
+		}
+	}
+}
+
+// TestPushDeleteAppliesToCache 2102 删除通知应实时删除本地缓存的消息
+func TestPushDeleteAppliesToCache(t *testing.T) {
+	cli, m := newTestClient(t)
+	loginTestClient(cli, "me")
+	seedMsg(t, cli, "me", "si_c2c_test", 1, "m1")
+	seedMsg(t, cli, "me", "si_c2c_test", 2, "m2")
+
+	done := make(chan struct{}, 1)
+	ch, unsub := cli.Subscribe(events.EventDeleteMsgs)
+	defer unsub()
+	go func() {
+		for range ch {
+			done <- struct{}{}
+		}
+	}()
+
+	data, err := proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.DeleteMsgsNotification,
+		&pbsdk.DeleteMsgsTips{UserID: "me", ConversationID: "si_c2c_test", Seqs: []int64{1, 2}},
+		0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+
+	waitForSubscribe(t, done)
+
+	msgs, err := cli.storage.ListMsgsByConversation("me", "si_c2c_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("deleted msgs still in cache: %+v", msgs)
+	}
+}
+
+// TestPushMarkAsReadAppliesToCache 2200 已读回执应实时标记本地缓存（seqs 列表 + hasReadSeq 兜底）
+func TestPushMarkAsReadAppliesToCache(t *testing.T) {
+	cli, m := newTestClient(t)
+	loginTestClient(cli, "me")
+	seedMsg(t, cli, "me", "si_c2c_test", 1, "m1")
+	seedMsg(t, cli, "me", "si_c2c_test", 2, "m2")
+	seedMsg(t, cli, "me", "si_c2c_test", 3, "m3")
+
+	done := make(chan struct{}, 2)
+	ch, unsub := cli.Subscribe(events.EventMarkAsRead)
+	defer unsub()
+	go func() {
+		for range ch {
+			done <- struct{}{}
+		}
+	}()
+
+	// 第一条：仅标记 seq=2 已读
+	data, err := proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.HasReadReceipt,
+		&pbsdk.MarkAsReadTips{MarkAsReadUserID: "alice", ConversationID: "si_c2c_test", Seqs: []int64{2}},
+		0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+	waitForSubscribe(t, done)
+
+	// 第二条：seqs 为空 + hasReadSeq=3 → 标记 ≤3 全部已读
+	data, err = proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.HasReadReceipt,
+		&pbsdk.MarkAsReadTips{MarkAsReadUserID: "alice", ConversationID: "si_c2c_test", HasReadSeq: 3},
+		0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+	waitForSubscribe(t, done)
+
+	msgs, err := cli.storage.ListMsgsByConversation("me", "si_c2c_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySeq := map[int64]*model.MsgData{}
+	for _, msg := range msgs {
+		bySeq[msg.Seq] = msg
+	}
+	for _, seq := range []int64{1, 2, 3} {
+		if msg := bySeq[seq]; msg == nil || !msg.IsRead {
+			t.Fatalf("seq=%d should be marked read, got %+v", seq, msg)
+		}
+	}
+}
+
+// TestPushNotificationTriggersEntitySync 实体类通知（1204 好友添加）应去抖触发
+// 实体增量同步，把变更实时拉入本地缓存（无需等待重连）
+func TestPushNotificationTriggersEntitySync(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		write := func(data interface{}) {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "msg": "", "data": data})
+		}
+		switch r.URL.Path {
+		case "/relation/get_incremental_friends":
+			write(map[string]interface{}{
+				"versionID": "fv1", "version": 1,
+				"insert": []map[string]interface{}{
+					{"ownerUserID": "u1", "friendUserID": "bob", "createTime": 1},
+				},
+			})
+		case "/relation/get_incremental_blacks",
+			"/group/get_incremental_join_groups",
+			"/conversation/get_incremental_conversations":
+			write(map[string]interface{}{"versionID": "v1", "version": 1})
+		default:
+			write(map[string]interface{}{})
+		}
+	}))
+	defer srv.Close()
+
+	m := newMockTransport()
+	cli := NewClient(&ClientConfig{BaseURL: srv.URL, Transport: m}).(*DefaultClient)
+	loginTestClient(cli, "u1")
+
+	synced := make(chan struct{}, 1)
+	ch, unsub := cli.Subscribe(events.EventFriendListSynced)
+	defer unsub()
+	go func() {
+		for range ch {
+			synced <- struct{}{}
+		}
+	}()
+
+	// 1204 好友添加通知（tips 无完整实体数据，靠触发同步拉取）
+	data, err := proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.FriendAddedNotification,
+		&pbsdk.FromToUserID{FromUserID: "alice", ToUserID: "u1"},
+		9)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+
+	// 去抖窗口（500ms）结束后触发同步 → EventFriendListSynced
+	waitForSubscribe(t, synced)
+
+	friends, err := cli.storage.ListFriends("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(friends) != 1 || friends[0].FriendUserID != "bob" {
+		t.Fatalf("friend cache not updated by notification-triggered sync: %+v", friends)
+	}
+}
+
 // TestAcquireUserTokenStoresToken 登录链路 token 存取验证（排查"登录成功后未保存 token"报告）：
 //  1. AdminSecret bootstrap：get_user_token 请求携带 admin token（R7）
 //  2. 响应 token/expireTimeSeconds 正确解析（服务端字段名 token/expireTimeSeconds 已比对 pb.go）
