@@ -1040,6 +1040,7 @@ func (c *DefaultClient) persistPushMsg(mm *model.MsgData) {
 		c.logger.Warnf("client: persist pushed msg, conv=%s, seq=%d, error=%v",
 			mm.ConversationID, mm.Seq, err.Error())
 	}
+	c.logger.Infof("client: persist pushed msg, conv=%s, msgID=%s, seq=%d", mm.ConversationID, mm.ClientMsgID, mm.Seq)
 }
 
 // applyMsgCache 消息类通知应用到本地消息缓存
