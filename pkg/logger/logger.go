@@ -1,6 +1,9 @@
 package logger
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Logger 通用日志接口（printf 风格）
 //
@@ -24,6 +27,66 @@ type ContextAwareLogger interface {
 	InfoContextf(ctx context.Context, format string, args ...interface{})
 	WarnContextf(ctx context.Context, format string, args ...interface{})
 	ErrorContextf(ctx context.Context, format string, args ...interface{})
+}
+
+// Namer 可选扩展：底层实现支持原生命名（如 zap 的 Named）时实现该接口，
+// WithTag 会优先走原生命名——console 输出独立的名称列、JSON 输出 "logger" 字段，
+// 不污染消息正文，也不影响 caller 定位
+type Namer interface {
+	Named(tag string) Logger
+}
+
+// WithTag 返回带标签的子 Logger：多客户端/多用户场景区分日志归属
+//
+// 示例: logger.WithTag(l, userID).Infof("websocket connected, url=%s", wsURL)
+//
+//   - l 实现了 Namer（内置 *ZapLogger）→ 走原生命名，标签是独立字段而非消息前缀
+//   - 其他实现 → 退化为消息前缀 "[tag] <原文>"（先格式化原文再拼标签，
+//     避免向调用方 format 注入占位符吞掉首参）
+//   - With 派生的子 Logger 继承标签；tag 为空时原样返回；l 为 nil 时返回 NopLogger
+func WithTag(l Logger, tag string) Logger {
+	if l == nil {
+		return &NopLogger{}
+	}
+	if tag == "" {
+		return l
+	}
+	if n, ok := l.(Namer); ok {
+		return n.Named(tag)
+	}
+	return &taggedLogger{Logger: l, tag: tag, prefix: "[" + tag + "] "}
+}
+
+// taggedLogger WithTag 对未实现 Namer 的 Logger 的通用回退包装（消息前缀方案）
+type taggedLogger struct {
+	Logger
+	tag    string
+	prefix string
+}
+
+// msg 先格式化原文再拼标签。顺序不能反：若把前缀直接拼进 format（尤其前缀含
+// %s 之类占位符时）会吞掉调用方的第一个参数，导致整条日志字段错位
+func (l *taggedLogger) msg(format string, args ...interface{}) string {
+	return l.prefix + fmt.Sprintf(format, args...)
+}
+
+func (l *taggedLogger) Debugf(format string, args ...interface{}) {
+	l.Logger.Debugf("%s", l.msg(format, args...))
+}
+func (l *taggedLogger) Infof(format string, args ...interface{}) {
+	l.Logger.Infof("%s", l.msg(format, args...))
+}
+func (l *taggedLogger) Warnf(format string, args ...interface{}) {
+	l.Logger.Warnf("%s", l.msg(format, args...))
+}
+func (l *taggedLogger) Errorf(format string, args ...interface{}) {
+	l.Logger.Errorf("%s", l.msg(format, args...))
+}
+func (l *taggedLogger) Fatalf(format string, args ...interface{}) {
+	l.Logger.Fatalf("%s", l.msg(format, args...))
+}
+func (l *taggedLogger) With(keyvals ...interface{}) Logger {
+	return &taggedLogger{Logger: l.Logger.With(keyvals...), tag: l.tag, prefix: l.prefix}
 }
 
 // —— 配置化构建 ——

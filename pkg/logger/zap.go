@@ -144,6 +144,13 @@ func NewZapSugarLogger(sugar *zap.SugaredLogger) *ZapLogger {
 	return &ZapLogger{sugar: sugar.Desugar().WithOptions(zap.AddCallerSkip(1)).Sugar()}
 }
 
+// Named 返回带名称的子 Logger（zap 原生 Named）——WithTag 对 *ZapLogger 的路径。
+// 名称是独立字段：console 格式输出在级别后的名称列，JSON 格式输出 "logger" 字段；
+// 不改写消息正文，caller 定位与调用方一致
+func (l *ZapLogger) Named(tag string) Logger {
+	return &ZapLogger{sugar: l.sugar.Named(tag), close: l.close}
+}
+
 func (l *ZapLogger) With(keyvals ...interface{}) Logger {
 	return &ZapLogger{sugar: l.sugar.With(keyvals...), close: l.close}
 }
