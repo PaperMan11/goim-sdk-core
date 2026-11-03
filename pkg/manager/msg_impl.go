@@ -154,12 +154,10 @@ func (m *DefaultMsgMgr) PullMsgBySeq(ctx context.Context, userID string, seqRang
 
 	pbRanges := make([]*pbsdk.SeqRange, 0, len(seqRanges))
 	for _, r := range seqRanges {
-		begin := convert.ToInt64(r.Begin)
-		end := convert.ToInt64(r.End)
 		pbRanges = append(pbRanges, &pbsdk.SeqRange{
 			ConversationID: r.ConversationID,
-			Begin:          begin,
-			End:            end,
+			Begin:          r.Begin,
+			End:            r.End,
 			Num:            convert.ToInt64(r.Num),
 		})
 	}

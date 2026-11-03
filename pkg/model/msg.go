@@ -57,11 +57,11 @@ type PullMsgsResult struct {
 	EndSeq string     `json:"endSeq"`
 }
 
-// SeqRange 消息 seq 范围查询
+// SeqRange 消息 seq 范围查询（Begin/End 对齐服务端 proto int64）
 type SeqRange struct {
 	ConversationID string `json:"conversationID"`
-	Begin          string `json:"begin"`
-	End            string `json:"end"`
+	Begin          int64  `json:"begin"`
+	End            int64  `json:"end"`
 	Num            int32  `json:"num"`
 	Order          int32  `json:"order"` // PullOrderAsc / PullOrderDesc
 }

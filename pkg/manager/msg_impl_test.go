@@ -60,8 +60,8 @@ func TestPullMsgBySeqFillsConversationID(t *testing.T) {
 
 	m := NewMsgMgr(nil, &stubWSTransport{resp: &transport.Response{Data: respData}}, nil, &logger.NopLogger{})
 	result, err := m.PullMsgBySeq(context.Background(), "a", []*model.SeqRange{
-		{ConversationID: "si_a_b", Begin: "1", End: "2"},
-		{ConversationID: "sg_1", Begin: "3", End: "3"},
+		{ConversationID: "si_a_b", Begin: 1, End: 2},
+		{ConversationID: "sg_1", Begin: 3, End: 3},
 	}, 0)
 	if err != nil {
 		t.Fatal(err)

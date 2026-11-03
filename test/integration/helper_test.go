@@ -240,6 +240,8 @@ func newTestClientWithStorage(t *testing.T, tags ...string) (client.Client, *eve
 }
 
 // waitOfflineSyncConverged 等待离线窗口消息收敛到 owner 的本地库（不齐则重登重拉）。
+// （服务端方案 A write-through 上线后 E2.7 已改为 ack 后首轮严格断言，不再使用本
+// helper；保留供 E4/E6 离线场景复用——那些用例验证 SDK 同步行为，容忍轮询）
 //
 // 背景（R12）：服务端发送链路异步持久化，1003 ack 返回时消息可能尚未可查——
 // 发送后立即重登，登录同步的 gap 拉取会跑在持久化提交之前而漏掉最新消息，

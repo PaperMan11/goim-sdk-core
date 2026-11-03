@@ -11,7 +11,6 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
-	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/hash"
 )
@@ -73,8 +72,8 @@ func (m *mockMsgSource) PullMsgBySeq(ctx context.Context, userID string, seqRang
 			out[r.ConversationID] = &model.PullMsgsResult{}
 			continue
 		}
-		begin := convert.ToInt64(r.Begin)
-		end := convert.ToInt64(r.End)
+		begin := r.Begin
+		end := r.End
 		pr := &model.PullMsgsResult{}
 		for i := begin; i <= end; i++ {
 			pr.Msgs = append(pr.Msgs, &model.MsgData{
@@ -429,6 +428,144 @@ func TestSeqSync_EmptyRange(t *testing.T) {
 	}
 }
 
+// holeFixtureMsgs 首批返回 seq {1,3,4,5,6}（缺 2，IsEnd）——批内缺口检测的公共脚本
+func holeFixtureMsgs() []*model.MsgData {
+	return []*model.MsgData{
+		{ConversationID: "conv1", Seq: 1},
+		{ConversationID: "conv1", Seq: 3},
+		{ConversationID: "conv1", Seq: 4},
+		{ConversationID: "conv1", Seq: 5},
+		{ConversationID: "conv1", Seq: 6},
+	}
+}
+
+// TestSeqSync_HoleRetryFill 批内瞬时空洞（并发同步落库乱序）：游标停在缺口前，
+// 补拉一次补齐后推进到批末，消息完整入库、事件发布
+func TestSeqSync_HoleRetryFill(t *testing.T) {
+	msg := &mockMsgSource{
+		newestMax: map[string]int64{"conv1": 6},
+		newestMin: map[string]int64{"conv1": 1},
+		script: map[int]*model.PullMsgsResult{
+			1: {Msgs: holeFixtureMsgs(), IsEnd: true},
+			2: {Msgs: []*model.MsgData{{ConversationID: "conv1", Seq: 2}}},
+		},
+	}
+	stor := storage.NewMemoryStorage()
+	bus, chans := newTestBus(t, events.EventSeqSynced)
+
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	if err := engine.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// 首批 [1,6] + 补拉缺口区间 [2,5]
+	if len(msg.pulls) != 2 {
+		t.Fatalf("pull calls = %d, want 2", len(msg.pulls))
+	}
+	if msg.pulls[1].Begin != 2 || msg.pulls[1].End != 5 {
+		t.Errorf("retry range = [%d,%d], want [2,5]", msg.pulls[1].Begin, msg.pulls[1].End)
+	}
+
+	msgs, err := stor.ListMsgsByConversation(testOwner, "conv1")
+	if err != nil {
+		t.Fatalf("ListMsgsByConversation: %v", err)
+	}
+	if len(msgs) != 6 {
+		t.Fatalf("conv1 msgs = %d, want 6（缺口补齐）", len(msgs))
+	}
+	maxSeqs, _, err := stor.GetMaxSeqs(testOwner)
+	if err != nil {
+		t.Fatalf("GetMaxSeqs: %v", err)
+	}
+	if maxSeqs["conv1"] != 6 {
+		t.Errorf("maxSeq conv1 = %d, want 6", maxSeqs["conv1"])
+	}
+	if got := drainEvents(chans[0], 5); got != 1 {
+		t.Errorf("EventSeqSynced count = %d, want 1", got)
+	}
+}
+
+// TestSeqSync_HoleSkippedAfterRetries 永久空洞（seq 已分配但消息崩溃丢失/已删）：
+// 补拉耗尽后跳过，游标越过缺口推进到本批最大已收 seq，同步正常完成不报错
+func TestSeqSync_HoleSkippedAfterRetries(t *testing.T) {
+	msg := &mockMsgSource{
+		newestMax: map[string]int64{"conv1": 6},
+		newestMin: map[string]int64{"conv1": 1},
+		script: map[int]*model.PullMsgsResult{
+			1: {Msgs: holeFixtureMsgs(), IsEnd: true},
+		},
+		// 补拉调用（2~4 次）落到 results：始终为空
+		results: map[string]*model.PullMsgsResult{"conv1": {}},
+	}
+	stor := storage.NewMemoryStorage()
+	bus, chans := newTestBus(t, events.EventSeqSynced)
+
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	if err := engine.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// 首批 + gapHoleRetries 次补拉
+	if want := 1 + gapHoleRetries; len(msg.pulls) != want {
+		t.Fatalf("pull calls = %d, want %d", len(msg.pulls), want)
+	}
+	msgs, err := stor.ListMsgsByConversation(testOwner, "conv1")
+	if err != nil {
+		t.Fatalf("ListMsgsByConversation: %v", err)
+	}
+	if len(msgs) != 5 {
+		t.Fatalf("conv1 msgs = %d, want 5（seq2 永久缺失）", len(msgs))
+	}
+	maxSeqs, _, err := stor.GetMaxSeqs(testOwner)
+	if err != nil {
+		t.Fatalf("GetMaxSeqs: %v", err)
+	}
+	if maxSeqs["conv1"] != 6 {
+		t.Errorf("maxSeq conv1 = %d, want 6（重试耗尽跳过空洞，游标越过）", maxSeqs["conv1"])
+	}
+	if got := drainEvents(chans[0], 5); got != 1 {
+		t.Errorf("EventSeqSynced count = %d, want 1（跳过不视为失败）", got)
+	}
+}
+
+// TestSeqSync_HoleRetryError 补拉请求失败：未知状态不跳过，游标停在缺口前，
+// Sync 返回错误（本会话剩余批次留待下次同步）
+func TestSeqSync_HoleRetryError(t *testing.T) {
+	msg := &mockMsgSource{
+		newestMax: map[string]int64{"conv1": 6},
+		newestMin: map[string]int64{"conv1": 1},
+		failConvs: map[string]int{"conv1": 1}, // 第 1 次放行（走 script），第 2 次（补拉）失败
+		script: map[int]*model.PullMsgsResult{
+			1: {Msgs: holeFixtureMsgs(), IsEnd: true},
+		},
+	}
+	stor := storage.NewMemoryStorage()
+	bus, chans := newTestBus(t, events.EventSeqSynced)
+
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	if err := engine.Sync(context.Background()); err == nil {
+		t.Fatal("Sync error = nil, want hole retry error")
+	}
+
+	msgs, err := stor.ListMsgsByConversation(testOwner, "conv1")
+	if err != nil {
+		t.Fatalf("ListMsgsByConversation: %v", err)
+	}
+	if len(msgs) != 5 {
+		t.Fatalf("conv1 msgs = %d, want 5（已收消息保留）", len(msgs))
+	}
+	maxSeqs, _, err := stor.GetMaxSeqs(testOwner)
+	if err != nil {
+		t.Fatalf("GetMaxSeqs: %v", err)
+	}
+	if maxSeqs["conv1"] != 1 {
+		t.Errorf("maxSeq conv1 = %d, want 1（游标停在缺口前，不越过未知状态）", maxSeqs["conv1"])
+	}
+	if got := drainEvents(chans[0], 5); got != 0 {
+		t.Errorf("EventSeqSynced count = %d, want 0（同步失败不发事件）", got)
+	}
+}
+
 // TestSeqSync_NonAdvancingCursorGuard 游标停滞防御：后续批次返回滞后 seq 时跳批不死循环
 func TestSeqSync_NonAdvancingCursorGuard(t *testing.T) {
 	msg := &mockMsgSource{
@@ -452,8 +589,8 @@ func TestSeqSync_NonAdvancingCursorGuard(t *testing.T) {
 	if msg.callCnt != 3 {
 		t.Errorf("pull calls = %d, want 3", msg.callCnt)
 	}
-	if last := msg.pulls[len(msg.pulls)-1]; last.Begin != "201" || last.End != "250" {
-		t.Errorf("last range = [%s,%s], want [201,250]", last.Begin, last.End)
+	if last := msg.pulls[len(msg.pulls)-1]; last.Begin != 201 || last.End != 250 {
+		t.Errorf("last range = [%d,%d], want [201,250]", last.Begin, last.End)
 	}
 	maxSeqs, _, err := stor.GetMaxSeqs(testOwner)
 	if err != nil {
@@ -503,8 +640,8 @@ func TestSeqSync_ConversationFailureIsolation(t *testing.T) {
 	// 失败会话恰好拉了 1 批（首批失败即停）
 	for _, r := range msg.pulls {
 		if r.ConversationID == "convB" {
-			if r.Begin != "1" || r.End != "100" {
-				t.Errorf("convB range = [%s,%s], want [1,100]", r.Begin, r.End)
+			if r.Begin != 1 || r.End != 100 {
+				t.Errorf("convB range = [%d,%d], want [1,100]", r.Begin, r.End)
 			}
 		}
 	}
@@ -579,8 +716,8 @@ func TestSeqSync_ResumeAfterBatchFailure(t *testing.T) {
 		t.Fatal("expected retry pulls")
 	}
 	first := msg.pulls[pullsAfterFail]
-	if first.Begin != "101" || first.End != "200" {
-		t.Errorf("retry first range = [%s,%s], want [101,200]（应从第 2 批续拉）", first.Begin, first.End)
+	if first.Begin != 101 || first.End != 200 {
+		t.Errorf("retry first range = [%d,%d], want [101,200]（应从第 2 批续拉）", first.Begin, first.End)
 	}
 	maxSeqs, _, _ = stor.GetMaxSeqs(testOwner)
 	if maxSeqs["convX"] != 250 {

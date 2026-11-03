@@ -8,7 +8,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -266,8 +265,8 @@ func TestE2_OfflineSeqSync(t *testing.T) {
 	// E2.5：PullMsgBySeq 拉回离线窗口，clientMsgID 集合一致
 	res, err := cb.Msg().PullMsgBySeq(ctx, u2, []*model.SeqRange{{
 		ConversationID: convID,
-		Begin:          strconv.FormatInt(baseSeq+1, 10),
-		End:            strconv.FormatInt(baseSeq+10, 10),
+		Begin:          baseSeq + 1,
+		End:            baseSeq + 10,
 		Num:            10,
 		Order:          model.PullOrderAsc,
 	}}, model.PullOrderAsc)
@@ -391,9 +390,6 @@ func TestE2_PersistenceBothPaths(t *testing.T) {
 	ecb.wait(t, events.EventLoginSuccess, eventTimeout)
 
 	mb := newMsgBox(cb, "B")
-	// A 的回显箱：推送在服务端持久化提交之后才发出（transfer→rpc 落库→push），
-	// 发送端收到自己的回显 = 数据已提交可查（R12 的确定性提交信号）
-	ma := newMsgBox(ca, "A")
 
 	// 预热建立会话
 	warm := newTextMsg(u1, u2, "", model.SessionTypeC2C, "warmup")
@@ -417,8 +413,8 @@ func TestE2_PersistenceBothPaths(t *testing.T) {
 		assert.Equal(t, content, got.Content, "live push content of %s", id)
 	}
 
-	// 路径二（离线 sync）：B 登出 → A 发 3 条 → 等 A 收到全部回显（提交信号，R12）→
-	// B 重登走 gap 拉取；若仍漏，waitOfflineSyncConverged 重登重拉兜底
+	// 路径二（离线 sync）：B 登出 → A 发 3 条 → B 重登走 gap 拉取。
+	// 服务端方案 A（write-through）后 1003 ack 即提交信号，发送完直接重登
 	require.NoError(t, cb.Logout(false))
 	const nOffline = 3
 	offline := make(map[string]string, nOffline)
@@ -431,18 +427,27 @@ func TestE2_PersistenceBothPaths(t *testing.T) {
 		offlineIDs[m.ClientMsgID] = true
 	}
 
-	// 事件驱动提交信号：等 A 收到离线窗口全部回显推送——此时服务端已提交，
-	// B 重登 gap 拉取必能拿到（期间在线阶段的回显会先到，recv 暂存不丢弃）
-	for id := range offline {
-		ma.recv(t, id, eventTimeout)
-	}
-
 	require.NoError(t, cb.Login(ctx, u2, platformID))
 	ecb.wait(t, events.EventLoginSuccess, eventTimeout)
 	ecb.wait(t, events.EventSyncFinish, eventTimeout) // 后台 SeqSync 补齐完成
 
-	// 收敛等待：离线窗口 3 条全部落到 B 的本地库（不齐则重登重拉，预算 90s）
-	waitOfflineSyncConverged(t, cb, ecb, storB, u2, convID, offlineIDs)
+	// 方案 A（write-through）回归哨兵：ack 返回时服务端已完成 seq 分配+落库+
+	// 建会话+游标推进（goim docs/msg-send-sync-commit.md），B 首登 gap 拉取必达——
+	// 首轮同步即须全部到位，不做重登重拉兜底（服务端若退回异步持久化管道，
+	// 此处立刻红）
+	firstSync, err := storB.ListMsgsByConversation(u2, convID)
+	require.NoError(t, err, "list msgs after first sync")
+	firstGot := make(map[string]bool, len(firstSync))
+	for _, m := range firstSync {
+		firstGot[m.ClientMsgID] = true
+	}
+	missing := make([]string, 0, len(offlineIDs))
+	for id := range offlineIDs {
+		if !firstGot[id] {
+			missing = append(missing, id)
+		}
+	}
+	require.Empty(t, missing, "offline msgs missing after first sync: write-through contract broken (R12 regression?)")
 
 	// 两条路径的消息按同一 clientMsgID 在 B 的 SQLite 汇合，内容一致
 	msgs, err := storB.ListMsgsByConversation(u2, convID)
