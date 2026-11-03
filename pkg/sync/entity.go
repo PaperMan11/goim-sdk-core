@@ -198,7 +198,7 @@ type fullSyncSpec[ITEM any] struct {
 func runIncSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s incSyncSpec[ITEM], f fullSyncSpec[ITEM]) error {
 	vID, ver, err := e.stor.GetVersion(e.owner, s.key)
 	if err != nil {
-		e.logger.Errorf("runIncSync get version: %w", err)
+		e.logger.Errorf("runIncSync get version: %v", err)
 		return err
 	}
 	meta, ch, err := s.fetchInc(ctx, vID, ver)
@@ -209,27 +209,27 @@ func runIncSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s incSyncSpe
 		return runFullSync(e, ctx, f, meta)
 	}
 	if err := s.upsert(e.owner, ch.insert); err != nil {
-		e.logger.Errorf("runIncSync upsert insert: %w", err)
+		e.logger.Errorf("runIncSync upsert insert: %v", err)
 		return err
 	}
 	if err := s.upsert(e.owner, ch.update); err != nil {
-		e.logger.Errorf("runIncSync upsert update: %w", err)
+		e.logger.Errorf("runIncSync upsert update: %v", err)
 		return err
 	}
 	if err := s.del(e.owner, ch.del); err != nil {
-		e.logger.Errorf("runIncSync del: %w", err)
+		e.logger.Errorf("runIncSync del: %v", err)
 		return err
 	}
 	if s.afterSync != nil {
 		if err := s.afterSync(ctx, ch); err != nil {
-			e.logger.Errorf("runIncSync afterSync: %w", err)
+			e.logger.Errorf("runIncSync afterSync: %v", err)
 			return err
 		}
 	}
 	// 游标最后落盘（commit-last）：附加步骤（群成员同步）失败时游标不推进，
 	// 下次同步重拉同批增量重试，落库均幂等
 	if err := e.stor.SetVersion(e.owner, s.key, meta.versionID, meta.version); err != nil {
-		e.logger.Errorf("runIncSync set version: %w", err)
+		e.logger.Errorf("runIncSync set version: %v", err)
 		return err
 	}
 	e.publish(s.event, meta.payload)
@@ -250,21 +250,21 @@ func runIncSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s incSyncSpe
 func runFullSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s fullSyncSpec[ITEM], inc incMeta) error {
 	localIDs, err := s.listLocalIDs()
 	if err != nil {
-		e.logger.Errorf("runFullSync listLocalIDs: %w", err)
+		e.logger.Errorf("runFullSync listLocalIDs: %v", err)
 		return err
 	}
 	meta := fullMeta{versionID: inc.versionID, version: inc.version}
 	if s.verify != nil {
 		meta, err = s.verify(ctx, hash.HashStringSet(localIDs))
 		if err != nil {
-			e.logger.Errorf("runFullSync verify: %w", err)
+			e.logger.Errorf("runFullSync verify: %v", err)
 			return err
 		}
 	}
 	if meta.equal {
 		// 本地 ID 集合与服务端一致：内容可信（历史增量已应用），仅对齐游标
 		if err := e.stor.SetVersion(e.owner, s.key, meta.versionID, meta.version); err != nil {
-			e.logger.Errorf("runFullSync set version: %w", err)
+			e.logger.Errorf("runFullSync set version: %v", err)
 			return err
 		}
 		e.publish(s.event, inc.payload)
@@ -272,26 +272,26 @@ func runFullSync[ITEM any](e *EntitySyncEngine, ctx context.Context, s fullSyncS
 	}
 	all, err := s.fetchAll(ctx)
 	if err != nil {
-		e.logger.Errorf("runFullSync fetchAll: %w", err)
+		e.logger.Errorf("runFullSync fetchAll: %v", err)
 		return err
 	}
 	if err := s.clear(localIDs); err != nil {
-		e.logger.Errorf("runFullSync clear: %w", err)
+		e.logger.Errorf("runFullSync clear: %v", err)
 		return err
 	}
 	if err := s.upsert(e.owner, all); err != nil {
-		e.logger.Errorf("runFullSync upsert: %w", err)
+		e.logger.Errorf("runFullSync upsert: %v", err)
 		return err
 	}
 	if s.afterFull != nil {
 		if err := s.afterFull(ctx); err != nil {
-			e.logger.Errorf("runFullSync afterFull: %w", err)
+			e.logger.Errorf("runFullSync afterFull: %v", err)
 			return err
 		}
 	}
 	// 游标最后落盘（commit-last）：附加步骤失败时游标不推进，下次同步重新走全量流程
 	if err := e.stor.SetVersion(e.owner, s.key, meta.versionID, meta.version); err != nil {
-		e.logger.Errorf("runFullSync set version: %w", err)
+		e.logger.Errorf("runFullSync set version: %v", err)
 		return err
 	}
 	e.publish(s.event, inc.payload)
