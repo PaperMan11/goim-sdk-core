@@ -43,7 +43,7 @@ func (m *DefaultGroupMgr) CreateGroup(ctx context.Context, groupInfo *model.Grou
 		m.bus.Publish(events.EventGroupCreated, events.Event{
 			Type:      events.EventGroupCreated,
 			Timestamp: timex.UnixMilli(),
-			Payload:   resp.GroupInfo,
+			Payload:   &events.GroupCreatedTips{Group: resp.GroupInfo, OperationTime: timex.UnixMilli()},
 		})
 	}
 	return resp.GroupInfo, nil

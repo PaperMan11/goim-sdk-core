@@ -904,7 +904,7 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 			Timestamp:  timestamp,
 		})
 	}
-	decodeTip := func(et events.EventType, tip proto.Message) {
+	decodeTip := func(et events.EventType, tip interface{}) {
 		if err := json.Unmarshal([]byte(detail), tip); err != nil {
 			c.logger.Warnf("dispatchNotification: unmarshal tips failed, contentType=%d, error=%v",
 				msgData.ContentType, err.Error())
@@ -993,10 +993,10 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 
 	// —— 群组 ——
 	case pbconstant.GroupCreatedNotification: // 1501
-		decodeTip(events.EventGroupCreated, &pbsdk.GroupCreatedTips{})
+		decodeTip(events.EventGroupCreated, &events.GroupCreatedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupInfoSetNotification: // 1502
-		decodeTip(events.EventGroupInfoSet, &pbsdk.GroupInfoSetTips{})
+		decodeTip(events.EventGroupInfoSet, &events.GroupInfoSetTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.JoinGroupApplicationNotification: // 1503
 		publish(events.EventJoinGroupApplication, detail)
