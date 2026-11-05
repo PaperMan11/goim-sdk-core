@@ -256,7 +256,7 @@ func TestEntitySync_FriendsFullFetchFailureKeepsOldData(t *testing.T) {
 		incFriends: &model.IncrementalFriends{VersionID: "fv2", Version: 5, Full: true},
 		fullFriends: &model.FullFriendIDs{VersionID: "fv2", Version: 5, Equal: false,
 			UserIDs: []string{"f_new"}},
-		friendList:      []*model.FriendInfo{{FriendUserID: "f_new"}},
+		friendList:      []*model.FriendInfo{{FriendUser: &model.FriendUserInfo{UserID: "f_new"}}},
 		friendListFails: 1, // 全量拉取首 页即失败
 	}
 	stor := storage.NewMemoryStorage()
@@ -264,7 +264,7 @@ func TestEntitySync_FriendsFullFetchFailureKeepsOldData(t *testing.T) {
 	engine := NewEntitySyncEngine(rel, &mockGroupSource{}, &mockConvSource{}, stor, testOwner, bus, &logger.NopLogger{})
 
 	// 预置旧数据 + 旧游标
-	if err := stor.UpsertFriends(testOwner, []*model.FriendInfo{{FriendUserID: "f_old"}}); err != nil {
+	if err := stor.UpsertFriends(testOwner, []*model.FriendInfo{{FriendUser: &model.FriendUserInfo{UserID: "f_old"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := stor.SetVersion(testOwner, storage.EntityFriends, "fv1", 1); err != nil {
@@ -277,7 +277,7 @@ func TestEntitySync_FriendsFullFetchFailureKeepsOldData(t *testing.T) {
 	}
 	// fetch-then-swap：旧数据与游标不受影响（先清表就会在这里出现空列表）
 	fs, _ := stor.ListFriends(testOwner)
-	if len(fs) != 1 || fs[0].FriendUserID != "f_old" {
+	if len(fs) != 1 || fs[0].FriendUserID() != "f_old" {
 		t.Fatalf("friends after failed full resync = %+v, want [f_old]", fs)
 	}
 	vID, ver, _ := stor.GetVersion(testOwner, storage.EntityFriends)
@@ -294,7 +294,7 @@ func TestEntitySync_FriendsFullFetchFailureKeepsOldData(t *testing.T) {
 		t.Fatalf("SyncFriends #2: %v", err)
 	}
 	fs, _ = stor.ListFriends(testOwner)
-	if len(fs) != 1 || fs[0].FriendUserID != "f_new" {
+	if len(fs) != 1 || fs[0].FriendUserID() != "f_new" {
 		t.Fatalf("friends after recovery = %+v, want [f_new]", fs)
 	}
 	vID, ver, _ = stor.GetVersion(testOwner, storage.EntityFriends)
@@ -739,8 +739,13 @@ func TestEntitySync_FriendsIncremental(t *testing.T) {
 	rel := &mockRelSource{
 		incFriends: &model.IncrementalFriends{
 			VersionID: "v1", Version: 2,
-			Insert: []model.FriendInfo{{FriendUserID: "f1"}, {FriendUserID: "f2"}},
-			Update: []model.FriendInfo{{FriendUserID: "f3", Nickname: "newName"}},
+			Insert: []model.FriendInfo{
+				{FriendUser: &model.FriendUserInfo{UserID: "f1"}},
+				{FriendUser: &model.FriendUserInfo{UserID: "f2"}},
+			},
+			Update: []model.FriendInfo{
+				{FriendUser: &model.FriendUserInfo{UserID: "f3", Nickname: "newName"}},
+			},
 			Delete: []string{"f9"},
 		},
 	}
@@ -749,8 +754,8 @@ func TestEntitySync_FriendsIncremental(t *testing.T) {
 		t.Fatalf("seed version: %v", err)
 	}
 	if err := stor.UpsertFriends(testOwner, []*model.FriendInfo{
-		{FriendUserID: "f3", Nickname: "oldName"},
-		{FriendUserID: "f9"},
+		{FriendUser: &model.FriendUserInfo{UserID: "f3", Nickname: "oldName"}},
+		{FriendUser: &model.FriendUserInfo{UserID: "f9"}},
 	}); err != nil {
 		t.Fatalf("seed friends: %v", err)
 	}
@@ -773,7 +778,7 @@ func TestEntitySync_FriendsIncremental(t *testing.T) {
 	}
 	byID := map[string]*model.FriendInfo{}
 	for _, f := range fs {
-		byID[f.FriendUserID] = f
+		byID[f.FriendUserID()] = f
 	}
 	if len(fs) != 3 {
 		t.Fatalf("friends = %d, want 3", len(fs))
@@ -781,7 +786,7 @@ func TestEntitySync_FriendsIncremental(t *testing.T) {
 	if byID["f1"] == nil || byID["f2"] == nil || byID["f9"] != nil {
 		t.Errorf("insert/delete not applied: %v", byID)
 	}
-	if byID["f3"] == nil || byID["f3"].Nickname != "newName" {
+	if byID["f3"] == nil || byID["f3"].Nickname() != "newName" {
 		t.Errorf("update not applied: %+v", byID["f3"])
 	}
 
@@ -809,7 +814,7 @@ func TestEntitySync_FriendsFullEqual(t *testing.T) {
 		t.Fatalf("seed version: %v", err)
 	}
 	if err := stor.UpsertFriends(testOwner, []*model.FriendInfo{
-		{FriendUserID: "f1"}, {FriendUserID: "f2"},
+		{FriendUser: &model.FriendUserInfo{UserID: "f1"}}, {FriendUser: &model.FriendUserInfo{UserID: "f2"}},
 	}); err != nil {
 		t.Fatalf("seed friends: %v", err)
 	}
@@ -849,7 +854,7 @@ func TestEntitySync_FriendsFullNotEqual(t *testing.T) {
 			VersionID: "fv", Version: 9, Equal: false, UserIDs: []string{"f3", "f4", "f5"},
 		},
 		friendList: []*model.FriendInfo{
-			{FriendUserID: "f3"}, {FriendUserID: "f4"}, {FriendUserID: "f5"},
+			{FriendUser: &model.FriendUserInfo{UserID: "f3"}}, {FriendUser: &model.FriendUserInfo{UserID: "f4"}}, {FriendUser: &model.FriendUserInfo{UserID: "f5"}},
 		},
 	}
 	stor := storage.NewMemoryStorage()
@@ -857,7 +862,7 @@ func TestEntitySync_FriendsFullNotEqual(t *testing.T) {
 		t.Fatalf("seed version: %v", err)
 	}
 	if err := stor.UpsertFriends(testOwner, []*model.FriendInfo{
-		{FriendUserID: "f1"}, {FriendUserID: "f2"},
+		{FriendUser: &model.FriendUserInfo{UserID: "f1"}}, {FriendUser: &model.FriendUserInfo{UserID: "f2"}},
 	}); err != nil {
 		t.Fatalf("seed friends: %v", err)
 	}
@@ -876,7 +881,7 @@ func TestEntitySync_FriendsFullNotEqual(t *testing.T) {
 	for _, id := range []string{"f3", "f4", "f5"} {
 		found := false
 		for _, f := range fs {
-			if f.FriendUserID == id {
+			if f.FriendUserID() == id {
 				found = true
 			}
 		}
@@ -885,8 +890,8 @@ func TestEntitySync_FriendsFullNotEqual(t *testing.T) {
 		}
 	}
 	for _, f := range fs {
-		if f.FriendUserID == "f1" || f.FriendUserID == "f2" {
-			t.Errorf("stale friend %s not cleared", f.FriendUserID)
+		if f.FriendUserID() == "f1" || f.FriendUserID() == "f2" {
+			t.Errorf("stale friend %s not cleared", f.FriendUserID())
 		}
 	}
 	// 游标
@@ -903,10 +908,10 @@ func TestEntitySync_FriendsFullNotEqual(t *testing.T) {
 func TestEntitySync_BlacksFull(t *testing.T) {
 	rel := &mockRelSource{
 		incBlacks: &model.IncrementalBlacks{VersionID: "bv", Version: 3, Full: true},
-		blackList: []*model.BlackInfo{{BlackUserID: "b2"}},
+		blackList: []*model.BlackInfo{{BlackUserInfo: &model.PublicUserInfo{UserID: "b2"}}},
 	}
 	stor := storage.NewMemoryStorage()
-	if err := stor.UpsertBlacks(testOwner, []*model.BlackInfo{{BlackUserID: "b1"}}); err != nil {
+	if err := stor.UpsertBlacks(testOwner, []*model.BlackInfo{{BlackUserInfo: &model.PublicUserInfo{UserID: "b1"}}}); err != nil {
 		t.Fatalf("seed blacks: %v", err)
 	}
 	bus, chans := newTestBus(t, events.EventBlackListSynced)
@@ -917,7 +922,7 @@ func TestEntitySync_BlacksFull(t *testing.T) {
 	}
 
 	bs, _ := stor.ListBlacks(testOwner)
-	if len(bs) != 1 || bs[0].BlackUserID != "b2" {
+	if len(bs) != 1 || bs[0].BlackUserID() != "b2" {
 		t.Fatalf("blacks = %v, want [b2]", bs)
 	}
 	vID, ver, _ := stor.GetVersion(testOwner, storage.EntityBlacks)
@@ -1140,7 +1145,7 @@ func TestEntitySync_ConversationsFullNotEqual(t *testing.T) {
 // TestEntitySync_SyncAll_Chain SyncAll 顺序执行五类同步：游标与事件齐全
 func TestEntitySync_SyncAll_Chain(t *testing.T) {
 	rel := &mockRelSource{
-		incFriends: &model.IncrementalFriends{VersionID: "fv", Version: 1, Insert: []model.FriendInfo{{FriendUserID: "f1"}}},
+		incFriends: &model.IncrementalFriends{VersionID: "fv", Version: 1, Insert: []model.FriendInfo{{FriendUser: &model.FriendUserInfo{UserID: "f1"}}}},
 		incBlacks:  &model.IncrementalBlacks{VersionID: "bv", Version: 1},
 	}
 	group := &mockGroupSource{

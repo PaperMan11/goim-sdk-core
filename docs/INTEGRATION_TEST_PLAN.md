@@ -3,7 +3,7 @@
 > 目标：在跨语言封装（Phase 5）之前，验证 SDK 与 goim 服务端真实链路的端到端正确性。
 > 服务端仓库：`goim`（im-api / im-msggateway / im-msgtransfer / im-push / im-rpc / im-cron）
 
-**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ⏳ E1 进行中：E1.1（错误 secret 拒绝，R9 回归 ✅）、E1.3（重复登录 ✅）、E1.4（服务端**拒绝**未认证 WS 连接，bad handshake，结论已记录 ✅）通过；E1.5（token 过期刷新）、E1.6（Logout，主动断连不发 EventDisconnect 按设计，测试预期已修正）待回归 → E2 执行中：**E2.6 ✅（2026-11-02）**，过程中发现并修复测试基建缺陷（msgBox.recv 丢弃非目标消息，遇推送乱序到达会吞事件，已改为暂存区复用；实测推送确实乱序：seq6 先于 seq5 到达）；E2.7 实测发现 R12（服务端异步持久化窗口），服务端已按 write-through 方案修复上线，测试改为 ack 后首轮严格断言（回归哨兵）；E2.1-E2.5、E2.7、E2.8 待执行；E3-E6 待编写。风险 R1/R7/R8/R9/R10/R11 已闭环，R2 已修复待回归，R12 服务端已修复（write-through 上线，SDK 缺口补拉兜底 D4 残余），详见 §4。
+**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ✅ E1 全部通过（2026-11-03：E1.1-E1.4 通过、E1.5/E1.6 回归通过，R2 闭环）→ ✅ E2 全部通过（2026-11-03：E2.1-E2.8 全绿；E2.7 严格版——write-through 回归哨兵——通过，R12 完全闭环）→ E3 已编写待执行；E4-E6 待编写。风险 R1/R2/R7/R8/R9/R10/R11/R12 已闭环，详见 §4。
 
 ---
 
@@ -139,7 +139,7 @@ go test ./test/integration/... -v -count=1
 | E2.7 | 消息持久化参数 | 验证服务端在线/离线推送均可达 | 在线走 gateway 推送，离线登录后走 sync，两条路径都拿到同一 clientMsgID |
 | E2.8 | 推送消息落库（2001 实时持久化） | B 在线，A 发 1 条消息 | B 收到 `OnNewMessage` 后直接查 B 的 SQLite：该消息已存在（clientMsgID 匹配、内容一致）；且 maxSeqs 游标**未**被推送推进（推送可能丢失/乱序，游标仅由 gap 拉取推进） |
 
-> 📝 **E2 执行状态（2026-11-02）**：6 个测试函数覆盖 E2.1-E2.8 —— `TestE2_SingleChatSend`（E2.1）、`TestE2_GroupChatSend`（E2.2）、`TestE2_OfflineSeqSync`（E2.3/E2.4/E2.5）、`TestE2_HistoryLocalStorage`（E2.6 ✅ 已通过）、`TestE2_PersistenceBothPaths`（E2.7）、`TestE2_PushPersistNoCursorAdvance`（E2.8）。
+> 📝 **E2 执行状态（2026-11-02 编写，✅ 2026-11-03 全部通过）**：6 个测试函数覆盖 E2.1-E2.8 —— `TestE2_SingleChatSend`（E2.1 ✅）、`TestE2_GroupChatSend`（E2.2 ✅）、`TestE2_OfflineSeqSync`（E2.3/E2.4/E2.5 ✅）、`TestE2_HistoryLocalStorage`（E2.6 ✅）、`TestE2_PersistenceBothPaths`（E2.7 ✅ 严格版，write-through 回归哨兵）、`TestE2_PushPersistNoCursorAdvance`（E2.8 ✅）。
 > 实现说明：① E2.6-E2.8 经 `newTestClientWithStorage` 以 `ClientConfig.Storage` 注入 SQLite（SDK 与断言共用同一连接，避免双连接文件锁），直接断言本地落库；② E2.6/E2.8 依赖 `handleMessagePush` 先 `persistPushMsg` 再发布 `EventNewMsg` 的时序——收到事件即落库完成；③ E2.8 游标基线由「预热消息发给未登录的 B → B 首登 gap 拉取」建立，保证基线来自同步引擎而非推送。
 > 对接结论：④ 服务端 C2C 会话 ID 命名规则为 `si_<userA>_<userB>`；⑤ sender 也会收到 2001 推送回显（发送端同样走 persistPushMsg 落库）；服务端方案 A（write-through）上线后 **1003 ack 即提交信号**，回显信号退役——E2.7 已改为 ack 后首轮严格断言；⑥ 推送到达顺序不保证（实测 seq6 先于 seq5 到达）——测试基建 `msgBox.recv` 已改为非目标消息暂存复用，不得丢弃；⑦ 多客户端联调时用 `newTestClient(t, "A"/"B")` 标签日志区分归属。
 
@@ -157,6 +157,8 @@ go test ./test/integration/... -v -count=1
 | E3.8 | 在线状态订阅（2005） | B `User().SubscribeUsersStatus(u1)` → u1 上/下线 | `EventUserStatusChange`（2004 后台状态同法验证） |
 | E3.9 | 未映射 contentType | 人为构造未知通知（或记录服务端既有类型） | SDK warn 日志 `unmapped contentType`，不 panic |
 | E3.10 | 实体类通知触发增量同步 | A 加好友 / 建群（产生 1201-1210/1501-1515 通知） | B **不重连**，约 500ms 去抖后 B 的 SQLite friend/group 缓存自动更新（通知 Detail 仅含 ID 列表，SDK 须自行拉取增量补全实体）；与登录同步互斥不冲突 |
+
+> 📝 **E3 首跑实测（2026-11-03）**：E3.1 通过；E3.2 暴露并修复 **SDK 缺陷**——服务端把通知消息归属到 `n_<userA>_<userB>` 通知会话（通知本身也会经 persistPushMsg 落库为 n_ 会话消息），而 SDK 的 2101/2102/2200 缓存应用误用了信封归属 `mm.ConversationID`，导致撤回/删除/已读未作用到 `si_` 原会话（事件照常发布、tips 内的 conversationID 正确）。已修复：优先用 tips 携带的 `conversationID`（`notificationConvID`，缺失回退信封）。通知会话隔离的去留已记录为 R13（决策：暂不改服务端，接受 best-effort）。E3.1-E3.4 待重跑，E3.5-E3.10 待执行。
 
 ### E4 五类实体增量同步（EntitySync）
 
@@ -209,7 +211,7 @@ go test ./test/integration/... -v -count=1
 | # | 风险 | 位置 | 影响 | 建议动作 |
 |---|---|---|---|---|
 | R1 | ~~**HTTP token 注入选路失效**~~ **已修复并经 E0 验证**：`HTTPClient` 新增 `CurrentUserSetter`，Login 后注入当前 `(userID, platformID)`，token 按 `key(userID, platformID)` 精确选路；Logout 清除 | `transport/http.go` Get 注入处 vs `transport/auth.go` key() | ~~P0~~ 已闭环 | ✅ `TestE0_RegisterUsers`/`TestE0_LoginFullFlow` 回归通过 |
-| R2 | ~~HTTP token 过期重试逻辑~~ **E1 实测后真正修复**：原实现 `tokenRefreshed` 置位后空转重试（不刷新）；且只识别 1501/1504，服务端短 TTL 场景实际返回 1507（token 记录不存在，Redis TTL 先于 JWT exp）→ 直接失败。现：`model.IsTokenRefreshable` 覆盖 1501/1502/1503/1504/1507（1506 被踢不可刷新），Post/Get 收到认证错误 → `TokenStore.Refresh(当前用户)` 真正取新 token → 重试一次；刷新闭包未配置或失败 → 立即返回原错误不空转 | `transport/http.go` Post/Get、`model/error.go`、单测 `http_refresh_test.go` | E1.5 回归确认 | 服务端保持短 TTL 重跑 E1.5 |
+| R2 | ~~HTTP token 过期重试逻辑~~ **E1 实测后真正修复**：原实现 `tokenRefreshed` 置位后空转重试（不刷新）；且只识别 1501/1504，服务端短 TTL 场景实际返回 1507（token 记录不存在，Redis TTL 先于 JWT exp）→ 直接失败。现：`model.IsTokenRefreshable` 覆盖 1501/1502/1503/1504/1507（1506 被踢不可刷新），Post/Get 收到认证错误 → `TokenStore.Refresh(当前用户)` 真正取新 token → 重试一次；刷新闭包未配置或失败 → 立即返回原错误不空转 | `transport/http.go` Post/Get、`model/error.go`、单测 `http_refresh_test.go` | 已闭环 | ✅ E1.5 短 TTL 回归通过（2026-11-03），刷新/重试链路真实生效 |
 | R3 | ~~WS 认证参数字段名比对~~ **已验证**：E0.4/E0.5 握手成功且全链路稳定，query 字段名（`userID/token/platformID/deviceID/sendResponse/isBackground/compression/sdkType/sdkVersion`）与服务端网关一致；`deviceID` 已补自动生成 + SQLite 持久化，`sdkVersion` 从 `version/VERSION` 注入 | `transport/ws.go` encodeQuery | 已闭环 | ✅ E0.4 握手日志核对（`deviceID=<uuid>`、`sdkVersion=1.0.0`） |
 | R4 | ~~compression 默认不一致风险~~ **已验证**：`compression=none` 与服务端一致，同步链路 JSON 解析无乱码 | `transport/encoder` `compressor` | 已闭环 | ✅ E0.5 五类实体同步解析正常 |
 | R5 | `handleMessagePush` 只按 `MsgData` 信封解析，通知走 `ContentType >= 1000` 分流；服务端若有信封外推送形态（如 2004/2005 直接推送 tips）需要核实 | `client/client_impl.go` handleMessagePush | 推送事件丢失 | E3.8 用真实服务端验证 |
@@ -219,7 +221,8 @@ go test ./test/integration/... -v -count=1
 | R9 | ~~`get_admin_token` 不校验 secret~~ **已修复**：服务端恢复 secret 校验（`subtle.ConstantTimeCompare` 常量时间比较 + 管理员列表双重校验）。遗留建议：① 启动时校验 AdminSecret 非空且 >= 16 字符（空 secret 与空请求 `ConstantTimeCompare` 返回 1）；② secret 错误与非管理员错误对外统一返回 `NoPermissionError`，避免差异成为 secret 猜测的 oracle | 服务端 `get_admin_token.go` 代码评审 | 中：已消除；两点建议落地后闭环 | E0/E1 用例两种失败路径均可用；部署后回归 |
 | R10 | **HTTP 请求字段名/响应包装必须与服务端 proto 一致**：服务端字段名不统一（`fromUserID`/`ownerUserID`/`userID` 混用），且所有列表响应均为包装对象（`conversations`/`usersInfo`/`groupInfos` 等）而非裸数组，SDK 发错名字段会被静默忽略并报 "xxx is required" | E0 实测 + `pkg/protocol/**/*.pb.go` 比对 | 同步链路各接口逐一踩坑；跨语言封装后更难排查 | ✅ 已全量核对并修复：3 处请求字段名 + 10 处响应包装解析；后续新增接口须先查 pb.go 字段名与 Resp 结构再写 tag |
 | R11 | **404 假成功（已修复，保留防护）**：SDK 曾对非 200 响应仍按 `{code,msg,data}` 解析 → `code=0` 零值 + 空 data → **"假成功"**（如 get_user_token 404 后返回空 token 仍存入 TokenStore，表现为"登录成功但 token 未保存"）。前缀约定：**`ClientConfig.BaseURL` 需包含 `/api/v1`**（如 `http://host:port/api/v1`），HTTPClient 直接在其上拼接业务路径，不做二次拼接 | E1 阶段用 httptest 复现（`TestAcquireUserTokenStoresToken`） | **P1**：token/任意接口静默空结果，排查困难 | ✅ 已修复：非 200 状态码直接返回 SDKError（含 URL + body 片段），杜绝假成功；token 存取链路有确定性单测守护 |
-| R12 | **发送链路异步持久化窗口（最终一致，E2.7 实测）**：1003 send ack 返回时消息可能尚未在服务端可查（transfer/rpc 管道异步落库），紧随其后的登录同步 gap 拉取拿不到刚发的消息；SDK 无法从 NewestSeq 感知滞后——服务端游标本身同样滞后，且无通知可订阅。发送方/对端立即查询、发送后立即重登均会踩中 | E2.7 实测（发完立即重登漏消息，等待后恢复） | 中：影响「发送后立即查询/同步」场景；跨语言封装后宿主应用更易踩中 | 测试侧 ✅：E2.7 已按方案 A 严格化（2026-11-03）——**1003 ack（SendMsg 返回）即提交信号**，B 重登 + EventSyncFinish 后首轮断言离线消息全部在库，缺即 Fatal（服务端若退回异步管道立刻红）；旧的事件驱动回显等待与 `waitOfflineSyncConverged` 收敛轮询退役（helper 保留供 E4/E6 离线场景复用）。SDK 侧 ✅：批内缺口补拉（`SeqSyncEngine.fillHole`，2026-11-03）——拉取批 seq 在 `[batchStart, last]` 内不连续（方案 A 仍保留的 D4 并发同步落库乱序毫秒级窗口）时游标停在缺口前落盘，缺口区间有界重试 3×200ms；补齐后推进游标，**耗尽仍缺视为永久缺失跳过并 Warnf**（对齐服务端「补拉连续 N 次为空视为已删」约定），补拉请求失败则游标留缺口前待下轮幂等重拉；`pkg/sync` 单测三场景守护：瞬时空洞补齐（`TestSeqSync_HoleRetryFill`）/ 永久空洞耗尽跳过（`TestSeqSync_HoleSkippedAfterRetries`）/ 补拉失败游标不越过（`TestSeqSync_HoleRetryError`），集成层不做确定性构造（需并发发送恰好撞上同步窗口）。服务端 ✅：write-through 已上线（2026-11-03，goim `docs/msg-send-sync-commit.md`）——seq 分配+落库+建会话+游标推进全部前移至 ack 前、推送后置，R12 主窗口消除 |
+| R12 | **发送链路异步持久化窗口（最终一致，E2.7 实测）**：1003 send ack 返回时消息可能尚未在服务端可查（transfer/rpc 管道异步落库），紧随其后的登录同步 gap 拉取拿不到刚发的消息；SDK 无法从 NewestSeq 感知滞后——服务端游标本身同样滞后，且无通知可订阅。发送方/对端立即查询、发送后立即重登均会踩中 | E2.7 实测（发完立即重登漏消息，等待后恢复） | 中：影响「发送后立即查询/同步」场景；跨语言封装后宿主应用更易踩中 | 测试侧 ✅：E2.7 已按方案 A 严格化（2026-11-03）——**1003 ack（SendMsg 返回）即提交信号**，B 重登 + EventSyncFinish 后首轮断言离线消息全部在库，缺即 Fatal（服务端若退回异步管道立刻红）；旧的事件驱动回显等待与 `waitOfflineSyncConverged` 收敛轮询退役（helper 保留供 E4/E6 离线场景复用）。SDK 侧 ✅：批内缺口补拉（`SeqSyncEngine.fillHole`，2026-11-03）——拉取批 seq 在 `[batchStart, last]` 内不连续（方案 A 仍保留的 D4 并发同步落库乱序毫秒级窗口）时游标停在缺口前落盘，缺口区间有界重试 3×200ms；补齐后推进游标，**耗尽仍缺视为永久缺失跳过并 Warnf**（对齐服务端「补拉连续 N 次为空视为已删」约定），补拉请求失败则游标留缺口前待下轮幂等重拉；`pkg/sync` 单测三场景守护：瞬时空洞补齐（`TestSeqSync_HoleRetryFill`）/ 永久空洞耗尽跳过（`TestSeqSync_HoleSkippedAfterRetries`）/ 补拉失败游标不越过（`TestSeqSync_HoleRetryError`），集成层不做确定性构造（需并发发送恰好撞上同步窗口）。服务端 ✅：write-through 已上线（2026-11-03，goim `docs/msg-send-sync-commit.md`）——seq 分配+落库+建会话+游标推进全部前移至 ack 前、推送后置，R12 主窗口消除；E2.7 严格版回归通过（2026-11-03）→ **完全闭环** |
+| R13 | **通知会话隔离的架构决策（E3 首跑实测）**：服务端把系统通知（ContentType>=1000）归属到 `n_<userA>_<userB>` 独立通知会话，与业务消息的 `si_` 会话隔离——通知有自己的 seq 序列，不占用/推进业务会话游标，聊天流天然不被通知污染，通知可整体独立清理。代价：**通知失去同步可靠性**——`n_` 会话不在 SeqSync 游标体系内，通知的唯一到达路径是实时推送，推送丢失（离线期间/断线瞬间）则撤回/已读/删除永远不会补齐（对比 OpenIM：通知归属原会话、占 seq 随 gap 拉取补齐，免费获得 SeqSync 可靠性） | E3.2 实测（撤回通知 persist 到 `n_` 会话，暴露 SDK 缓存应用打错会话）；若切换原会话归属，服务端仅需改 `SendNotification` 信封归属，SDK **零改动**（`notificationConvID` 双来源一致后等价） | 中：离线期间的撤回/已读/删除不可达；多端已读一致性受影响 | **决策（2026-11-04）：暂不改动服务端，接受通知 best-effort 语义**。SDK 侧：① ✅ 会话列表/同步入口已过滤 `n_` 前缀（`ConvMgr` 的 GetAllConversations/GetSortedConversationList（剔除+总数修正）/GetIncrementalConversations（Insert/Update 过滤，versionID 游标不受影响），显式点名查询不拦截；单测 `conversation_impl_test.go` 四例守护）；② E3.8 及多端场景验证离线通知丢失的实际影响面。若产品后续要求通知必达（撤回确定性/多端已读一致），重新评估切换原会话归属 |
 
 ---
 

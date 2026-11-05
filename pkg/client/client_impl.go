@@ -873,6 +873,16 @@ func (c *DefaultClient) handleMessagePush(resp *transport.Response) {
 	}
 }
 
+// notificationConvID 消息类通知（2101/2102/2200）的会话 ID：服务端把通知消息
+// 归属到 n_ 前缀的通知会话（信封归属非原会话），tips 里携带的才是原会话 ID；
+// tips 缺失时回退信封归属（兼容旧服务端）
+func notificationConvID(tipConvID, fallback string) string {
+	if tipConvID != "" {
+		return tipConvID
+	}
+	return fallback
+}
+
 // dispatchNotification 按 ContentType 分流系统通知
 //
 // tips 解码策略：核心高频通知解码为具体 proto 类型；其余 payload 为 Detail JSON string，
@@ -910,9 +920,10 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 		if err := json.Unmarshal([]byte(detail), tip); err != nil {
 			c.logger.Warnf("dispatchNotification: unmarshal revoke tips failed, error=%v", err.Error())
 		}
+		convID := notificationConvID(tip.ConversationID, mm.ConversationID)
 		if tip.Seq > 0 {
-			c.applyMsgCache("mark revoked", mm.ConversationID, func(owner string) error {
-				return c.storage.MarkMsgsRevoked(owner, mm.ConversationID, []int64{tip.Seq})
+			c.applyMsgCache("mark revoked", convID, func(owner string) error {
+				return c.storage.MarkMsgsRevoked(owner, convID, []int64{tip.Seq})
 			})
 		}
 		publish(events.EventRevokeMsg, tip)
@@ -921,9 +932,10 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 		if err := json.Unmarshal([]byte(detail), tip); err != nil {
 			c.logger.Warnf("dispatchNotification: unmarshal delete tips failed, error=%v", err.Error())
 		}
+		convID := notificationConvID(tip.ConversationID, mm.ConversationID)
 		if len(tip.Seqs) > 0 {
-			c.applyMsgCache("delete msgs", mm.ConversationID, func(owner string) error {
-				return c.storage.DeleteMsgs(owner, mm.ConversationID, tip.Seqs)
+			c.applyMsgCache("delete msgs", convID, func(owner string) error {
+				return c.storage.DeleteMsgs(owner, convID, tip.Seqs)
 			})
 		}
 		publish(events.EventDeleteMsgs, tip)
@@ -932,12 +944,13 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 		if err := json.Unmarshal([]byte(detail), tip); err != nil {
 			c.logger.Warnf("dispatchNotification: unmarshal mark-as-read tips failed, error=%v", err.Error())
 		}
-		c.applyMsgCache("mark read", mm.ConversationID, func(owner string) error {
+		convID := notificationConvID(tip.ConversationID, mm.ConversationID)
+		c.applyMsgCache("mark read", convID, func(owner string) error {
 			if len(tip.Seqs) > 0 {
-				return c.storage.MarkMsgsRead(owner, mm.ConversationID, tip.Seqs)
+				return c.storage.MarkMsgsRead(owner, convID, tip.Seqs)
 			}
 			// 整会话已读：标记 hasReadSeq 及之前的消息
-			return c.storage.MarkMsgsReadUpTo(owner, mm.ConversationID, tip.HasReadSeq)
+			return c.storage.MarkMsgsReadUpTo(owner, convID, tip.HasReadSeq)
 		})
 		publish(events.EventMarkAsRead, tip)
 
@@ -948,11 +961,13 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 		decodeTip(events.EventUserStatusChange, &pbsdk.UserStatusChangeTips{})
 
 	// —— 好友（好友/黑名单缓存随增量同步实时跟进）——
-	case pbconstant.FriendApplicationNotification,
-		pbconstant.FriendApplicationApprovedNotification,
-		pbconstant.FriendApplicationRejectedNotification: // 1203 / 1201 / 1202
+	case pbconstant.FriendApplicationNotification: // 1203 收到好友申请
 		decodeTip(events.EventFriendApplication, &pbsdk.FriendApplicationTips{})
+	case pbconstant.FriendApplicationApprovedNotification: // 1201 好友申请已同意
+		decodeTip(events.EventFriendApplicationApproved, &pbsdk.FriendApplicationTips{})
 		c.triggerEntitySync(sdkSync.KindFriend)
+	case pbconstant.FriendApplicationRejectedNotification: // 1202 好友申请已拒绝
+		decodeTip(events.EventFriendApplicationRejected, &pbsdk.FriendApplicationTips{})
 	case pbconstant.FriendAddedNotification: // 1204
 		publish(events.EventFriendAdded, detail)
 		c.triggerEntitySync(sdkSync.KindFriend)

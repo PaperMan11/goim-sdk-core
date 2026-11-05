@@ -364,16 +364,16 @@ func (s *SQLiteStorage) ListConversationIDs(owner string) ([]string, error) {
 func (s *SQLiteStorage) UpsertFriends(owner string, friends []*model.FriendInfo) error {
 	rows := make([]*FriendRow, 0, len(friends))
 	for _, f := range friends {
-		if f == nil || f.FriendUserID == "" {
+		if f == nil || f.FriendUserID() == "" {
 			continue
 		}
 		b, err := jsonMarshal(f)
 		if err != nil {
-			return fmt.Errorf("storage: marshal friend %s: %w", f.FriendUserID, err)
+			return fmt.Errorf("storage: marshal friend %s: %w", f.FriendUserID(), err)
 		}
 		rows = append(rows, &FriendRow{
 			OwnerUserID:  owner,
-			FriendUserID: f.FriendUserID,
+			FriendUserID: f.FriendUserID(),
 			Remark:       f.Remark,
 			IsPinned:     f.IsPinned,
 			AddSource:    f.AddSource,
@@ -430,14 +430,14 @@ func (s *SQLiteStorage) ListFriendIDs(owner string) ([]string, error) {
 func (s *SQLiteStorage) UpsertBlacks(owner string, blacks []*model.BlackInfo) error {
 	rows := make([]*BlackRow, 0, len(blacks))
 	for _, b := range blacks {
-		if b == nil || b.BlackUserID == "" {
+		if b == nil || b.BlackUserID() == "" {
 			continue
 		}
 		data, err := jsonMarshal(b)
 		if err != nil {
-			return fmt.Errorf("storage: marshal black %s: %w", b.BlackUserID, err)
+			return fmt.Errorf("storage: marshal black %s: %w", b.BlackUserID(), err)
 		}
-		rows = append(rows, &BlackRow{OwnerUserID: owner, BlackUserID: b.BlackUserID, DataJSON: string(data)})
+		rows = append(rows, &BlackRow{OwnerUserID: owner, BlackUserID: b.BlackUserID(), DataJSON: string(data)})
 	}
 	err := upsertBatch(s.db, rows, []clause.Column{
 		{Name: "owner_user_id"}, {Name: "black_user_id"},
@@ -500,7 +500,7 @@ func (s *SQLiteStorage) UpsertGroups(owner string, groups []*model.GroupInfo) er
 			OwnerUserID: owner,
 			GroupID:     g.GroupID,
 			GroupName:   g.GroupName,
-			MemberCount: g.MemberCount,
+			MemberCount: int32(g.MemberCount),
 			Status:      g.Status,
 			DataJSON:    string(b),
 		})

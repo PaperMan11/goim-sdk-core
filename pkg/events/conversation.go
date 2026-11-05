@@ -1,18 +1,16 @@
 package events
 
-// ConversationUpdateTips 会话属性更新
+// ConversationUpdateTips 会话属性更新 —— 对齐服务端 sdkws.ConversationUpdateTips
+//
+// 服务端只下发 userID + conversationIDList（变更会话 ID 列表），
+// 各会话具体属性由会话增量同步拉取。
 type ConversationUpdateTips struct {
-	ConversationID string `json:"conversationID"`
-	UserID         string `json:"userID"`
-	RecvMsgOpt     int32  `json:"recvMsgOpt,omitempty"`
-	IsPinned       int32  `json:"isPinned,omitempty"`
-	AttachedInfo   string `json:"attachedInfo,omitempty"`
-	Ex             string `json:"ex,omitempty"`
-	MaxSeq         int64  `json:"maxSeq,omitempty"`
+	UserID             string   `json:"userID"`
+	ConversationIDList []string `json:"conversationIDList,omitempty"`
 }
 
-// ConversationDeleteTips 会话删除
+// ConversationDeleteTips 会话删除 —— 对齐服务端 sdkws.ConversationDeleteTips
 type ConversationDeleteTips struct {
-	ConversationID string `json:"conversationID"`
-	UserID         string `json:"userID"`
+	UserID          string   `json:"userID"`
+	ConversationIDs []string `json:"conversationIDs,omitempty"`
 }

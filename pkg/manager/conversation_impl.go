@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
@@ -11,6 +12,28 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
+
+// NotificationConversationIDPrefix 服务端系统通知（ContentType>=1000）的会话归属前缀：
+// 通知消息不进业务会话（si_/群会话），而是归属到 n_<userA>_<userB> 独立通知会话。
+// 通知会话不在 SeqSync 游标体系内、对宿主无业务意义（测试计划 R13），
+// 列表与同步入口统一过滤，不暴露给宿主；显式点名查询（GetConversation 等）不拦截
+const NotificationConversationIDPrefix = "n_"
+
+// IsNotificationConversation 是否通知会话（R13）
+func IsNotificationConversation(conversationID string) bool {
+	return strings.HasPrefix(conversationID, NotificationConversationIDPrefix)
+}
+
+// filterNotificationConvs 剔除通知会话（同步增量/批量查询出口）
+func filterNotificationConvs(convs []*model.Conversation) []*model.Conversation {
+	filtered := make([]*model.Conversation, 0, len(convs))
+	for _, c := range convs {
+		if c != nil && !IsNotificationConversation(c.ConversationID) {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
+}
 
 // DefaultConvMgr ConvMgr 默认实现（纯 HTTP）
 type DefaultConvMgr struct {
@@ -34,6 +57,15 @@ func (m *DefaultConvMgr) GetSortedConversationList(ctx context.Context, userID s
 	if err := m.http.Post(ctx, "/conversation/get_sorted_conversation_list", req, &resp); err != nil {
 		return nil, fmt.Errorf("get sorted conversation list: %w", err)
 	}
+	filtered := make([]*model.ConversationElem, 0, len(resp.ConversationElems))
+	for _, e := range resp.ConversationElems {
+		if e != nil && !IsNotificationConversation(e.ConversationID) {
+			filtered = append(filtered, e)
+		}
+	}
+	// 剔除通知会话后同步修正总数（未读汇总不动：通知会话不参与业务未读）
+	resp.ConversationTotal -= int64(len(resp.ConversationElems) - len(filtered))
+	resp.ConversationElems = filtered
 	return &resp, nil
 }
 
@@ -80,7 +112,7 @@ func (m *DefaultConvMgr) GetAllConversations(ctx context.Context, ownerUserID st
 	if err := m.http.Post(ctx, "/conversation/get_all_conversations", req, &resp); err != nil {
 		return nil, fmt.Errorf("get all conversations: %w", err)
 	}
-	return resp.Conversations, nil
+	return filterNotificationConvs(resp.Conversations), nil
 }
 
 func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string, conversationReq *model.ConversationReq) error {
@@ -123,6 +155,10 @@ func (m *DefaultConvMgr) GetIncrementalConversations(ctx context.Context, userID
 	if err := m.http.Post(ctx, "/conversation/get_incremental_conversations", req, &resp); err != nil {
 		return nil, fmt.Errorf("get incremental conversations: %w", err)
 	}
+	// 过滤通知会话；versionID/Version 不受影响（游标按服务端响应推进，被剔除
+	// 的通知会话本就不落本地库，剔除后无一致性影响），Delete 列表保留服务端原样
+	resp.Insert = filterNotificationConvs(resp.Insert)
+	resp.Update = filterNotificationConvs(resp.Update)
 	return &resp, nil
 }
 

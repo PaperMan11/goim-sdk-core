@@ -1179,9 +1179,9 @@ const (
     NotRecvMsg       = 1  // 不接收
     RecvMsgNotNotify = 2  // 接收不推送
 
-    RoleMember = 10  // 群成员
-    RoleAdmin  = 20  // 管理员
-    RoleOwner  = 50  // 群主
+    RoleMember = 20  // 群普通成员（对齐服务端 GroupOrdinaryUsers）
+    RoleAdmin  = 60  // 群管理员（对齐服务端 GroupAdmin）
+    RoleOwner  = 100 // 群主（对齐服务端 GroupOwner）
 
     PullOrderAsc  = 0  // 升序
     PullOrderDesc = 1  // 降序

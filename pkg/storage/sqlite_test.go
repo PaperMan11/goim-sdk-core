@@ -206,14 +206,14 @@ func TestSQLiteStorage_FriendsBlacks(t *testing.T) {
 	s := newSQLiteForTest(t)
 
 	err := s.UpsertFriends("u1", []*model.FriendInfo{
-		{OwnerUserID: "u1", FriendUserID: "f1", Remark: "one"},
-		{OwnerUserID: "u1", FriendUserID: "f2", Remark: "two", IsPinned: true},
+		{OwnerUserID: "u1", FriendUser: &model.FriendUserInfo{UserID: "f1"}, Remark: "one"},
+		{OwnerUserID: "u1", FriendUser: &model.FriendUserInfo{UserID: "f2"}, Remark: "two", IsPinned: true},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// update f1
-	if err := s.UpsertFriends("u1", []*model.FriendInfo{{OwnerUserID: "u1", FriendUserID: "f1", Remark: "one-x"}}); err != nil {
+	if err := s.UpsertFriends("u1", []*model.FriendInfo{{OwnerUserID: "u1", FriendUser: &model.FriendUserInfo{UserID: "f1"}, Remark: "one-x"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -226,11 +226,11 @@ func TestSQLiteStorage_FriendsBlacks(t *testing.T) {
 		t.Fatalf("ids = %v", ids)
 	}
 
-	if err := s.UpsertBlacks("u1", []*model.BlackInfo{{OwnerUserID: "u1", BlackUserID: "b1"}}); err != nil {
+	if err := s.UpsertBlacks("u1", []*model.BlackInfo{{OwnerUserID: "u1", BlackUserInfo: &model.PublicUserInfo{UserID: "b1"}}}); err != nil {
 		t.Fatal(err)
 	}
 	bs, _ := s.ListBlacks("u1")
-	if len(bs) != 1 || bs[0].BlackUserID != "b1" {
+	if len(bs) != 1 || bs[0].BlackUserID() != "b1" {
 		t.Fatalf("blacks = %+v", bs)
 	}
 
@@ -296,8 +296,8 @@ func TestSQLiteStorage_ClearOwnerIsolation(t *testing.T) {
 	// 两个 owner 各写数据
 	_ = s.SetVersion("u1", EntityFriends, "v1", 1)
 	_ = s.SetVersion("u2", EntityFriends, "v2", 2)
-	_ = s.UpsertFriends("u1", []*model.FriendInfo{{OwnerUserID: "u1", FriendUserID: "f1"}})
-	_ = s.UpsertFriends("u2", []*model.FriendInfo{{OwnerUserID: "u2", FriendUserID: "f2"}})
+	_ = s.UpsertFriends("u1", []*model.FriendInfo{{OwnerUserID: "u1", FriendUser: &model.FriendUserInfo{UserID: "f1"}}})
+	_ = s.UpsertFriends("u2", []*model.FriendInfo{{OwnerUserID: "u2", FriendUser: &model.FriendUserInfo{UserID: "f2"}}})
 	_ = s.SetMaxSeqs("u1", map[string]int64{"c": 10}, nil)
 	_ = s.SetMaxSeqs("u2", map[string]int64{"c": 20}, nil)
 

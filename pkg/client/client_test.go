@@ -437,7 +437,7 @@ func TestPushNotificationTriggersEntitySync(t *testing.T) {
 			write(map[string]interface{}{
 				"versionID": "fv1", "version": 1,
 				"insert": []map[string]interface{}{
-					{"ownerUserID": "u1", "friendUserID": "bob", "createTime": 1},
+					{"ownerUserID": "u1", "friendUser": map[string]interface{}{"userID": "bob"}, "createTime": 1},
 				},
 			})
 		case "/relation/get_incremental_blacks",
@@ -480,7 +480,7 @@ func TestPushNotificationTriggersEntitySync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(friends) != 1 || friends[0].FriendUserID != "bob" {
+	if len(friends) != 1 || friends[0].FriendUserID() != "bob" {
 		t.Fatalf("friend cache not updated by notification-triggered sync: %+v", friends)
 	}
 }
@@ -503,7 +503,7 @@ func TestTargetedEntitySync(t *testing.T) {
 			write(map[string]interface{}{
 				"versionID": "fv1", "version": 1,
 				"insert": []map[string]interface{}{
-					{"ownerUserID": "u1", "friendUserID": "bob", "createTime": 1},
+					{"ownerUserID": "u1", "friendUser": map[string]interface{}{"userID": "bob"}, "createTime": 1},
 				},
 			})
 		default:

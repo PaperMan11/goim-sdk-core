@@ -394,10 +394,10 @@ func (s *MemoryStorage) UpsertFriends(owner string, friends []*model.FriendInfo)
 		s.friends[owner] = make(map[string]*model.FriendInfo)
 	}
 	for _, f := range friends {
-		if f == nil || f.FriendUserID == "" {
+		if f == nil || f.FriendUserID() == "" {
 			continue
 		}
-		s.friends[owner][f.FriendUserID] = f
+		s.friends[owner][f.FriendUserID()] = f
 	}
 	return nil
 }
@@ -440,10 +440,10 @@ func (s *MemoryStorage) UpsertBlacks(owner string, blacks []*model.BlackInfo) er
 		s.blacks[owner] = make(map[string]*model.BlackInfo)
 	}
 	for _, b := range blacks {
-		if b == nil || b.BlackUserID == "" {
+		if b == nil || b.BlackUserID() == "" {
 			continue
 		}
-		s.blacks[owner][b.BlackUserID] = b
+		s.blacks[owner][b.BlackUserID()] = b
 	}
 	return nil
 }

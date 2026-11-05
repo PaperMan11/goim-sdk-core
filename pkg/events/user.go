@@ -1,25 +1,23 @@
 package events
 
-// UserInfoUpdatedTips 用户信息更新
+// UserInfoUpdatedTips 用户信息更新 —— 对齐服务端 sdkws.UserInfoUpdatedTips
+//
+// 服务端只下发 userID（用户资料需另行拉取），因此此处不携带昵称/头像。
 type UserInfoUpdatedTips struct {
-	UserID     string `json:"userID"`
-	Nickname   string `json:"nickname,omitempty"`
-	FaceURL    string `json:"faceURL,omitempty"`
-	Gender     int32  `json:"gender,omitempty"`
-	Email      string `json:"email,omitempty"`
-	Birth      int64  `json:"birth,omitempty"`
-	AllowAdd   int32  `json:"allowAdd,omitempty"`
-	GlobalRecvMsgOpt int32 `json:"globalRecvMsgOpt,omitempty"`
+	UserID string `json:"userID"`
 }
 
-// UserStatusChangeTips 在线状态变更
+// UserStatusChangeTips 在线状态变更 —— 对齐服务端 sdkws.UserStatusChangeTips
+//
+// 服务端字段为 fromUserID（状态变更者）/ toUserID（订阅者）/ status / platformID。
 type UserStatusChangeTips struct {
-	UserID       string  `json:"userID"`
-	Status       int32   `json:"status"`
-	PlatformIDs  []int32 `json:"platformIDs,omitempty"`
+	FromUserID string `json:"fromUserID"`
+	ToUserID   string `json:"toUserID,omitempty"`
+	Status     int32  `json:"status,omitempty"`     // 1-在线 0-离线
+	PlatformID int32  `json:"platformID,omitempty"` // 平台 ID
 }
 
-// ForceLogoutTips Token 被踢下线
+// ForceLogoutTips Token 被踢下线（WS 控制消息，非 sdkws 通知）
 type ForceLogoutTips struct {
 	UserID     string `json:"userID"`
 	PlatformID int32  `json:"platformID"`

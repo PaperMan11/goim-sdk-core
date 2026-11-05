@@ -29,7 +29,7 @@ const (
 	adminUserID = "imAdmin"
 
 	loginTimeout  = 30 * time.Second // Login（Token + WS 就绪即返回，同步在后台）
-	eventTimeout  = 20 * time.Second
+	eventTimeout  = 10 * time.Second
 	evWaitTimeout = 10 * time.Second
 
 	// syncConvergeTimeout 离线窗口收敛预算：服务端发送链路异步持久化（1003 ack
