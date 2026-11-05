@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
-	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // DefaultUserMgr UserMgr 默认实现（纯 HTTP）
@@ -42,13 +40,16 @@ func (m *DefaultUserMgr) UpdateUserInfo(ctx context.Context, userInfo *model.Use
 	if err := m.http.Post(ctx, "/user/update_user_info", req, nil); err != nil {
 		return fmt.Errorf("update user info: %w", err)
 	}
-	if m.bus != nil {
-		m.bus.Publish(events.EventUserInfoUpdated, events.Event{
-			Type:      events.EventUserInfoUpdated,
-			Timestamp: timex.UnixMilli(),
-			Payload:   userInfo,
-		})
-	}
+	// 服务端更新资料后会推送 UserInfoUpdatedNotification（1303），
+	// 由 client 层 WS dispatch 里统一 Publish(EventUserInfoUpdated)，
+	// SDK 侧无需再本地发布，避免重复事件。
+	// if m.bus != nil {
+	// 	m.bus.Publish(events.EventUserInfoUpdated, events.Event{
+	// 		Type:      events.EventUserInfoUpdated,
+	// 		Timestamp: timex.UnixMilli(),
+	// 		Payload:   userInfo,
+	// 	})
+	// }
 	return nil
 }
 

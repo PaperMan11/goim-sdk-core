@@ -215,12 +215,12 @@ func (m *DefaultMsgMgr) RevokeMsg(ctx context.Context, conversationID string, se
 	if err := m.http.Post(ctx, "/msg/revoke_msg", req, nil); err != nil {
 		return fmt.Errorf("revoke msg: %w", err)
 	}
-	if m.bus != nil {
-		m.bus.Publish(events.EventMsgRevoked, events.Event{
-			Type:      events.EventMsgRevoked,
-			Timestamp: timex.UnixMilli(),
-		})
-	}
+	// if m.bus != nil {
+	// 	m.bus.Publish(events.EventMsgRevoked, events.Event{
+	// 		Type:      events.EventMsgRevoked,
+	// 		Timestamp: timex.UnixMilli(),
+	// 	})
+	// }
 	return nil
 }
 

@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
-	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // NotificationConversationIDPrefix 服务端系统通知（ContentType>=1000）的会话归属前缀：
@@ -124,12 +122,15 @@ func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string,
 	if err := m.http.Post(ctx, "/conversation/set_conversations", req, nil); err != nil {
 		return fmt.Errorf("set conversations: %w", err)
 	}
-	if m.bus != nil {
-		m.bus.Publish(events.EventConversationCreated, events.Event{
-			Type:      events.EventConversationCreated,
-			Timestamp: timex.UnixMilli(),
-		})
-	}
+	// 服务端处理 SetConversations 后会推送 ConversationChangeNotification（1300），
+	// 由 client 层 WS dispatch 统一 Publish(EventConversationUpdate) 并触发会话增量同步，
+	// SDK 侧无需再本地发布。
+	// if m.bus != nil {
+	// 	m.bus.Publish(events.EventConversationCreated, events.Event{
+	// 		Type:      events.EventConversationCreated,
+	// 		Timestamp: timex.UnixMilli(),
+	// 	})
+	// }
 	return nil
 }
 

@@ -896,7 +896,7 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 	detail := extractNotificationDetail(msgData.Content)
 	data := convert.ToBytes(msgData.Content)
 
-	publish := func(et events.EventType, payload interface{}) {
+	publish := func(et events.EventType, payload proto.Message) {
 		c.bus.Publish(et, events.Event{
 			Type:       et,
 			Payload:    payload,
@@ -904,7 +904,7 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 			Timestamp:  timestamp,
 		})
 	}
-	decodeTip := func(et events.EventType, tip interface{}) {
+	decodeTip := func(et events.EventType, tip proto.Message) {
 		if err := json.Unmarshal([]byte(detail), tip); err != nil {
 			c.logger.Warnf("dispatchNotification: unmarshal tips failed, contentType=%d, error=%v",
 				msgData.ContentType, err.Error())
@@ -969,71 +969,70 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 	case pbconstant.FriendApplicationRejectedNotification: // 1202 好友申请已拒绝
 		decodeTip(events.EventFriendApplicationRejected, &pbsdk.FriendApplicationTips{})
 	case pbconstant.FriendAddedNotification: // 1204
-		publish(events.EventFriendAdded, detail)
+		decodeTip(events.EventFriendAdded, &pbsdk.FriendAddedTips{})
 		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.FriendDeletedNotification: // 1205
-		publish(events.EventFriendDeleted, detail)
-		c.triggerEntitySync(sdkSync.KindFriend)
+		decodeTip(events.EventFriendDeleted, &pbsdk.FriendDeletedTips{})
 	case pbconstant.FriendRemarkSetNotification,
 		pbconstant.FriendInfoUpdatedNotification,
 		pbconstant.FriendsInfoUpdateNotification: // 1206 / 1209 / 1210
-		publish(events.EventFriendInfoChanged, detail)
+		decodeTip(events.EventFriendInfoChanged, &pbsdk.FriendInfoChangedTips{})
 		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.BlackAddedNotification: // 1207
-		publish(events.EventBlackAdded, detail)
+		decodeTip(events.EventBlackAdded, &pbsdk.BlackAddedTips{})
 		c.triggerEntitySync(sdkSync.KindBlack)
 	case pbconstant.BlackDeletedNotification: // 1208
-		publish(events.EventBlackDeleted, detail)
+		decodeTip(events.EventBlackDeleted, &pbsdk.BlackDeletedTips{})
 		c.triggerEntitySync(sdkSync.KindBlack)
 
 	// —— 会话 ——
 	case pbconstant.ConversationChangeNotification: // 1300
-		publish(events.EventConversationUpdate, detail)
+		decodeTip(events.EventConversationUpdate, &pbsdk.ConversationUpdateTips{})
 		c.triggerEntitySync(sdkSync.KindConversation)
 
 	// —— 群组 ——
 	case pbconstant.GroupCreatedNotification: // 1501
-		decodeTip(events.EventGroupCreated, &events.GroupCreatedTips{})
+		decodeTip(events.EventGroupCreated, &pbsdk.GroupCreatedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupInfoSetNotification: // 1502
-		decodeTip(events.EventGroupInfoSet, &events.GroupInfoSetTips{})
+		decodeTip(events.EventGroupInfoSet, &pbsdk.GroupInfoSetTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.JoinGroupApplicationNotification: // 1503
-		publish(events.EventJoinGroupApplication, detail)
+		decodeTip(events.EventJoinGroupApplication, &pbsdk.JoinGroupApplicationTips{})
 	case pbconstant.GroupApplicationAcceptedNotification: // 1505
-		publish(events.EventGroupApplicationAccepted, detail)
+		decodeTip(events.EventGroupApplicationAccepted, &pbsdk.GroupApplicationAcceptedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupApplicationRejectedNotification: // 1506
-		publish(events.EventGroupApplicationRejected, detail)
+		decodeTip(events.EventGroupApplicationRejected, &pbsdk.GroupApplicationRejectedTips{})
 	case pbconstant.GroupOwnerTransferredNotification: // 1507
-		publish(events.EventGroupOwnerTransferred, detail)
+		decodeTip(events.EventGroupOwnerTransferred, &pbsdk.GroupOwnerTransferredTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberKickedNotification: // 1508
-		publish(events.EventMemberKicked, detail)
+		decodeTip(events.EventMemberKicked, &pbsdk.MemberKickedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberInvitedNotification: // 1509
-		publish(events.EventMemberInvited, detail)
+		decodeTip(events.EventMemberInvited, &pbsdk.MemberInvitedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberEnterNotification: // 1510
-		publish(events.EventMemberEnter, detail)
+		decodeTip(events.EventMemberEnter, &pbsdk.MemberEnterTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.MemberQuitNotification: // 1504
-		publish(events.EventMemberQuit, detail)
+		decodeTip(events.EventMemberQuit, &pbsdk.MemberQuitTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupDismissedNotification: // 1511
-		publish(events.EventGroupDismissed, detail)
+		decodeTip(events.EventGroupDismissed, &pbsdk.GroupDismissedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupMemberMutedNotification: // 1512
-		publish(events.EventGroupMemberMuted, detail)
+		decodeTip(events.EventGroupMemberMuted, &pbsdk.GroupMemberMutedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupMemberCancelMutedNotification: // 1513
-		publish(events.EventGroupMemberCancelMuted, detail)
+		decodeTip(events.EventGroupMemberCancelMuted, &pbsdk.GroupMemberCancelMutedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupMutedNotification: // 1514
-		publish(events.EventGroupMuted, detail)
+		decodeTip(events.EventGroupMuted, &pbsdk.GroupMutedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 	case pbconstant.GroupCancelMutedNotification: // 1515
-		publish(events.EventGroupCancelMuted, detail)
+		decodeTip(events.EventGroupCancelMuted, &pbsdk.GroupCancelMutedTips{})
 		c.triggerEntitySync(sdkSync.KindGroup)
 
 	default:

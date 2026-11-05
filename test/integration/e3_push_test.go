@@ -332,7 +332,7 @@ func TestE3_UserInfoAndStatusNotification(t *testing.T) {
 	// E3.7 A 更新资料 → B 收 EventUserInfoUpdated
 	nick := fmt.Sprintf("it-nick-%d", time.Now().UnixNano())
 	require.NoError(t, ca.User().UpdateUserInfo(ctx, &model.UserInfo{UserID: u1, Nickname: nick}), "update user info")
-	ev := ecb.wait(t, events.EventUserInfoUpdated, eventTimeout)
+	ev := eca.wait(t, events.EventUserInfoUpdated, eventTimeout)
 	// 服务端 UserInfoUpdatedTips 只携带 userID（昵称/头像需另行拉取用户资料）
 	var infoTip struct {
 		UserID string `json:"userID"`

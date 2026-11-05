@@ -555,6 +555,7 @@ EventSeqSynced            // 全量同步完成
 - 14 个 /user HTTP 接口，纯 CRUD
 - SubscribeUsersStatus / GetUsersOnlineStatus 需配合 WS（WSSubUserOnlineStatus / WSSetBackgroundStatus）
 - WS 推送 UserStatusChange → eventbus.Publish(EventUserStatusChange)
+- UpdateUserInfo 成功 **不在本地发布 EventUserInfoUpdated**：服务端会推 UserInfoUpdatedNotification（1303），由 client 层 WS dispatch 统一发布
 
 **步骤 3.3 — manager/msg.go 实现 + sync.go**
 - 最复杂的 Manager，核心是 SeqSyncEngine
@@ -562,28 +563,25 @@ EventSeqSynced            // 全量同步完成
 - PullMsgBySeq / NewestSeq → WS (WSPullMsg / WSGetNewestSeq)
 - **PushHandler(2001) 注册**：proto.Unmarshal → 映射 EventType → eventbus.Publish
   - 映射表在 DefaultClient 构造时定义，Manager 实现只负责解析和转事件
-- SendMsg 成功 → eventbus.Publish(EventMsgSent)
-- RevokeMsg 成功 → eventbus.Publish(EventMsgRevoked)（WS 也会推 EventRevokeMsg，两处都发）
+- SendMsg 成功 → eventbus.Publish(EventMsgSent)（本地操作结果，服务端不推）
+- RevokeMsg 成功 **不在本地发布 EventMsgRevoked**：服务端会推撤回通知（WS EventRevokeMsg），由 dispatch 统一发布
 - SeqSyncEngine → OnReconnected 触发 FullSync → 完成后 eventbus.Publish(EventSeqSynced)
 - SeqSyncEngine 需要本地 Storage 配合（Phase 4 实现，Phase 3 先留接口）
 
 **步骤 3.4 — manager/relation.go 实现**
 - 15 个 /relation HTTP 接口
 - GetIncrementalFriends / GetIncrementalBlacks 需本地 versionID 配合
-- AddFriendResponse 成功 → eventbus.Publish(EventFriendAdded)
-- DeleteFriend 成功 → eventbus.Publish(EventFriendDeleted)
+- AddFriendResponse / DeleteFriend 成功 **不在本地发布 EventFriendAdded / EventFriendDeleted**：服务端会推好友通知（1204 等），由 client 层 WS dispatch 统一发布
 
 **步骤 3.5 — manager/group.go 实现**
 - 22 个 /group HTTP 接口
 - GetIncrementalJoinGroups / GetIncrementalGroupMembers 需本地 versionID 配合
-- CreateGroup 成功 → eventbus.Publish(EventGroupCreated)
-- KickGroup 成功 → eventbus.Publish(EventGroupMemberKicked)
+- CreateGroup / SetGroupInfo / InviteUserToGroup / KickGroup 等成功 **不在本地发布群事件**：服务端会推对应群通知（1501/1502/1505/1506 等），由 client 层 WS dispatch 统一发布 EventGroupCreated / EventGroupInfoSet / EventMemberInvited / EventMemberKicked
 
 **步骤 3.6 — manager/conversation.go 实现**
 - 9 个 /conversation HTTP 接口
 - GetIncrementalConversations 需本地 versionID 配合
-- SetConversations 成功 → eventbus.Publish(EventConversationCreated)
-- DeleteConversations 成功 → eventbus.Publish(EventConversationDeleted)
+- SetConversations / DeleteConversations 成功 **不在本地发布会话事件**：服务端会推 ConversationChangeNotification（1300），由 client 层 WS dispatch 发布 EventConversationUpdate 并触发会话增量同步
 
 ---
 

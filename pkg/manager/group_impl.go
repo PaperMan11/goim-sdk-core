@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
-	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
 // DefaultGroupMgr GroupMgr 默认实现（纯 HTTP）
@@ -39,13 +37,13 @@ func (m *DefaultGroupMgr) CreateGroup(ctx context.Context, groupInfo *model.Grou
 	if err := m.http.Post(ctx, "/group/create_group", req, &resp); err != nil {
 		return nil, fmt.Errorf("create group: %w", err)
 	}
-	if m.bus != nil {
-		m.bus.Publish(events.EventGroupCreated, events.Event{
-			Type:      events.EventGroupCreated,
-			Timestamp: timex.UnixMilli(),
-			Payload:   &events.GroupCreatedTips{Group: resp.GroupInfo, OperationTime: timex.UnixMilli()},
-		})
-	}
+	// if m.bus != nil {
+	// 	m.bus.Publish(events.EventGroupCreated, events.Event{
+	// 		Type:      events.EventGroupCreated,
+	// 		Timestamp: timex.UnixMilli(),
+	// 		Payload:   &events.GroupCreatedTips{Group: resp.GroupInfo, OperationTime: timex.UnixMilli()},
+	// 	})
+	// }
 	return resp.GroupInfo, nil
 }
 
@@ -57,13 +55,13 @@ func (m *DefaultGroupMgr) SetGroupInfo(ctx context.Context, groupInfo *model.Gro
 	if err := m.http.Post(ctx, "/group/set_group_info", req, nil); err != nil {
 		return fmt.Errorf("set group info: %w", err)
 	}
-	if m.bus != nil {
-		m.bus.Publish(events.EventGroupInfoSet, events.Event{
-			Type:      events.EventGroupInfoSet,
-			Timestamp: timex.UnixMilli(),
-			Payload:   groupInfo,
-		})
-	}
+	// if m.bus != nil {
+	// 	m.bus.Publish(events.EventGroupInfoSet, events.Event{
+	// 		Type:      events.EventGroupInfoSet,
+	// 		Timestamp: timex.UnixMilli(),
+	// 		Payload:   groupInfo,
+	// 	})
+	// }
 	return nil
 }
 
@@ -198,12 +196,12 @@ func (m *DefaultGroupMgr) InviteUserToGroup(ctx context.Context, groupID, reason
 	if err := m.http.Post(ctx, "/group/invite_user_to_group", req, nil); err != nil {
 		return fmt.Errorf("invite user to group: %w", err)
 	}
-	if m.bus != nil {
-		m.bus.Publish(events.EventGroupMemberInvited, events.Event{
-			Type:      events.EventGroupMemberInvited,
-			Timestamp: timex.UnixMilli(),
-		})
-	}
+	// if m.bus != nil {
+	// 	m.bus.Publish(events.EventGroupMemberInvited, events.Event{
+	// 		Type:      events.EventGroupMemberInvited,
+	// 		Timestamp: timex.UnixMilli(),
+	// 	})
+	// }
 	return nil
 }
 
