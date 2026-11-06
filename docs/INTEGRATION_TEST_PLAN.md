@@ -3,7 +3,7 @@
 > 目标：在跨语言封装（Phase 5）之前，验证 SDK 与 goim 服务端真实链路的端到端正确性。
 > 服务端仓库：`goim`（im-api / im-msggateway / im-msgtransfer / im-push / im-rpc / im-cron）
 
-**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ✅ E1 全部通过（2026-11-03，R2 闭环）→ ✅ E2 全部通过（2026-11-03，R12 完全闭环）→ ✅ E3 全部通过（2026-11-04）→ ✅ E4 全部通过（2026-11-06，R14/R15 服务端修复后回归）→ ✅ E5 全部通过（2026-11-06：E5.1-E5.7 全绿，修复 2 项 SDK 缺陷——主动断开不发 EventDisconnect、HTTP 5xx 不重试）；E6-E7 待执行。风险 R1/R2/R7-R15 已闭环，详见 §4。
+**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ✅ E1 全部通过（2026-11-03，R2 闭环）→ ✅ E2 全部通过（2026-11-03，R12 完全闭环）→ ✅ E3 全部通过（2026-11-04）→ ✅ E4 全部通过（2026-11-06，R14/R15 服务端修复后回归）→ ✅ E5 全部通过（2026-11-06，修复主动断开不发 EventDisconnect、HTTP 5xx 不重试）→ ✅ E6 全部通过（2026-11-06，SQLite 重启恢复 / owner 隔离 / clearData / 内存存储）；E7 可选。风险 R1/R2/R7-R15 已闭环，详见 §4。
 
 ---
 
@@ -204,6 +204,9 @@ go test ./test/integration/... -v -count=1
 | E6.3 | clearData 全量重同步 | `Logout(true)` → 重登 | 等 `EventSyncFinish` 后断言：本地清空后走 full 同步，数据最终一致 |
 | E6.4 | 内存存储模式 | `ClientConfig` 不配 Storage/SessionDataPath | 功能可用，重启数据丢失（行为符合文档） |
 
+> 📝 **E6 执行状态（✅ 2026-11-06 全部通过）**：4 个测试函数 —— `TestE6_SQLiteRestartRecovery`（E6.1 ✅ 游标保留走增量、消息 seq 连续）、`TestE6_MultiAccountOwnerIsolation`（E6.2 ✅ 同一 DB 两账号 owner 隔离，u2 看不到 u1 数据）、`TestE6_ClearDataFullResync`（E6.3 ✅ Logout(true) 清 owner 数据后重登 full 回退，数据最终一致）、`TestE6_MemoryStorageMode`（E6.4 ✅ 不配 Storage/SessionDataPath 走默认内存，功能可用、重启数据丢失）。
+> 实现说明：① E6.1 通过 SessionDataPath + 临时 SQLite 文件跨 Client 生命周期复用，Close() 释放句柄后重开同路径安全（临时 SQLite 文件在 TempDir，整个 Test 结束前 GC）；② E6.2 预先打开一个 SQLiteStorage 句柄注入给两个 Client（避免两次 Open 同文件的文件锁冲突），Logut(false) 保留 owner 数据让后续账号共存；③ Storage 三级优先级（Storage 注入 > SessionDataPath SQLite > 默认内存）经 E6.1/E6.4 两条路径分别验证。
+
 ### E7 稳定性（可选，对接通过后执行）
 
 | # | 用例 | 说明 |
@@ -276,7 +279,7 @@ go test ./test/integration/... -v -count=1
 ② E0 冒烟（含 R1/R7 修复回归）                          ✅ 已完成（2026-10-28）
 ③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ✅ 已完成（2026-11-06 E4 全绿，R14/R15 服务端修复回归闭环）
 ④ E5 异常场景（需要操作服务端组件）                     ✅ 已完成（2026-11-06，本地 TCP 代理构造异常，无需服务端操作；修复 2 项 SDK 缺陷）
-⑤ E6 存储（依赖 E2/E4 数据）
-⑥ E7 稳定性（可选）
-⑦ 缺陷回归 + 对接结论备忘整理
+⑤ E6 存储（依赖 E2/E4 数据）                             ✅ 已完成（2026-11-06 4/4 全绿）
+⑥ E7 稳定性（可选）                                       可选
+⑦ 缺陷回归 + 对接结论备忘整理                              待执行
 ```
