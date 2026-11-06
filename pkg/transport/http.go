@@ -239,13 +239,20 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 		}
 
 		// 非 200 一律视为失败（如路由 404）：其响应体不含业务信封，
-		// 若继续按 {code,msg,data} 解析会得到 code=0 + 空 data 的"假成功"
+		// 若继续按 {code,msg,data} 解析会得到 code=0 + 空 data 的"假成功"。
+		// 5xx 属服务端瞬时故障（重启/过载/网关 502），按可重试处理走指数退避；
+		// 4xx（如 404 路由不存在）重试无意义，立即失败
 		if httpResp.StatusCode != http.StatusOK {
-			return model.NewSDKError(model.ErrCodeInternalError,
+			sdkErr := model.NewSDKError(model.ErrCodeInternalError,
 				fmt.Sprintf("http status %d, url=%s, body=%s", httpResp.StatusCode, fullURL, truncateBody(data)))
+			if httpResp.StatusCode >= http.StatusInternalServerError {
+				lastErr = sdkErr
+				continue
+			}
+			return sdkErr
 		}
 
-		// HTTP 层非 2xx 也解析统一响应
+		// HTTP 层 2xx：解析统一响应信封
 		var parsed postResp
 		if err := json.Unmarshal(data, &parsed); err != nil {
 			return fmt.Errorf("parse response: %w", err)
@@ -267,9 +274,9 @@ func (c *DefaultHTTPClient) doPost(ctx context.Context, path string, body, resp 
 	}
 
 	if lastErr != nil {
-		return fmt.Errorf("http request failed after retries: %w", lastErr)
+		return fmt.Errorf("http request failed after %d attempts (operationID=%s): %w", maxRetry, operationID, lastErr)
 	}
-	return fmt.Errorf("http request failed after retries")
+	return fmt.Errorf("http request failed after %d attempts (operationID=%s)", maxRetry, operationID)
 }
 
 func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Values, resp interface{}) error {
@@ -323,10 +330,16 @@ func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Va
 				operationID, httpResp.StatusCode, data)
 		}
 
-		// 非 200 一律视为失败（如路由 404），避免空 data "假成功"（与 doPost 一致）
+		// 非 200 一律视为失败（如路由 404），避免空 data "假成功"（与 doPost 一致）：
+		// 5xx 可重试（服务端瞬时故障），4xx 立即失败
 		if httpResp.StatusCode != http.StatusOK {
-			return model.NewSDKError(model.ErrCodeInternalError,
+			sdkErr := model.NewSDKError(model.ErrCodeInternalError,
 				fmt.Sprintf("http status %d, url=%s, body=%s", httpResp.StatusCode, fullURL, truncateBody(data)))
+			if httpResp.StatusCode >= http.StatusInternalServerError {
+				lastErr = sdkErr
+				continue
+			}
+			return sdkErr
 		}
 
 		var parsed postResp
@@ -344,9 +357,9 @@ func (c *DefaultHTTPClient) doGet(ctx context.Context, path string, query url.Va
 		return model.NewSDKError(parsed.Code, parsed.Msg)
 	}
 	if lastErr != nil {
-		return fmt.Errorf("http request failed after retries: %w", lastErr)
+		return fmt.Errorf("http request failed after %d attempts (operationID=%s): %w", maxRetry, operationID, lastErr)
 	}
-	return fmt.Errorf("http request failed after retries")
+	return fmt.Errorf("http request failed after %d attempts (operationID=%s)", maxRetry, operationID)
 }
 
 // truncateBody 错误信息里附带的响应体片段（防超长刷屏）

@@ -3,7 +3,7 @@
 > 目标：在跨语言封装（Phase 5）之前，验证 SDK 与 goim 服务端真实链路的端到端正确性。
 > 服务端仓库：`goim`（im-api / im-msggateway / im-msgtransfer / im-push / im-rpc / im-cron）
 
-**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ✅ E1 全部通过（2026-11-03，R2 闭环）→ ✅ E2 全部通过（2026-11-03，R12 完全闭环）→ ✅ E3 全部通过（2026-11-04）→ ✅ E4 全部通过（2026-11-06：E4.1-E4.7 全绿，R14/R15 服务端修复后回归通过）；E5-E6 待编写。风险 R1/R2/R7-R15 已闭环，详见 §4。
+**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ✅ E1 全部通过（2026-11-03，R2 闭环）→ ✅ E2 全部通过（2026-11-03，R12 完全闭环）→ ✅ E3 全部通过（2026-11-04）→ ✅ E4 全部通过（2026-11-06，R14/R15 服务端修复后回归）→ ✅ E5 全部通过（2026-11-06：E5.1-E5.7 全绿，修复 2 项 SDK 缺陷——主动断开不发 EventDisconnect、HTTP 5xx 不重试）；E6-E7 待执行。风险 R1/R2/R7-R15 已闭环，详见 §4。
 
 ---
 
@@ -191,6 +191,10 @@ go test ./test/integration/... -v -count=1
 | E5.6 | 重连期间请求 | 重连窗口内调 `SendMsg` | 返回 notConnected 类明确错误，不挂死（SendRequestAndWait 被唤醒） |
 | E5.7 | 服务端 5xx | im-api 瞬时不可用（可停 api 组件数秒） | HTTP 层重试 3 次（指数退避），最终错误信息含 operationID |
 
+> 📝 **E5 执行状态（✅ 2026-11-06 全部通过）**：7 个测试函数 —— `TestE5_ServerKillAutoReconnectResync`（E5.1 ✅）、`TestE5_OfflineWindowBackfill`（E5.2 ✅）、`TestE5_MultiDeviceKick`（E5.3 ✅）、`TestE5_HeartbeatKeepAlive`（E5.4 ✅ 3min 静置）、`TestE5_NetworkBreakRecovery`（E5.5 ✅ 30s 断网）、`TestE5_SendDuringReconnectWindow`（E5.6 ✅）、`TestE5_HTTPRetryOn5xx`（E5.7 ✅）。
+> 实现说明：① 断连/断网模拟用**本地 TCP 代理**（`wsProxy`：Endpoint 指向代理，`killCurrent` 掐断现连=服务端 kill，`setStall` 黑洞新拨号=断网窗口），无需操作服务端组件即可确定性构造异常，代理对 WS 帧与心跳完全透明；② E5.7 用本地 httptest 存根验证 5xx 重试（含「4xx 不重试」R11 回归哨兵），连接拒绝路径（BaseURL 指向不可达端口）等价 im-api 宕机；③ E5.3 适配部署策略（见 R17）：allow_multi + 每平台 3 连接上限，同平台第 4 连接触发服务端踢最旧连接。
+> 首跑暴露并修复 **2 项 SDK 缺陷**：⑴ **主动断开不发 OnDisconnected**（`transport/ws.go` Disconnect 先置 Disconnected，`actorsExited` 误判为主动路径跳过事件派发）——被踢/Logout 路径订阅方观察不到 `EventDisconnect`，已修：从 Connected 主动断开时补派发（置位前取样防双重派发）；⑵ **HTTP 层 5xx 不重试**（仅网络层错误重试）——服务端瞬时故障（重启/过载/网关 502）直接失败，已修：5xx 纳入重试（指数退避 3 次），4xx 保持立即失败，最终错误统一携带 `operationID`（E5.7 原预期「错误信息含 operationID」此前并不成立）。
+
 ### E6 存储与多账号
 
 | # | 用例 | 步骤 | 预期 |
@@ -230,6 +234,7 @@ go test ./test/integration/... -v -count=1
 | R14 | **服务端 `RemoveBlack` 存在性检查参数写反（E4.2 首跑暴露）**：`relation_logic.go` 用 `IsBlack(blackUserID, ownerUserID)`（查「对方是否拉黑我」）判断本人黑名单记录是否存在 → 拉黑后永远无法移除（BlackNotFound）。AddBlack 处的同形调用是「是否被对方拉黑」语义（正确），RemoveBlack 系复制粘贴笔误 | E4.2 实测（add_black 成功且增量可见，remove_black 报 black record does not exist） | 中：黑名单移除功能不可用 | ✅ 已修复（goim 仓库，`IsBlack(ownerUserID, blackUserID)` + 错误日志参数序修正）；服务端已重新部署，E4.2 回归通过（2026-11-06）→ **完全闭环** |
 | R15 | **群成员/群实体变更不推进存量成员版本日志（E4.3/E4.4 首跑暴露）**：邀请/踢人/退群只推进受影响者的 `JoinGroupDID`（insert/delete），转让连 JoinGroupDID 都不推——存量成员的 joinGroups 增量永远无变化（头部探测走 full=true + IDHash 相等空转），其本地缓存的群信息（owner/memberCount）与成员列表**双双永久过期**。根因：协议不变量「实体集变化必推进 owner 的 DID 日志」在存量成员维度被遗漏 | E4.3 实测（转让后三端缓存 owner 不更新）、E4.4 实测（邀请后存量成员成员列表无 u3）；被邀请者/被踢者的 insert/delete 路径正常 | 高：群侧增量同步对存量成员形同虚设，成员列表越用越旧 | ✅ 已修复（goim 仓库：邀请/踢人/退群/转让四处补 `IncrVersionLogBatchDIDs(存量成员, groupID, Update)`；SDK 侧链路（joinGroups update → UpsertGroups + SyncGroupMembers 增量）已验证就绪）；服务端已重新部署，E4.3/E4.4 回归通过（2026-11-06）→ **完全闭环** |
 | R16 | **用户态会话设置无 HTTP 可达路径（E4.5 首跑暴露）**：`set_conversations`（批量）requireAdmin；用户态单会话 `set_conversation` RPC 已实现（requireSelfOrAdmin + 1300 通知）但 im-api 未注册路由 → SDK/终端用户的置顶、免打扰等操作无可达接口 | E4.5 实测（普通用户调 set_conversations 返回 insufficient permission） | 中：会话设置功能终端不可用 | 现状：E4.5 以 admin 身份调 `set_conversations` 验证 SDK 侧 1300→增量同步链路（被测面不变）。建议：im-api 补 `/conversation/set_conversation` 路由，SDK `ConvMgr` 同步补 `SetConversation` 封装后切换用例 |
+| R17 | **服务端登录策略为 allow_multi（E5.3 首跑暴露）**：部署配置 `LoginStrategy: allow_multi`（每用户 10 连接、每平台 3 连接）→ **跨平台登录不互踢**（多端共存），与计划 E5.3 预设的「同账号跨平台登录踢旧端」语义不符；互踢语义仅 `single`/`replace`/`replace_same_platform` 策略下存在 | E5.3 首跑实测（platform 2 登录后 platform 1 旧端 10s 内无任何踢下线事件；conn_manager.go checkAllowMultiLoginAsync 仅在超限时踢最旧） | 低：属产品策略选择而非缺陷；SDK 侧被踢路径（2002 → ForceLogout + Disconnect + SyncState→None + 不自动重连）已验证完备 | 现状：E5.3 适配为「同平台连接超限（第 4 连接）触发踢最旧连接」，SDK 被测路径不变。若产品要求单端互踢，改 auth.yaml `LoginStrategy: replace` 并重启 auth + msggateway 后，用例可切回跨平台互踢形式 |
 
 ---
 
@@ -270,7 +275,7 @@ go test ./test/integration/... -v -count=1
 ① 环境搭建 + 测试基建（test/integration 骨架 + helper）  ✅ 已完成
 ② E0 冒烟（含 R1/R7 修复回归）                          ✅ 已完成（2026-10-28）
 ③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ✅ 已完成（2026-11-06 E4 全绿，R14/R15 服务端修复回归闭环）
-④ E5 异常场景（需要操作服务端组件）
+④ E5 异常场景（需要操作服务端组件）                     ✅ 已完成（2026-11-06，本地 TCP 代理构造异常，无需服务端操作；修复 2 项 SDK 缺陷）
 ⑤ E6 存储（依赖 E2/E4 数据）
 ⑥ E7 稳定性（可选）
 ⑦ 缺陷回归 + 对接结论备忘整理

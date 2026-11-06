@@ -141,12 +141,23 @@ func (w *DefaultWSClient) Disconnect() error {
 	if w.Status() == TransportStatusDisconnected && !w.isReconnecting() {
 		return nil
 	}
+	// 从已连接状态主动断开：同样派发 OnDisconnected（被踢/登出路径的可观察面
+	// 与被动断开一致）。注意需在置位前取样——actorsExited 靠 Disconnected 状态
+	// 区分主/被动，避免这里与被动路径双重派发
+	w.mu.RLock()
+	wasConnected := w.status == TransportStatusConnected
+	w.mu.RUnlock()
+
 	// 先标记断开状态 → actorsExited 会看到 Disconnected 状态，跳过重连
 	w.setState(TransportStatusDisconnected)
 	// 取消可能正在进行中的重连循环
 	w.stopReconnect()
 	// stopActors 内部会通过 onActorExit 关闭连接，解除 readLoop 的阻塞读
 	w.stopActors()
+
+	if wasConnected && w.OnDisconnected != nil {
+		w.OnDisconnected()
+	}
 
 	w.logger.Infof("websocket disconnected")
 	return nil
