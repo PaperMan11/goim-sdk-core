@@ -3,7 +3,7 @@
 > 目标：在跨语言封装（Phase 5）之前，验证 SDK 与 goim 服务端真实链路的端到端正确性。
 > 服务端仓库：`goim`（im-api / im-msggateway / im-msgtransfer / im-push / im-rpc / im-cron）
 
-**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ✅ E1 全部通过（2026-11-03：E1.1-E1.4 通过、E1.5/E1.6 回归通过，R2 闭环）→ ✅ E2 全部通过（2026-11-03：E2.1-E2.8 全绿；E2.7 严格版——write-through 回归哨兵——通过，R12 完全闭环）→ E3 已编写待执行；E4-E6 待编写。风险 R1/R2/R7/R8/R9/R10/R11/R12 已闭环，详见 §4。
+**当前进度**：✅ E0 冒烟通过（2026-10-28）→ ✅ E1 全部通过（2026-11-03，R2 闭环）→ ✅ E2 全部通过（2026-11-03，R12 完全闭环）→ ✅ E3 全部通过（2026-11-04）→ ✅ E4 全部通过（2026-11-06：E4.1-E4.7 全绿，R14/R15 服务端修复后回归通过）；E5-E6 待编写。风险 R1/R2/R7-R15 已闭环，详见 §4。
 
 ---
 
@@ -158,7 +158,8 @@ go test ./test/integration/... -v -count=1
 | E3.9 | 未映射 contentType | 人为构造未知通知（或记录服务端既有类型） | SDK warn 日志 `unmapped contentType`，不 panic |
 | E3.10 | 实体类通知触发增量同步 | A 加好友 / 建群（产生 1201-1210/1501-1515 通知） | B **不重连**，约 500ms 去抖后 B 的 SQLite friend/group 缓存自动更新（通知 Detail 仅含 ID 列表，SDK 须自行拉取增量补全实体）；与登录同步互斥不冲突 |
 
-> 📝 **E3 首跑实测（2026-11-03）**：E3.1 通过；E3.2 暴露并修复 **SDK 缺陷**——服务端把通知消息归属到 `n_<userA>_<userB>` 通知会话（通知本身也会经 persistPushMsg 落库为 n_ 会话消息），而 SDK 的 2101/2102/2200 缓存应用误用了信封归属 `mm.ConversationID`，导致撤回/删除/已读未作用到 `si_` 原会话（事件照常发布、tips 内的 conversationID 正确）。已修复：优先用 tips 携带的 `conversationID`（`notificationConvID`，缺失回退信封）。通知会话隔离的去留已记录为 R13（决策：暂不改服务端，接受 best-effort）。E3.1-E3.4 待重跑，E3.5-E3.10 待执行。
+> 📝 **E3 首跑实测（2026-11-03）**：E3.1 通过；E3.2 暴露并修复 **SDK 缺陷**——服务端把通知消息归属到 `n_<userA>_<userB>` 通知会话（通知本身也会经 persistPushMsg 落库为 n_ 会话消息），而 SDK 的 2101/2102/2200 缓存应用误用了信封归属 `mm.ConversationID`，导致撤回/删除/已读未作用到 `si_` 原会话（事件照常发布、tips 内的 conversationID 正确）。已修复：优先用 tips 携带的 `conversationID`（`notificationConvID`，缺失回退信封）。通知会话隔离的去留已记录为 R13（决策：暂不改服务端，接受 best-effort）。
+> ✅ **E3 全部通过（2026-11-04，commit 2342ffe）**：5 个测试函数覆盖 E3.1-E3.10 —— `TestE3_MsgOpsNotificationAndCache`（E3.1-E3.4）、`TestE3_FriendNotifications`（E3.5）、`TestE3_GroupAndUserNotifications`（E3.6/E3.7/E3.9）、`TestE3_OnlineStatusAndUnknownType`（E3.8/E3.9）、`TestE3_NotificationTriggersEntitySync`（E3.10）。配套修复：`dispatchNotification` 全部 decodeTip 到 pbsdk.*Tips 类型化 payload；model/events 对齐服务端 protobuf。
 
 ### E4 五类实体增量同步（EntitySync）
 
@@ -174,6 +175,9 @@ go test ./test/integration/... -v -count=1
 | E4.5 | 会话 | 收发消息 / 置顶 / 已读 | conversations 增量 + 排序正确（`GetSortedConversationList` 比对） |
 | E4.6 | full=true 全量回退 | `Logout(true)` 清游标 → 重登 | 触发 full 拉取 + IDHash 校验分支，数据最终一致 |
 | E4.7 | 游标推进 | 任意增量后查 Storage | `GetVersion` 返回的 versionID/version 与服务端响应一致且单调递增 |
+
+> 📝 **E4 执行状态（2026-11-05 首跑 4/7 → ✅ 2026-11-06 全部通过）**：7 个测试函数 —— `TestE4_FriendIncrementalSync`（E4.1 ✅）、`TestE4_BlackIncrementalSync`（E4.2 ✅）、`TestE4_GroupIncrementalSync`（E4.3 ✅）、`TestE4_GroupMemberIncrementalSync`（E4.4 ✅）、`TestE4_ConversationIncrementalSync`（E4.5 ✅）、`TestE4_FullResyncAfterClearData`（E4.6 ✅）、`TestE4_CursorMonotonicAndServerConsistent`（E4.7 ✅）。首跑暴露服务端缺陷 R14/R15，服务端修复部署后（2026-11-06）E4.2/E4.3/E4.4 回归通过。
+> 实现说明：① 断言目标为本地 SQLite 缓存（`newTestClientWithStorage` 注入句柄直查）；② 通知触发的定向同步有 ~500ms 去抖（`triggerEntitySync`），事件到达 ≠ 缓存已更新，缓存断言统一 `require.Eventually` 收敛；③ 1205 FriendDeleted 不触发自动同步（`dispatchNotification` 未挂 trigger），好友删除断言走 `Logout(false)` 重登游标增量补齐（三步法第三步）；④ 服务端协议实测：**游标在头部（无新增变更日志）时增量接口返回 full=true + 全量快照**（`len(Logs)==0 → fullResp`，SDK 走 IDHash 校验相等则空转），E4.7 的「与服务端一致」断言按此校准；⑤ E4.5 置顶经 **admin 身份** `set_conversations`（服务端该接口 requireAdmin；用户态 `set_conversation` RPC 已实现但未暴露 im-api 路由，见 R16）；⑥ 每次运行独立账号 + 独立群，互不干扰。
 
 ### E5 异常与重连
 
@@ -223,6 +227,9 @@ go test ./test/integration/... -v -count=1
 | R11 | **404 假成功（已修复，保留防护）**：SDK 曾对非 200 响应仍按 `{code,msg,data}` 解析 → `code=0` 零值 + 空 data → **"假成功"**（如 get_user_token 404 后返回空 token 仍存入 TokenStore，表现为"登录成功但 token 未保存"）。前缀约定：**`ClientConfig.BaseURL` 需包含 `/api/v1`**（如 `http://host:port/api/v1`），HTTPClient 直接在其上拼接业务路径，不做二次拼接 | E1 阶段用 httptest 复现（`TestAcquireUserTokenStoresToken`） | **P1**：token/任意接口静默空结果，排查困难 | ✅ 已修复：非 200 状态码直接返回 SDKError（含 URL + body 片段），杜绝假成功；token 存取链路有确定性单测守护 |
 | R12 | **发送链路异步持久化窗口（最终一致，E2.7 实测）**：1003 send ack 返回时消息可能尚未在服务端可查（transfer/rpc 管道异步落库），紧随其后的登录同步 gap 拉取拿不到刚发的消息；SDK 无法从 NewestSeq 感知滞后——服务端游标本身同样滞后，且无通知可订阅。发送方/对端立即查询、发送后立即重登均会踩中 | E2.7 实测（发完立即重登漏消息，等待后恢复） | 中：影响「发送后立即查询/同步」场景；跨语言封装后宿主应用更易踩中 | 测试侧 ✅：E2.7 已按方案 A 严格化（2026-11-03）——**1003 ack（SendMsg 返回）即提交信号**，B 重登 + EventSyncFinish 后首轮断言离线消息全部在库，缺即 Fatal（服务端若退回异步管道立刻红）；旧的事件驱动回显等待与 `waitOfflineSyncConverged` 收敛轮询退役（helper 保留供 E4/E6 离线场景复用）。SDK 侧 ✅：批内缺口补拉（`SeqSyncEngine.fillHole`，2026-11-03）——拉取批 seq 在 `[batchStart, last]` 内不连续（方案 A 仍保留的 D4 并发同步落库乱序毫秒级窗口）时游标停在缺口前落盘，缺口区间有界重试 3×200ms；补齐后推进游标，**耗尽仍缺视为永久缺失跳过并 Warnf**（对齐服务端「补拉连续 N 次为空视为已删」约定），补拉请求失败则游标留缺口前待下轮幂等重拉；`pkg/sync` 单测三场景守护：瞬时空洞补齐（`TestSeqSync_HoleRetryFill`）/ 永久空洞耗尽跳过（`TestSeqSync_HoleSkippedAfterRetries`）/ 补拉失败游标不越过（`TestSeqSync_HoleRetryError`），集成层不做确定性构造（需并发发送恰好撞上同步窗口）。服务端 ✅：write-through 已上线（2026-11-03，goim `docs/msg-send-sync-commit.md`）——seq 分配+落库+建会话+游标推进全部前移至 ack 前、推送后置，R12 主窗口消除；E2.7 严格版回归通过（2026-11-03）→ **完全闭环** |
 | R13 | **通知会话隔离的架构决策（E3 首跑实测）**：服务端把系统通知（ContentType>=1000）归属到 `n_<userA>_<userB>` 独立通知会话，与业务消息的 `si_` 会话隔离——通知有自己的 seq 序列，不占用/推进业务会话游标，聊天流天然不被通知污染，通知可整体独立清理。代价：**通知失去同步可靠性**——`n_` 会话不在 SeqSync 游标体系内，通知的唯一到达路径是实时推送，推送丢失（离线期间/断线瞬间）则撤回/已读/删除永远不会补齐（对比 OpenIM：通知归属原会话、占 seq 随 gap 拉取补齐，免费获得 SeqSync 可靠性） | E3.2 实测（撤回通知 persist 到 `n_` 会话，暴露 SDK 缓存应用打错会话）；若切换原会话归属，服务端仅需改 `SendNotification` 信封归属，SDK **零改动**（`notificationConvID` 双来源一致后等价） | 中：离线期间的撤回/已读/删除不可达；多端已读一致性受影响 | **决策（2026-11-04）：暂不改动服务端，接受通知 best-effort 语义**。SDK 侧：① ✅ 会话列表/同步入口已过滤 `n_` 前缀（`ConvMgr` 的 GetAllConversations/GetSortedConversationList（剔除+总数修正）/GetIncrementalConversations（Insert/Update 过滤，versionID 游标不受影响），显式点名查询不拦截；单测 `conversation_impl_test.go` 四例守护）；② E3.8 及多端场景验证离线通知丢失的实际影响面。若产品后续要求通知必达（撤回确定性/多端已读一致），重新评估切换原会话归属 |
+| R14 | **服务端 `RemoveBlack` 存在性检查参数写反（E4.2 首跑暴露）**：`relation_logic.go` 用 `IsBlack(blackUserID, ownerUserID)`（查「对方是否拉黑我」）判断本人黑名单记录是否存在 → 拉黑后永远无法移除（BlackNotFound）。AddBlack 处的同形调用是「是否被对方拉黑」语义（正确），RemoveBlack 系复制粘贴笔误 | E4.2 实测（add_black 成功且增量可见，remove_black 报 black record does not exist） | 中：黑名单移除功能不可用 | ✅ 已修复（goim 仓库，`IsBlack(ownerUserID, blackUserID)` + 错误日志参数序修正）；服务端已重新部署，E4.2 回归通过（2026-11-06）→ **完全闭环** |
+| R15 | **群成员/群实体变更不推进存量成员版本日志（E4.3/E4.4 首跑暴露）**：邀请/踢人/退群只推进受影响者的 `JoinGroupDID`（insert/delete），转让连 JoinGroupDID 都不推——存量成员的 joinGroups 增量永远无变化（头部探测走 full=true + IDHash 相等空转），其本地缓存的群信息（owner/memberCount）与成员列表**双双永久过期**。根因：协议不变量「实体集变化必推进 owner 的 DID 日志」在存量成员维度被遗漏 | E4.3 实测（转让后三端缓存 owner 不更新）、E4.4 实测（邀请后存量成员成员列表无 u3）；被邀请者/被踢者的 insert/delete 路径正常 | 高：群侧增量同步对存量成员形同虚设，成员列表越用越旧 | ✅ 已修复（goim 仓库：邀请/踢人/退群/转让四处补 `IncrVersionLogBatchDIDs(存量成员, groupID, Update)`；SDK 侧链路（joinGroups update → UpsertGroups + SyncGroupMembers 增量）已验证就绪）；服务端已重新部署，E4.3/E4.4 回归通过（2026-11-06）→ **完全闭环** |
+| R16 | **用户态会话设置无 HTTP 可达路径（E4.5 首跑暴露）**：`set_conversations`（批量）requireAdmin；用户态单会话 `set_conversation` RPC 已实现（requireSelfOrAdmin + 1300 通知）但 im-api 未注册路由 → SDK/终端用户的置顶、免打扰等操作无可达接口 | E4.5 实测（普通用户调 set_conversations 返回 insufficient permission） | 中：会话设置功能终端不可用 | 现状：E4.5 以 admin 身份调 `set_conversations` 验证 SDK 侧 1300→增量同步链路（被测面不变）。建议：im-api 补 `/conversation/set_conversation` 路由，SDK `ConvMgr` 同步补 `SetConversation` 封装后切换用例 |
 
 ---
 
@@ -262,7 +269,7 @@ go test ./test/integration/... -v -count=1
 ```
 ① 环境搭建 + 测试基建（test/integration 骨架 + helper）  ✅ 已完成
 ② E0 冒烟（含 R1/R7 修复回归）                          ✅ 已完成（2026-10-28）
-③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ⏳ 当前阶段（E1.5/E1.6 待回归；E2 用例已编写待执行）← 下一步
+③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ✅ 已完成（2026-11-06 E4 全绿，R14/R15 服务端修复回归闭环）
 ④ E5 异常场景（需要操作服务端组件）
 ⑤ E6 存储（依赖 E2/E4 数据）
 ⑥ E7 稳定性（可选）
