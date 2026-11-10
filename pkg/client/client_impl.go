@@ -46,6 +46,7 @@ type DefaultClient struct {
 	group *manager.DefaultGroupMgr
 	rel   *manager.DefaultRelMgr
 	conv  *manager.DefaultConvMgr
+	third *manager.DefaultThirdMgr
 
 	mu            sync.RWMutex
 	userID        string
@@ -170,6 +171,7 @@ func NewClient(cfg *ClientConfig) Client {
 	groupMgr := manager.NewGroupMgr(http, bus, l)
 	relMgr := manager.NewRelMgr(http, bus, l)
 	convMgr := manager.NewConvMgr(http, bus, l)
+	thirdMgr := manager.NewThirdMgr(http, l)
 
 	c = &DefaultClient{
 		cfg:       cfg,
@@ -186,6 +188,7 @@ func NewClient(cfg *ClientConfig) Client {
 		group:     groupMgr,
 		rel:       relMgr,
 		conv:      convMgr,
+		third:     thirdMgr,
 	}
 
 	// 3. 传输层生命周期钩子（通过 MessageTransport interface setter 注入）
@@ -630,6 +633,7 @@ func (c *DefaultClient) Msg() manager.MsgMgr     { return c.msg }
 func (c *DefaultClient) Group() manager.GroupMgr { return c.group }
 func (c *DefaultClient) Rel() manager.RelMgr     { return c.rel }
 func (c *DefaultClient) Conv() manager.ConvMgr   { return c.conv }
+func (c *DefaultClient) Third() manager.ThirdMgr { return c.third }
 
 // === 事件订阅 ===
 

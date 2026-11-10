@@ -86,6 +86,7 @@ type Client interface {
 	Group() manager.GroupMgr
 	Rel() manager.RelMgr
 	Conv() manager.ConvMgr
+	Third() manager.ThirdMgr // 第三方存储（RustFS/MinIO/AWS S3）签名类 HTTP API 薄封装
 
 	// —— 事件订阅（统一走 eventbus）——
 	// Subscribe 订阅指定 EventType，返回事件 channel 和取消函数
