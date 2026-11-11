@@ -39,6 +39,32 @@ func TestIsNotificationConversation(t *testing.T) {
 	require.False(t, IsNotificationConversation("sg_1"))
 }
 
+func TestSetConversationFillsOwnerAndPath(t *testing.T) {
+	var gotPath string
+	var gotBody struct {
+		Conversation *model.Conversation `json:"conversation"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "msg": "", "data": map[string]interface{}{}})
+	}))
+	t.Cleanup(srv.Close)
+	mgr := NewConvMgr(transport.NewHTTPClient(srv.URL+"/api/v1", transport.NewTokenStore(nil), &logger.NopLogger{}),
+		nil, &logger.NopLogger{})
+
+	conv := &model.Conversation{ConversationID: "si_a_b", ConversationType: model.SessionTypeC2C, UserID: "b", IsPinned: true}
+	require.NoError(t, mgr.SetConversation(context.Background(), "a", conv))
+	require.Equal(t, "/api/v1/conversation/set_conversation", gotPath)
+	require.NotNil(t, gotBody.Conversation)
+	require.Equal(t, "a", gotBody.Conversation.OwnerUserID)
+	require.Equal(t, "si_a_b", gotBody.Conversation.ConversationID)
+	require.True(t, gotBody.Conversation.IsPinned)
+	require.Empty(t, conv.OwnerUserID, "should not mutate caller conversation")
+
+	require.Error(t, mgr.SetConversation(context.Background(), "a", nil))
+}
+
 func TestGetAllConversationsFiltersNotificationConv(t *testing.T) {
 	mgr := newConvSrv(t, "/conversation/get_all_conversations", map[string]interface{}{
 		"conversations": []*model.Conversation{

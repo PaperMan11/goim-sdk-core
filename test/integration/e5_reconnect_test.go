@@ -146,10 +146,12 @@ func (p *wsProxy) closeAll() {
 }
 
 // wsUpstreamAddr 从 envWSURL 提取真实网关 host:port（丢弃 scheme 与 /ws 路径）
-func wsUpstreamAddr() string {
+func wsUpstreamAddr(t *testing.T) string {
+	t.Helper()
+	requireEnv(t)
 	u, err := url.Parse(envWSURL)
 	if err != nil || u.Host == "" {
-		panic("invalid envWSURL: " + envWSURL) // 测试基建常量，解析失败直接暴露
+		t.Fatalf("invalid envWSURL: %s", envWSURL)
 	}
 	return u.Host
 }
@@ -189,7 +191,7 @@ func newClientOn(t *testing.T, endpoint string, plat int32, tags ...string) (cli
 
 // TestE5_ServerKillAutoReconnectResync E5.1：连接被掐断 → 自动重连 → 后台 resync
 func TestE5_ServerKillAutoReconnectResync(t *testing.T) {
-	proxy := startWSProxy(t, wsUpstreamAddr())
+	proxy := startWSProxy(t, wsUpstreamAddr(t))
 	ca, eca, _ := newClientOn(t, proxy.endpoint(), platformID, "A")
 	u1, u2 := uniqueUser("e5a"), uniqueUser("e5b")
 	registerUsers(t, u1, u2)
@@ -207,7 +209,7 @@ func TestE5_ServerKillAutoReconnectResync(t *testing.T) {
 
 // TestE5_OfflineWindowBackfill E5.2：断连期间 B 发 5 条 → A 重连后 gap 补齐
 func TestE5_OfflineWindowBackfill(t *testing.T) {
-	proxy := startWSProxy(t, wsUpstreamAddr())
+	proxy := startWSProxy(t, wsUpstreamAddr(t))
 	ca, eca, storA := newClientOn(t, proxy.endpoint(), platformID, "A")
 	cb, ecb, _ := newClientOn(t, envWSURL, platformID, "B")
 	u1, u2 := uniqueUser("e5a"), uniqueUser("e5b")
@@ -293,7 +295,7 @@ func TestE5_MultiDeviceKick(t *testing.T) {
 
 // TestE5_HeartbeatKeepAlive E5.4：静置 3 分钟无操作，30s ping 维持连接不断
 func TestE5_HeartbeatKeepAlive(t *testing.T) {
-	proxy := startWSProxy(t, wsUpstreamAddr())
+	proxy := startWSProxy(t, wsUpstreamAddr(t))
 	ca, eca, _ := newClientOn(t, proxy.endpoint(), platformID, "A")
 	u1 := uniqueUser("e5h")
 	registerUsers(t, u1)
@@ -324,7 +326,7 @@ func TestE5_HeartbeatKeepAlive(t *testing.T) {
 
 // TestE5_NetworkBreakRecovery E5.5：断网 30s → 恢复，状态流转与 goroutine 无泄漏
 func TestE5_NetworkBreakRecovery(t *testing.T) {
-	proxy := startWSProxy(t, wsUpstreamAddr())
+	proxy := startWSProxy(t, wsUpstreamAddr(t))
 	ca, eca, _ := newClientOn(t, proxy.endpoint(), platformID, "A")
 	u1 := uniqueUser("e5n")
 	registerUsers(t, u1)
@@ -354,7 +356,7 @@ func TestE5_NetworkBreakRecovery(t *testing.T) {
 
 // TestE5_SendDuringReconnectWindow E5.6：重连窗口内 SendMsg 立即报 notConnected，不挂死
 func TestE5_SendDuringReconnectWindow(t *testing.T) {
-	proxy := startWSProxy(t, wsUpstreamAddr())
+	proxy := startWSProxy(t, wsUpstreamAddr(t))
 	ca, eca, _ := newClientOn(t, proxy.endpoint(), platformID, "A")
 	cb, ecb, _ := newClientOn(t, envWSURL, platformID, "B")
 	u1, u2 := uniqueUser("e5a"), uniqueUser("e5b")

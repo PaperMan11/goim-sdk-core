@@ -113,6 +113,25 @@ func (m *DefaultConvMgr) GetAllConversations(ctx context.Context, ownerUserID st
 	return filterNotificationConvs(resp.Conversations), nil
 }
 
+// SetConversation 设置单个会话（upsert，用户态仅可操作自己的会话）。
+// 服务端按完整会话记录整体覆盖写入，调用方应先 GetConversations 取回当前状态再修改目标字段，
+// 否则未传字段会被清零。服务端处理后会推送 ConversationChangeNotification（1300），
+// 由 client 层 WS dispatch 统一发布 EventConversationUpdate 并触发会话增量同步。
+func (m *DefaultConvMgr) SetConversation(ctx context.Context, ownerUserID string, conversation *model.Conversation) error {
+	if conversation == nil {
+		return fmt.Errorf("set conversation: conversation is nil")
+	}
+	payload := *conversation
+	payload.OwnerUserID = ownerUserID
+	req := struct {
+		Conversation *model.Conversation `json:"conversation"`
+	}{Conversation: &payload}
+	if err := m.http.Post(ctx, "/conversation/set_conversation", req, nil); err != nil {
+		return fmt.Errorf("set conversation: %w", err)
+	}
+	return nil
+}
+
 func (m *DefaultConvMgr) SetConversations(ctx context.Context, userIDs []string, conversationReq *model.ConversationReq) error {
 	// 服务端 SetConversationsReq{userIDs, conversation}
 	req := struct {

@@ -179,7 +179,7 @@ go test ./test/integration/... -v -count=1
 | E4.7 | 游标推进 | 任意增量后查 Storage | `GetVersion` 返回的 versionID/version 与服务端响应一致且单调递增 |
 
 > 📝 **E4 执行状态（2026-11-05 首跑 4/7 → ✅ 2026-11-06 全部通过）**：7 个测试函数 —— `TestE4_FriendIncrementalSync`（E4.1 ✅）、`TestE4_BlackIncrementalSync`（E4.2 ✅）、`TestE4_GroupIncrementalSync`（E4.3 ✅）、`TestE4_GroupMemberIncrementalSync`（E4.4 ✅）、`TestE4_ConversationIncrementalSync`（E4.5 ✅）、`TestE4_FullResyncAfterClearData`（E4.6 ✅）、`TestE4_CursorMonotonicAndServerConsistent`（E4.7 ✅）。首跑暴露服务端缺陷 R14/R15，服务端修复部署后（2026-11-06）E4.2/E4.3/E4.4 回归通过。
-> 实现说明：① 断言目标为本地 SQLite 缓存（`newTestClientWithStorage` 注入句柄直查）；② 通知触发的定向同步有 ~500ms 去抖（`triggerEntitySync`），事件到达 ≠ 缓存已更新，缓存断言统一 `require.Eventually` 收敛；③ 1205 FriendDeleted 不触发自动同步（`dispatchNotification` 未挂 trigger），好友删除断言走 `Logout(false)` 重登游标增量补齐（三步法第三步）；④ 服务端协议实测：**游标在头部（无新增变更日志）时增量接口返回 full=true + 全量快照**（`len(Logs)==0 → fullResp`，SDK 走 IDHash 校验相等则空转），E4.7 的「与服务端一致」断言按此校准；⑤ E4.5 置顶经 **admin 身份** `set_conversations`（服务端该接口 requireAdmin；用户态 `set_conversation` RPC 已实现但未暴露 im-api 路由，见 R16）；⑥ 每次运行独立账号 + 独立群，互不干扰。
+> 实现说明：① 断言目标为本地 SQLite 缓存（`newTestClientWithStorage` 注入句柄直查）；② 通知触发的定向同步有 ~500ms 去抖（`triggerEntitySync`），事件到达 ≠ 缓存已更新，缓存断言统一 `require.Eventually` 收敛；③ 1205 FriendDeleted 不触发自动同步（`dispatchNotification` 未挂 trigger），好友删除断言走 `Logout(false)` 重登游标增量补齐（三步法第三步）；④ 服务端协议实测：**游标在头部（无新增变更日志）时增量接口返回 full=true + 全量快照**（`len(Logs)==0 → fullResp`，SDK 走 IDHash 校验相等则空转），E4.7 的「与服务端一致」断言按此校准；⑤ E4.5 置顶改为**用户态** `SetConversation`（`POST /conversation/set_conversation`，服务端 `requireSelfOrAdmin`）；该接口是完整 upsert，用例先 `GetConversations` 取回当前会话再改 `isPinned`，避免未传字段被清零（2026-11-11 R16 闭环后切换，并已回归通过）；⑥ 每次运行独立账号 + 独立群，互不干扰。
 
 ### E5 异常与重连
 
@@ -230,7 +230,7 @@ go test ./test/integration/... -v -count=1
 
 > 📝 **E8 执行状态（✅ 2026-11-10 已执行）**：4 个测试函数 —— `TestE8_UploaderFormDataSmallFile`（E8.1 ✅ 全链路通过）、`TestE8_UploaderMultipartLargeFile`（E8.2）、`TestE8_UploaderMultipartResume`（E8.3）、`TestE8_UploaderAbortMultipart`（E8.4），共用同一 fixture。真实环境：im-api `192.168.241.128:18880/api/v1` + RustFS `192.168.241.128:9000`（bucket `goim-files`）。
 > 首跑暴露并修复 **1 项 SDK 缺陷**：FormData 直传把 `InitiateFormDataResp.File`（对象 key）当作 multipart 文件字段名，`CreateFormFile(initResp.File, opts.Name)` → RustFS 400；S3 预签名 POST 规定文件字段名必须为 `file` 且为最后一个字段，已改为 `CreateFormFile("file", opts.Name)`，并给非 2xx 分支补打响应体便于定位。
-> 验证说明：① `Complete` 返回裸对象 URL，私有桶匿名 GET 返回 403 属正常（S3 对不存在对象同样 403，不泄露存在性），校验回退 `Third().AccessURL` 预签名下载并比对字节；② `access_url` 曾出现一次 500 空 body，重跑即恢复，判定为服务端瞬时故障，用例对端点做不存在对象探测以区分「端点整体故障」与「对象未入库」；③ 预签名 URL 有有效期，业务侧应只持久化对象 key，展示/下载时重新签发，不可把 URL 落库长期复用。
+> 验证说明：① `Complete` 返回裸对象 URL，私有桶匿名 GET 返回 403 属正常（S3 对不存在对象同样 403，不泄露存在性），校验回退 `Third().AccessURL` 预签名下载并比对字节；② `access_url` 偶发 500 空 body 已确认为**服务端缺陷并修复**（2026-11-11），用例保留不存在对象探测以区分「端点整体故障」与「对象未入库」；③ 预签名 URL 有有效期，业务侧应只持久化对象 key，展示/下载时重新签发，不可把 URL 落库长期复用。
 
 ---
 
@@ -253,9 +253,9 @@ go test ./test/integration/... -v -count=1
 | R13 | **通知会话隔离的架构决策（E3 首跑实测）**：服务端把系统通知（ContentType>=1000）归属到 `n_<userA>_<userB>` 独立通知会话，与业务消息的 `si_` 会话隔离——通知有自己的 seq 序列，不占用/推进业务会话游标，聊天流天然不被通知污染，通知可整体独立清理。代价：**通知失去同步可靠性**——`n_` 会话不在 SeqSync 游标体系内，通知的唯一到达路径是实时推送，推送丢失（离线期间/断线瞬间）则撤回/已读/删除永远不会补齐（对比 OpenIM：通知归属原会话、占 seq 随 gap 拉取补齐，免费获得 SeqSync 可靠性） | E3.2 实测（撤回通知 persist 到 `n_` 会话，暴露 SDK 缓存应用打错会话）；若切换原会话归属，服务端仅需改 `SendNotification` 信封归属，SDK **零改动**（`notificationConvID` 双来源一致后等价） | 中：离线期间的撤回/已读/删除不可达；多端已读一致性受影响 | **决策（2026-11-04）：暂不改动服务端，接受通知 best-effort 语义**。SDK 侧：① ✅ 会话列表/同步入口已过滤 `n_` 前缀（`ConvMgr` 的 GetAllConversations/GetSortedConversationList（剔除+总数修正）/GetIncrementalConversations（Insert/Update 过滤，versionID 游标不受影响），显式点名查询不拦截；单测 `conversation_impl_test.go` 四例守护）；② E3.8 及多端场景验证离线通知丢失的实际影响面。若产品后续要求通知必达（撤回确定性/多端已读一致），重新评估切换原会话归属 |
 | R14 | **服务端 `RemoveBlack` 存在性检查参数写反（E4.2 首跑暴露）**：`relation_logic.go` 用 `IsBlack(blackUserID, ownerUserID)`（查「对方是否拉黑我」）判断本人黑名单记录是否存在 → 拉黑后永远无法移除（BlackNotFound）。AddBlack 处的同形调用是「是否被对方拉黑」语义（正确），RemoveBlack 系复制粘贴笔误 | E4.2 实测（add_black 成功且增量可见，remove_black 报 black record does not exist） | 中：黑名单移除功能不可用 | ✅ 已修复（goim 仓库，`IsBlack(ownerUserID, blackUserID)` + 错误日志参数序修正）；服务端已重新部署，E4.2 回归通过（2026-11-06）→ **完全闭环** |
 | R15 | **群成员/群实体变更不推进存量成员版本日志（E4.3/E4.4 首跑暴露）**：邀请/踢人/退群只推进受影响者的 `JoinGroupDID`（insert/delete），转让连 JoinGroupDID 都不推——存量成员的 joinGroups 增量永远无变化（头部探测走 full=true + IDHash 相等空转），其本地缓存的群信息（owner/memberCount）与成员列表**双双永久过期**。根因：协议不变量「实体集变化必推进 owner 的 DID 日志」在存量成员维度被遗漏 | E4.3 实测（转让后三端缓存 owner 不更新）、E4.4 实测（邀请后存量成员成员列表无 u3）；被邀请者/被踢者的 insert/delete 路径正常 | 高：群侧增量同步对存量成员形同虚设，成员列表越用越旧 | ✅ 已修复（goim 仓库：邀请/踢人/退群/转让四处补 `IncrVersionLogBatchDIDs(存量成员, groupID, Update)`；SDK 侧链路（joinGroups update → UpsertGroups + SyncGroupMembers 增量）已验证就绪）；服务端已重新部署，E4.3/E4.4 回归通过（2026-11-06）→ **完全闭环** |
-| R16 | **用户态会话设置无 HTTP 可达路径（E4.5 首跑暴露）**：`set_conversations`（批量）requireAdmin；用户态单会话 `set_conversation` RPC 已实现（requireSelfOrAdmin + 1300 通知）但 im-api 未注册路由 → SDK/终端用户的置顶、免打扰等操作无可达接口 | E4.5 实测（普通用户调 set_conversations 返回 insufficient permission） | 中：会话设置功能终端不可用 | 现状：E4.5 以 admin 身份调 `set_conversations` 验证 SDK 侧 1300→增量同步链路（被测面不变）。建议：im-api 补 `/conversation/set_conversation` 路由，SDK `ConvMgr` 同步补 `SetConversation` 封装后切换用例 |
+| R16 | ~~**用户态会话设置无 HTTP 可达路径（E4.5 首跑暴露）**~~ **已修复**：`set_conversations`（批量）requireAdmin；用户态单会话 `set_conversation` RPC 已实现但 im-api 未注册路由 → SDK/终端用户的置顶、免打扰等操作无可达接口。服务端已于 2026-11-11 补 `POST /conversation/set_conversation`（`requireSelfOrAdmin` + 1300 通知）；SDK 新增 `ConvMgr.SetConversation(ctx, ownerUserID, *model.Conversation)`，E4.5 已切换为用户态调用 | E4.5 实测（普通用户调 set_conversations 返回 insufficient permission） | 中：会话设置功能终端不可用 | ✅ 已修复：服务端补路由；SDK 封装 + 单测通过，E4.5 切换用户态并回归通过（2026-11-11）（**注意该接口为完整 upsert，未传字段会被清零，调用方需先取回会话再改目标字段**） |
 | R17 | **服务端登录策略为 allow_multi（E5.3 首跑暴露）**：部署配置 `LoginStrategy: allow_multi`（每用户 10 连接、每平台 3 连接）→ **跨平台登录不互踢**（多端共存），与计划 E5.3 预设的「同账号跨平台登录踢旧端」语义不符；互踢语义仅 `single`/`replace`/`replace_same_platform` 策略下存在 | E5.3 首跑实测（platform 2 登录后 platform 1 旧端 10s 内无任何踢下线事件；conn_manager.go checkAllowMultiLoginAsync 仅在超限时踢最旧） | 低：属产品策略选择而非缺陷；SDK 侧被踢路径（2002 → ForceLogout + Disconnect + SyncState→None + 不自动重连）已验证完备 | 现状：E5.3 适配为「同平台连接超限（第 4 连接）触发踢最旧连接」，SDK 被测路径不变。若产品要求单端互踢，改 auth.yaml `LoginStrategy: replace` 并重启 auth + msggateway 后，用例可切回跨平台互踢形式 |
-| R18 | ~~**FormData 直传文件字段名错误（E8.1 首跑暴露）**~~ **已修复**：客户端把 `InitiateFormDataResp.File`（对象 key）当作 multipart 文件字段名，RustFS 返回 400；S3 预签名 POST 要求文件字段名必须为 `file` 且位于最后一个字段。另注：私有桶对 `Complete` 返回的裸 URL 匿名 GET 返回 403 属正常，读需经 `AccessURL` 预签名；`access_url` 曾瞬时 500（重跑恢复），非稳定缺陷 | `pkg/manager/file_uploader_impl.go` FormData 分支 | 中：小文件（图片/语音等）全部上传失败 | ✅ 已修复为 `CreateFormFile("file", opts.Name)` 并补打非 2xx 响应体；E8.1 回归通过（2026-11-10） |
+| R18 | ~~**FormData 直传文件字段名错误（E8.1 首跑暴露）**~~ **已修复**：客户端把 `InitiateFormDataResp.File`（对象 key）当作 multipart 文件字段名，RustFS 返回 400；S3 预签名 POST 要求文件字段名必须为 `file` 且位于最后一个字段。另注：私有桶对 `Complete` 返回的裸 URL 匿名 GET 返回 403 属正常，读需经 `AccessURL` 预签名；`access_url` 偶发 500 已确认为服务端缺陷并修复（2026-11-11） | `pkg/manager/file_uploader_impl.go` FormData 分支 | 中：小文件（图片/语音等）全部上传失败 | ✅ 已修复为 `CreateFormFile("file", opts.Name)` 并补打非 2xx 响应体；E8.1 回归通过（2026-11-10） |
 
 ---
 
@@ -279,8 +279,8 @@ go test ./test/integration/... -v -count=1
 
 **交付物**
 1. `test/integration/` 可重复执行的集成测试代码
-2. 缺陷记录表（编号 / 用例 / 现象 / 根因 / 修复 / 回归结果）
-3. 服务端对接结论备忘：实际确认的接口路径、字段名、错误码、推送形态差异清单（后续跨语言封装的输入）
+2. 缺陷记录表（编号 / 用例 / 现象 / 根因 / 修复 / 回归结果）→ 见 [INTEGRATION_CONCLUSIONS.md](./INTEGRATION_CONCLUSIONS.md) §2
+3. 服务端对接结论备忘（接口路径、字段名、错误码、推送形态差异）→ 见 [INTEGRATION_CONCLUSIONS.md](./INTEGRATION_CONCLUSIONS.md) §3
 
 **缺陷记录表模板**
 
@@ -295,10 +295,10 @@ go test ./test/integration/... -v -count=1
 ```
 ① 环境搭建 + 测试基建（test/integration 骨架 + helper）  ✅ 已完成
 ② E0 冒烟（含 R1/R7 修复回归）                          ✅ 已完成（2026-10-28）
-③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ✅ 已完成（2026-11-06 E4 全绿，R14/R15 服务端修复回归闭环）
+③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ✅ 已完成（2026-11-06 E4 全绿；R14/R15 已闭环，R16 于 2026-11-11 服务端补路由 + SDK 封装，E4.5 用户态回归通过）
 ④ E5 异常场景（需要操作服务端组件）                     ✅ 已完成（2026-11-06，本地 TCP 代理构造异常，无需服务端操作；修复 2 项 SDK 缺陷）
 ⑤ E6 存储（依赖 E2/E4 数据）                             ✅ 已完成（2026-11-06 4/4 全绿）
 ⑥ E8 第三方存储上传（FileUploader → RustFS）              ✅ 已完成（2026-11-10，修复 FormData 字段名缺陷）
 ⑦ E7 稳定性（可选）                                       可选
-⑧ 缺陷回归 + 对接结论备忘整理                              待执行
+⑧ 缺陷回归 + 对接结论备忘整理                              ✅ 已完成（2026-11-11，见 docs/INTEGRATION_CONCLUSIONS.md；回归修复 E5 空环境 panic）
 ```

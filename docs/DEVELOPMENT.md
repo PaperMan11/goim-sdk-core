@@ -447,6 +447,7 @@ type ConvMgr interface {
     GetConversation(ctx context.Context, conversationID string) (*model.Conversation, error)
     GetConversations(ctx context.Context, conversationIDs []string) ([]*model.Conversation, error)
     GetAllConversations(ctx context.Context) ([]*model.Conversation, error)
+    SetConversation(ctx context.Context, ownerUserID string, conversation *model.Conversation) error
     SetConversations(ctx context.Context, userIDs []string, conversationReq *model.ConversationReq) error
     GetFullConversationIDs(ctx context.Context, idHash uint64) (*model.FullConversationIDs, error)
     GetIncrementalConversations(ctx context.Context, versionID string, version uint64) (*model.IncrementalConversations, error)
@@ -579,9 +580,10 @@ EventSeqSynced            // 全量同步完成
 - CreateGroup / SetGroupInfo / InviteUserToGroup / KickGroup 等成功 **不在本地发布群事件**：服务端会推对应群通知（1501/1502/1505/1506 等），由 client 层 WS dispatch 统一发布 EventGroupCreated / EventGroupInfoSet / EventMemberInvited / EventMemberKicked
 
 **步骤 3.6 — manager/conversation.go 实现**
-- 9 个 /conversation HTTP 接口
+- 10 个 /conversation HTTP 接口
 - GetIncrementalConversations 需本地 versionID 配合
-- SetConversations / DeleteConversations 成功 **不在本地发布会话事件**：服务端会推 ConversationChangeNotification（1300），由 client 层 WS dispatch 发布 EventConversationUpdate 并触发会话增量同步
+- SetConversation 为完整 upsert（未传字段清零），调用方需先取回会话再改目标字段
+- SetConversation / SetConversations / DeleteConversations 成功 **不在本地发布会话事件**：服务端会推 ConversationChangeNotification（1300），由 client 层 WS dispatch 发布 EventConversationUpdate 并触发会话增量同步
 
 ---
 

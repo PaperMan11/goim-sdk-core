@@ -19,10 +19,8 @@ import (
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/client"
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
-	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
-	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 )
 
 const storeWaitTimeout = 15 * time.Second
@@ -32,24 +30,6 @@ func reloginAndSync(t *testing.T, c client.Client, ec *eventCollector, userID st
 	t.Helper()
 	require.NoError(t, c.Logout(clearData), "logout %s (clearData=%v)", userID, clearData)
 	loginAndSync(t, c, ec, userID)
-}
-
-// adminSetConversations 以 admin 身份调 set_conversations（服务端该接口仅 admin 可调用；
-// 用户态单会话设置 set_conversation 未暴露 HTTP 路由，见计划 §4 风险记录）
-func adminSetConversations(t *testing.T, userIDs []string, req *model.ConversationReq) {
-	t.Helper()
-	requireEnv(t)
-
-	l := taggedLogger("admin")
-	adminTokens := transport.NewTokenStore(nil)
-	adminHTTP := transport.NewHTTPClient(envAPIURL, adminTokens, l)
-	authMgr := manager.NewAuthMgr(adminHTTP, adminTokens, nil, l)
-	tokenResp, err := authMgr.GetAdminToken(context.Background(), envSecret, adminUserID)
-	require.NoError(t, err, "admin token for set_conversations")
-	require.NoError(t, adminTokens.Set(adminUserID, platformID, tokenResp.Token, tokenResp.ExpireTimeSeconds))
-	adminHTTP.SetCurrentUser(adminUserID, platformID)
-	require.NoError(t, manager.NewConvMgr(adminHTTP, nil, l).SetConversations(context.Background(), userIDs, req),
-		"admin set_conversations")
 }
 
 // —— 本地缓存谓词（require.Eventually 轮询用）——
@@ -321,13 +301,14 @@ func TestE4_ConversationIncrementalSync(t *testing.T) {
 	mb.recv(t, r2.ClientMsgID, eventTimeout)
 	convID2 := waitConvID(t, cb, u2, u3)
 
-	// 置顶 u1 会话：admin 身份 set_conversations → 服务端推 1300 → B 会话增量同步落库
-	adminSetConversations(t, []string{u2}, &model.ConversationReq{
-		ConversationID:   convID,
-		ConversationType: model.SessionTypeC2C,
-		UserID:           u1,
-		IsPinned:         &model.BoolValue{Value: true},
-	})
+	// 置顶 u1 会话：用户态 set_conversation（owner=u2）→ 服务端推 1300 → B 会话增量同步落库。
+	// 服务端单会话接口是完整 upsert，先取回当前会话再改 isPinned，避免未传字段被清零。
+	convs, err := cb.Conv().GetConversations(ctx, u2, []string{convID})
+	require.NoError(t, err, "get conversation before set")
+	require.Len(t, convs, 1, "target conversation should exist")
+	pinned := convs[0]
+	pinned.IsPinned = true
+	require.NoError(t, cb.Conv().SetConversation(ctx, u2, pinned), "user set_conversation")
 	ecb.wait(t, events.EventConversationUpdate, eventTimeout)
 	require.Eventually(t, func() bool {
 		c1 := findConv(storB, u2, convID)
