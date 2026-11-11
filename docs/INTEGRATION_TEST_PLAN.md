@@ -49,7 +49,8 @@ test/integration/
 ├── e3_push_test.go     # E3 推送事件
 ├── e4_sync_test.go     # E4 实体同步
 ├── e5_reconnect_test.go# E5 异常与重连
-└── e6_storage_test.go  # E6 存储与多账号
+├── e6_storage_test.go  # E6 存储与多账号
+└── e8_upload_test.go   # E8 第三方存储上传（FileUploader → RustFS）
 ```
 
 **执行方式**：
@@ -67,6 +68,7 @@ go test ./test/integration/... -v -count=1
 | `GOIM_API_URL` | im-api 地址 | 缺失则 Skip（本地单测不受影响） |
 | `GOIM_WS_URL` | 网关 WS 地址 | 同上 |
 | `GOIM_SECRET` | admin secret | 同上 |
+| `GOIM_RUSTFS_URL` | RustFS/S3 对象存储地址（E8 仅用于日志标注目标存储） | 可选，不影响用例 |
 | `GOIM_LOG_LEVEL` | SDK 日志级别 | `debug` |
 
 **公共基建（helper_test.go）**：
@@ -215,6 +217,21 @@ go test ./test/integration/... -v -count=1
 | E7.2 | 并发发送 | 10 goroutine × 100 条并发 SendMsg，全部 ack 且对端全部收到、seq 连续 |
 | E7.3 | 重连风暴 | 循环 kill gateway 连接 50 次，重连均恢复且数据最终一致 |
 
+### E8 第三方存储上传（FileUploader → RustFS）
+
+不依赖 WS，只依赖 im-api HTTP（admin bootstrap → 注册测试用户 → user token）与对象存储。`FileUploader.Upload` 组合 `ThirdMgr` 完成「初始化签名 → 字节直传 RustFS → Complete 合并」，字节不经过 im-api。
+
+| # | 用例 | 步骤 | 预期 |
+|---|---|---|---|
+| E8.1 | FormData 小文件直传 | 2KB 数据走默认路径 `FileUploader().Upload` | 走 FormData；`CompleteFormData` 返回对象 URL；下载字节与上传一致 |
+| E8.2 | Multipart 大文件分片 | 9MB 数据、`PartSize=5MB`（2 片）、`Concurrency=3` | `PartLimit`/`PartSize` 可用；UploadID、各分片 ETag 齐全；进度累计到 100%；合并后字节一致 |
+| E8.3 | 断点续传 | 第 1 片完成后取消 → 用返回的 `ResumeState` 续传 | 首次返回 `context.Canceled` + ResumeState（UploadID + 已完成分片）；续传不再 Initiate，仅补签/补传缺失分片；Complete 带上历史分片；最终字节一致 |
+| E8.4 | Abort 上传会话 | `InitiateMultipartUpload` 后直接 `Abort` | 返回成功，服务端清理未完成的分片上传 |
+
+> 📝 **E8 执行状态（✅ 2026-11-10 已执行）**：4 个测试函数 —— `TestE8_UploaderFormDataSmallFile`（E8.1 ✅ 全链路通过）、`TestE8_UploaderMultipartLargeFile`（E8.2）、`TestE8_UploaderMultipartResume`（E8.3）、`TestE8_UploaderAbortMultipart`（E8.4），共用同一 fixture。真实环境：im-api `192.168.241.128:18880/api/v1` + RustFS `192.168.241.128:9000`（bucket `goim-files`）。
+> 首跑暴露并修复 **1 项 SDK 缺陷**：FormData 直传把 `InitiateFormDataResp.File`（对象 key）当作 multipart 文件字段名，`CreateFormFile(initResp.File, opts.Name)` → RustFS 400；S3 预签名 POST 规定文件字段名必须为 `file` 且为最后一个字段，已改为 `CreateFormFile("file", opts.Name)`，并给非 2xx 分支补打响应体便于定位。
+> 验证说明：① `Complete` 返回裸对象 URL，私有桶匿名 GET 返回 403 属正常（S3 对不存在对象同样 403，不泄露存在性），校验回退 `Third().AccessURL` 预签名下载并比对字节；② `access_url` 曾出现一次 500 空 body，重跑即恢复，判定为服务端瞬时故障，用例对端点做不存在对象探测以区分「端点整体故障」与「对象未入库」；③ 预签名 URL 有有效期，业务侧应只持久化对象 key，展示/下载时重新签发，不可把 URL 落库长期复用。
+
 ---
 
 ## 4. 已知对接风险点（代码走查，测试时重点关注）
@@ -238,6 +255,7 @@ go test ./test/integration/... -v -count=1
 | R15 | **群成员/群实体变更不推进存量成员版本日志（E4.3/E4.4 首跑暴露）**：邀请/踢人/退群只推进受影响者的 `JoinGroupDID`（insert/delete），转让连 JoinGroupDID 都不推——存量成员的 joinGroups 增量永远无变化（头部探测走 full=true + IDHash 相等空转），其本地缓存的群信息（owner/memberCount）与成员列表**双双永久过期**。根因：协议不变量「实体集变化必推进 owner 的 DID 日志」在存量成员维度被遗漏 | E4.3 实测（转让后三端缓存 owner 不更新）、E4.4 实测（邀请后存量成员成员列表无 u3）；被邀请者/被踢者的 insert/delete 路径正常 | 高：群侧增量同步对存量成员形同虚设，成员列表越用越旧 | ✅ 已修复（goim 仓库：邀请/踢人/退群/转让四处补 `IncrVersionLogBatchDIDs(存量成员, groupID, Update)`；SDK 侧链路（joinGroups update → UpsertGroups + SyncGroupMembers 增量）已验证就绪）；服务端已重新部署，E4.3/E4.4 回归通过（2026-11-06）→ **完全闭环** |
 | R16 | **用户态会话设置无 HTTP 可达路径（E4.5 首跑暴露）**：`set_conversations`（批量）requireAdmin；用户态单会话 `set_conversation` RPC 已实现（requireSelfOrAdmin + 1300 通知）但 im-api 未注册路由 → SDK/终端用户的置顶、免打扰等操作无可达接口 | E4.5 实测（普通用户调 set_conversations 返回 insufficient permission） | 中：会话设置功能终端不可用 | 现状：E4.5 以 admin 身份调 `set_conversations` 验证 SDK 侧 1300→增量同步链路（被测面不变）。建议：im-api 补 `/conversation/set_conversation` 路由，SDK `ConvMgr` 同步补 `SetConversation` 封装后切换用例 |
 | R17 | **服务端登录策略为 allow_multi（E5.3 首跑暴露）**：部署配置 `LoginStrategy: allow_multi`（每用户 10 连接、每平台 3 连接）→ **跨平台登录不互踢**（多端共存），与计划 E5.3 预设的「同账号跨平台登录踢旧端」语义不符；互踢语义仅 `single`/`replace`/`replace_same_platform` 策略下存在 | E5.3 首跑实测（platform 2 登录后 platform 1 旧端 10s 内无任何踢下线事件；conn_manager.go checkAllowMultiLoginAsync 仅在超限时踢最旧） | 低：属产品策略选择而非缺陷；SDK 侧被踢路径（2002 → ForceLogout + Disconnect + SyncState→None + 不自动重连）已验证完备 | 现状：E5.3 适配为「同平台连接超限（第 4 连接）触发踢最旧连接」，SDK 被测路径不变。若产品要求单端互踢，改 auth.yaml `LoginStrategy: replace` 并重启 auth + msggateway 后，用例可切回跨平台互踢形式 |
+| R18 | ~~**FormData 直传文件字段名错误（E8.1 首跑暴露）**~~ **已修复**：客户端把 `InitiateFormDataResp.File`（对象 key）当作 multipart 文件字段名，RustFS 返回 400；S3 预签名 POST 要求文件字段名必须为 `file` 且位于最后一个字段。另注：私有桶对 `Complete` 返回的裸 URL 匿名 GET 返回 403 属正常，读需经 `AccessURL` 预签名；`access_url` 曾瞬时 500（重跑恢复），非稳定缺陷 | `pkg/manager/file_uploader_impl.go` FormData 分支 | 中：小文件（图片/语音等）全部上传失败 | ✅ 已修复为 `CreateFormFile("file", opts.Name)` 并补打非 2xx 响应体；E8.1 回归通过（2026-11-10） |
 
 ---
 
@@ -255,7 +273,7 @@ go test ./test/integration/... -v -count=1
 ## 6. 通过标准与交付物
 
 **通过标准**
-1. E0-E6 全部用例通过（E3.9、E7 允许标注跳过/可选）
+1. E0-E6、E8 全部用例通过（E3.9、E7 允许标注跳过/可选）
 2. 无 P0/P1 级缺陷遗留；P2 级缺陷有记录和结论
 3. §4 风险逐条有验证结论（修复或确认不适用）
 
@@ -280,6 +298,7 @@ go test ./test/integration/... -v -count=1
 ③ E1 → E2 → E3 → E4（核心功能，双客户端为主）           ✅ 已完成（2026-11-06 E4 全绿，R14/R15 服务端修复回归闭环）
 ④ E5 异常场景（需要操作服务端组件）                     ✅ 已完成（2026-11-06，本地 TCP 代理构造异常，无需服务端操作；修复 2 项 SDK 缺陷）
 ⑤ E6 存储（依赖 E2/E4 数据）                             ✅ 已完成（2026-11-06 4/4 全绿）
-⑥ E7 稳定性（可选）                                       可选
-⑦ 缺陷回归 + 对接结论备忘整理                              待执行
+⑥ E8 第三方存储上传（FileUploader → RustFS）              ✅ 已完成（2026-11-10，修复 FormData 字段名缺陷）
+⑦ E7 稳定性（可选）                                       可选
+⑧ 缺陷回归 + 对接结论备忘整理                              待执行
 ```

@@ -40,13 +40,14 @@ type DefaultClient struct {
 	params transport.ConnectParams // WS 连接参数（构造时填默认，Login 时覆盖 userID/token）
 
 	// Manager 实例
-	auth  *manager.DefaultAuthMgr
-	user  *manager.DefaultUserMgr
-	msg   *manager.DefaultMsgMgr
-	group *manager.DefaultGroupMgr
-	rel   *manager.DefaultRelMgr
-	conv  *manager.DefaultConvMgr
-	third *manager.DefaultThirdMgr
+	auth       *manager.DefaultAuthMgr
+	user       *manager.DefaultUserMgr
+	msg        *manager.DefaultMsgMgr
+	group      *manager.DefaultGroupMgr
+	rel        *manager.DefaultRelMgr
+	conv       *manager.DefaultConvMgr
+	third      *manager.DefaultThirdMgr
+	fileUpload manager.FileUploader
 
 	mu            sync.RWMutex
 	userID        string
@@ -172,23 +173,25 @@ func NewClient(cfg *ClientConfig) Client {
 	relMgr := manager.NewRelMgr(http, bus, l)
 	convMgr := manager.NewConvMgr(http, bus, l)
 	thirdMgr := manager.NewThirdMgr(http, l)
+	fileUploader := manager.NewFileUploader(thirdMgr, l)
 
 	c = &DefaultClient{
-		cfg:       cfg,
-		http:      http,
-		transport: ws,
-		tokens:    tokens,
-		storage:   stor,
-		bus:       bus,
-		logger:    l,
-		params:    params,
-		auth:      authMgr,
-		user:      userMgr,
-		msg:       msgMgr,
-		group:     groupMgr,
-		rel:       relMgr,
-		conv:      convMgr,
-		third:     thirdMgr,
+		cfg:        cfg,
+		http:       http,
+		transport:  ws,
+		tokens:     tokens,
+		storage:    stor,
+		bus:        bus,
+		logger:     l,
+		params:     params,
+		auth:       authMgr,
+		user:       userMgr,
+		msg:        msgMgr,
+		group:      groupMgr,
+		rel:        relMgr,
+		conv:       convMgr,
+		third:      thirdMgr,
+		fileUpload: fileUploader,
 	}
 
 	// 3. 传输层生命周期钩子（通过 MessageTransport interface setter 注入）
@@ -627,13 +630,14 @@ func (c *DefaultClient) Status() transport.TransportStatus {
 
 // === Manager 聚合 ===
 
-func (c *DefaultClient) Auth() manager.AuthMgr   { return c.auth }
-func (c *DefaultClient) User() manager.UserMgr   { return c.user }
-func (c *DefaultClient) Msg() manager.MsgMgr     { return c.msg }
-func (c *DefaultClient) Group() manager.GroupMgr { return c.group }
-func (c *DefaultClient) Rel() manager.RelMgr     { return c.rel }
-func (c *DefaultClient) Conv() manager.ConvMgr   { return c.conv }
-func (c *DefaultClient) Third() manager.ThirdMgr { return c.third }
+func (c *DefaultClient) Auth() manager.AuthMgr              { return c.auth }
+func (c *DefaultClient) User() manager.UserMgr              { return c.user }
+func (c *DefaultClient) Msg() manager.MsgMgr                { return c.msg }
+func (c *DefaultClient) Group() manager.GroupMgr            { return c.group }
+func (c *DefaultClient) Rel() manager.RelMgr                { return c.rel }
+func (c *DefaultClient) Conv() manager.ConvMgr              { return c.conv }
+func (c *DefaultClient) Third() manager.ThirdMgr            { return c.third }
+func (c *DefaultClient) FileUploader() manager.FileUploader { return c.fileUpload }
 
 // === 事件订阅 ===
 
