@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E4 五类实体增量同步（docs/INTEGRATION_TEST_PLAN.md §3 E4）

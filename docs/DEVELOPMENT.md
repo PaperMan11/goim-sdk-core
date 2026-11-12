@@ -1,4 +1,4 @@
-# goim-sdk-core 开发文档
+﻿# goim-sdk-core 开发文档
 
 > GoIM Server SDK 核心库 — 多平台 SDK 的统一底座
 > Module: `github.com/PaperMan11/goim-sdk-core`
@@ -68,8 +68,9 @@
 ├─────────────────────────────────────────────────────────────┤
 │                      pkg/manager                             │
 │  AuthMgr │ UserMgr │ MsgMgr │ GroupMgr │ RelMgr │ ConvMgr    │
+│  ThirdMgr（第三方存储签名 API）│ FileUploader（一站式上传）   │
 │  ──── 业务编排层 ────                                        │
-│  · seq 同步引擎  · 增量/全量同步策略  · 本地状态缓存           │
+│  · pkg/sync 同步引擎  · 增量/全量同步策略  · pkg/storage 缓存 │
 ├─────────────────────────────────────────────────────────────┤
 │                     pkg/transport                            │
 │  ┌────────────────────────────────────────────────────┐     │
@@ -91,11 +92,15 @@
 └─────────────────────────────────────────────────────────────┘
 
 辅助包：
-  pkg/events        EventType 枚举 + Event 结构（WS 推送事件类型定义）
-  pkg/logger        Logger 接口 + zap 适配器（printf 风格）
+  pkg/events        EventType 枚举（53 个）+ Event 结构（WS 推送事件类型定义）
+  pkg/logger        Logger 接口 + zap 适配器（printf 风格）+ WithTag 标签
+  pkg/sync          SeqSyncEngine + EntitySyncEngine 数据同步引擎
+  pkg/storage       Storage 接口 + MemoryStorage + SQLiteStorage（gorm 8 表）
   pkg/utils/run     actor-runner 并发模型（baseTransport 用）
-  pkg/utils/eventbus 通用 channel-based pub/sub（未来 manager/client 复用）
+  pkg/utils/eventbus 通用 channel-based pub/sub
   pkg/utils/uuidx   UUID 统一封装
+  pkg/utils/parallel 通用并发控制（sem+wg+firstErr）
+  pkg/utils/workerpool 任务队列 worker pool
   pkg/transport/encoder   传输层编解码工厂
   pkg/transport/compressor 传输层压缩工厂
 ```
@@ -113,6 +118,8 @@ client → manager → transport → model
 - `model` 是最底层，**零业务依赖**
 - `transport` 依赖 `model`、`logger`、`utils/run`、`utils/uuidx`、`transport/encoder`、`transport/compressor`
 - `manager` 依赖 `transport`、`model`、`events`、`logger`
+- `storage` 仅依赖 `model` + gorm（glebarez/sqlite）
+- `sync` 依赖 `transport`、`storage`、`model`、`events`、`logger`（由 client 组装驱动）
 - `client` 依赖所有层
 - 所有层**不反向依赖**，同层之间不互相依赖
 
@@ -174,23 +181,29 @@ Connect(ctx):
   服务端→客户端: SetPingHandler 自动回复 Pong + 续 read deadline
 ```
 
-#### D. 数据同步引擎（✅ Phase 4.5 已实现）
+#### D. 数据同步引擎（✅ Phase 4.5/4.6 已实现，细则见 docs/SYNC_ARCHITECTURE.md）
 
 ```
 消息 Seq 同步（SeqSyncEngine，pkg/sync/msg.go）:
-  登录后/重连后:
-    newest_seq() → 各会话服务端 maxSeq/minSeq
+  登录后/重连后（后台执行，与登录解耦）:
+    newest_seq(1001) → 各会话服务端 maxSeq/minSeq
     与本地 local_seqs 对比 → gap = [localMax+1, serverMax]
-    gap > 0 → pull_msg_by_seq 分批拉取 → 入库 → 前移游标
+    gap > 0 → pull_msg_by_seq(1002) 分批拉取 → 入库 → 游标逐批落盘（commit-last）
+    批内 seq 不连续（并发落库乱序窗口）→ 游标停在缺口前有界补拉，耗尽跳过告警
 
-运行时增量:
-  WS 推送新消息 → PushHandler(2001) → MsgData 入库 + local_seqs 前移
+运行时增量（Phase 4.6）:
+  WS 2001 推送 → persistPushMsg 入库 → 派发 EventNewMsg（收到事件即落库完成）
+  推送不推进游标（推送可丢/乱序，游标仅由 gap 拉取推进）
 
 实体版本同步（EntitySyncEngine，pkg/sync/entity.go）:
   好友/黑名单/群/群成员/会话 五类，version + versionID 游标增量，
-  full/IDHash 不匹配 → 全量回退（详见 Phase 4.5.4）
+  full/IDHash 不匹配 → fetch-then-swap 全量回退（详见 Phase 4.5.4）
+  实体类 Tips 触发定向增量：仅拉对应实体类别，~500ms 防抖合并
 
-事件: 全部同步完成后 Publish(EventSeqSynced)；EntityLoginSuccess 在同步链路完成后才发布
+触发与解耦（Phase 4.6）:
+  Login 成功即返回 + EventLoginSuccess；同步移入后台 goroutine
+  进度：EventSyncStart / EventSyncFinish / EventSyncFailed + SyncState() 查询
+  轮次守卫 syncGen：登出/重连/被踢取消旧轮；后台同步与定向增量 syncRunMu 互斥
 ```
 
 #### E. 同步请求-响应（MessageRouter）
@@ -216,7 +229,9 @@ goim-sdk-core/
 ├── README.md                    # 项目入口
 ├── docs/
 │   ├── DEVELOPMENT.md           # 本文档
-│   └── INTEGRATION_TEST_PLAN.md # 服务端对接测试方案
+│   ├── INTEGRATION_TEST_PLAN.md # 服务端对接测试方案（E0-E8）
+│   ├── INTEGRATION_CONCLUSIONS.md # 对接结论备忘（14 项缺陷闭环记录）
+│   └── SYNC_ARCHITECTURE.md     # 同步架构细则（后台同步/定向增量/互斥）
 ├── go.mod                       # module: github.com/PaperMan11/goim-sdk-core
 ├── go.sum
 │
@@ -258,29 +273,46 @@ goim-sdk-core/
 │   │   ├── run/                 # actor-runner (baseTransport 并发模型)
 │   │   ├── eventbus/            # 通用 channel-based pub/sub
 │   │   ├── uuidx/               # UUID 统一封装
+│   │   ├── parallel/            # 通用并发控制（sem+wg+firstErr，Phase 4.7 抽取）
+│   │   ├── workerpool/          # 任务队列 worker pool
 │   │   ├── httpclient/          # 函数式 HTTP 客户端 (独立库，sdk 暂未直接用)
-│   │   └── ...                  # hash, bcrypt, convert, timex 等工具
+│   │   └── ...                  # hash, bcrypt, convert, timex, filex, randx 等工具
 │   │
-│   ├── manager/                 # ⏳ 待实现 — 六个业务 Manager
-│   │   ├── auth.go
-│   │   ├── user.go
-│   │   ├── msg.go
-│   │   ├── group.go
-│   │   ├── relation.go
-│   │   ├── conversation.go
-│   │   └── sync.go              # SeqSyncEngine
+│   ├── manager/                 # ✅ 已完成 — 8 个 Manager 接口 + 实现（*_impl.go + 单测）
+│   │   ├── auth/user/msg/group/relation/conversation  # 六个业务域（接口 + 实现）
+│   │   ├── third.go             # ThirdMgr：第三方存储签名类 HTTP API 薄封装（Phase 4.7）
+│   │   └── file_uploader.go     # FileUploader：一站式上传引擎（FormData/Multipart/断点续传）
 │   │
-│   ├── client/                  # ⏳ 待实现 — Facade 顶层 Client
-│   │   └── client.go
+│   ├── sync/                    # ✅ 已完成 — 数据同步引擎（Phase 4.5/4.6）
+│   │   ├── msg.go               # SeqSyncEngine：gap 分批拉取 + 批内缺口有界补拉
+│   │   └── entity.go            # EntitySyncEngine：五类实体游标增量 + IDHash 全量回退
 │   │
-│   └── storage/                 # ⏳ 待实现 — 本地存储抽象
-│       ├── storage.go
-│       ├── sqlite.go
-│       └── wasm_indexeddb.go
+│   ├── client/                  # ✅ 已完成 — Facade 顶层 Client + 后台同步编排
+│   │   ├── client.go            # Client 接口 + ClientConfig + SyncState
+│   │   ├── client_impl.go       # DefaultClient：生命周期 + 事件订阅 + 推送分发
+│   │   └── storage_*.go         # sqlite 构造平台 helper（wasm 返回错误引导 IndexedDB）
+│   │
+│   ├── call/                    # ✅ 已完成 — 跨语言反射调用内核（Phase 5）
+│   │   ├── call.go              # Dispatcher + 方法分发表 + 生命周期导出
+│   │   ├── converter.go         # argsJSON 位置参数 ↔ 反射参数/返回值
+│   │   ├── middleware.go        # panic recover + 登录态白名单
+│   │   ├── error.go             # NormalizeError + call 层错误码
+│   │   ├── handler.go           # EventPayload / CallBack 全量事件桥接
+│   │   └── token.go             # TokenProviderBridge + UpdateToken 预取缓存
+│   │
+│   └── storage/                 # ✅ 已完成 — Storage 接口 + 双实现
+│       ├── storage.go           # 接口 + MemoryStorage
+│       ├── models.go            # gorm 表模型（8 表，OwnerUserID 隔离）
+│       ├── sqlite.go            # SQLiteStorage（glebarez/sqlite，`!(js && wasm)` 约束）
+│       └── idb_storage.go       # IdbStorage（IndexedDB，`js && wasm` 约束，详见 docs/IDB_STORAGE.md）
 │
-├── internal/                    # utils 已吸收所有功能，internal 暂空
-├── wasm/                        # Phase 5 目标
-└── tests/                       # 集成测试 (Phase 4 目标)
+├── cmd/
+│   ├── cgo/                      # ✅ PC 平台 C ABI 导出入口（export.go `//go:build cgo`）
+│   └── wasm/                     # ✅ Web 平台入口：main.go（`js && wasm`）+ idb_wrapper.js（浏览器侧桥接）
+├── test/integration/            # ✅ E0-E6/E8 真实服务端集成测试（运行时环境变量控制 Skip）
+├── examples/token_provider/     # 终端模式 TokenProvider 用法示例
+├── version/                     # VERSION（go:embed 注入，ldflags 可覆盖）
+└── internal/                    # utils 已吸收所有功能，internal 暂空
 ```
 
 ---
@@ -498,8 +530,10 @@ type Client interface {
 }
 ```
 
-> ⏳ **Phase 4.0b 扩展**：便捷回调从 6 个扩至 10 个（补 OnNewMessage / OnConversationChanged / OnMessageRevoked / OnConnecting，见 Phase 4.0b）。
+> ✅ **Phase 4.0b 扩展**：便捷回调从 6 个扩至 10 个（补 OnNewMessage / OnConversationChanged / OnMessageRevoked / OnConnecting，见 Phase 4.0b）。
 > 原则：On* 只是高频路径语法糖，不扩成全量 42 个；完整能力始终由 Subscribe / SubscribeAll 承担。
+> ✅ **Phase 4.6/4.7 扩展**：新增 LoginWithToken / Close() / SyncState() + OnSyncStart / OnSyncFinish / OnSyncFailed（Phase 4.6）；
+> Manager 聚合从 6 个扩至 8 个（Third() / FileUploader()，Phase 4.7）。当前权威定义见 `pkg/client/client.go`。
 
 **步骤 2.5.2 — 统一事件总线架构**
 
@@ -771,13 +805,11 @@ pkg/storage/
 
 | 时机 | 动作 | 状态 |
 |------|------|------|
-| Login 成功（WS Connect 后） | SeqSyncEngine.Sync + EntitySyncEngine.SyncAll 顺序执行 → 全部完成才 Publish(EventLoginSuccess)；失败 → EventLoginFailed + error | ✅ |
+| Login 成功（WS Connect 后） | Phase 4.6 起与同步解耦：Login 成功即返回 + EventLoginSuccess；后台 goroutine 执行 SeqSync + EntitySyncAll，进度经 EventSyncStart/Finish/Failed + SyncState() 暴露 | ✅（4.6 调整） |
 | Reconnect（OnReconnected） | 异步重跑 runSyncFlow：SeqSync gap 拉取 + 五类实体带游标增量（通常 0 或小增量），失败仅 warn | ✅ |
 | Logout | 默认仅 Disconnect + TokenStore.Delete（本地数据保留，下次登录走游标增量）；clearData=true 时额外 Storage.Clear(owner)（共享设备隐私/注销场景，下次登录 full 重拉） | ✅ |
-| WS 2001 推送消息 | EventNewMsg 已派发（Phase 4.0b）；推送路径的消息入库 + 游标前移 | ⏳ 后续增强 |
-| WS 实体 Tips（群变更/好友变更等 2001 Tips） | 标记实体脏 → 防抖合并 → 触发对应实体增量 | ⏳ 后续增强 |
-
-> 注：推送路径未入库期间，消息以 SeqSync 引擎拉取为准（登录/重连触发），事件派发不受影响。
+| WS 2001 推送消息 | persistPushMsg 落库后派发 EventNewMsg（收到事件即落库完成）；**推送不推进游标**（推送可丢/乱序，游标仅由 gap 拉取推进） | ✅ Phase 4.6（E2.8 验证） |
+| WS 实体 Tips（群变更/好友变更等 2001 Tips） | 通知触发定向实体增量：仅拉对应类别，~500ms 防抖合并，与后台同步 syncRunMu 互斥 | ✅ Phase 4.6（E3.10 验证） |
 
 #### 4.5.6 完成判定 + 交付物（✅ 全部达成）
 
@@ -789,14 +821,99 @@ client 集成                          Login → SeqSync → EntitySync → Even
                                      Logout(clearData=false) → 数据保留 + TokenStore.Delete ✅
 
 build / vet / 全量 go test ./pkg/... 全绿（含修复 hash 包缺失 test.txt fixture）
-⏳ 集成验证（需真实服务端）：多账号隔离 Login(A)→Logout→Login(B)、断网重连 gap 拉取无丢消息
+✅ 集成验证已由 Phase 4.8 闭环：E6 多账号隔离 Login(A)→Logout→Login(B)、E5 断网/杀服重连 gap 拉取无丢消息
 ```
 
 ---
 
-### Phase 5: 跨语言封装 ⏳
+### Phase 4.6: 登录/同步解耦 + 推送落库 + 定向增量同步 ✅ **已完成**
 
-> 等 Phase 1-4 全部完成且测试充分后再动手。
+> 对齐微信/Telegram 做法：登录只负责 Token 校验 + WS 连接就绪，成功即返回；
+> 数据同步移入后台 goroutine，进度经事件与状态查询暴露。细则见 docs/SYNC_ARCHITECTURE.md。
+
+**核心改动**：
+
+| 改动 | 说明 |
+|------|------|
+| Login 解耦 | Login 成功立即返回 + Publish(EventLoginSuccess)；同步在后台 goroutine 执行 |
+| SyncState + 同步事件 | `SyncState()` 查询：None → Syncing → Synced / Failed；新增 EventSyncStart / EventSyncFinish / EventSyncFailed 及对应 On* 回调 |
+| 同步轮次守卫 | syncGen 递增：登出/重连/被踢取消在途旧轮次，旧轮 goroutine 不发事件、不覆盖状态 |
+| syncRunMu 互斥 | 后台全量同步与通知触发的定向增量串行执行；30s 超时预算在拿锁后才起算 |
+| 推送路径落库 | handleMessagePush 先 persistPushMsg 再派发 EventNewMsg；**推送不推进游标**（推送可丢/乱序，游标仅由 gap 拉取推进） |
+| 通知触发定向增量 | 实体类 Tips（1201-1210/1501-1515/1303 等）→ ~500ms 防抖合并 → 仅拉对应实体类别增量（E3.10） |
+| 通知缓存应用修复 | 撤回/删除/已读优先用 tips 携带的原会话 ID，禁用通知信封自身的 n_ 前缀会话 ID（E3 缺陷修复） |
+| 通知 payload 类型化 | dispatchNotification 全部 decodeTip 到 pbsdk.*Tips 具体类型；model/events 全量对齐服务端 protobuf |
+| 发送端写入路径 | 单一权威写入：仅经服务端回显推送落库，发送成功不直接写本地（服务端 write-through 后 1003 ack 即提交信号） |
+| 批内缺口有界补拉 | SeqSync 拉取批内 seq 不连续（并发落库乱序窗口）时游标停在缺口前补拉，耗尽跳过告警（R12 收口） |
+| Logger.WithTag | 多客户端/多用户日志标签区分（多实例与集成测试联调定位） |
+| 被踢下线语义 | 2002 → ForceLogout + Disconnect 事件 + SyncState=None，禁止自动重连 |
+
+**完成判定**：✅ E2.6-E2.8 / E3 / E5 集成测试全绿；`go test ./pkg/...` 全绿。
+
+---
+
+### Phase 4.7: 第三方存储 ThirdMgr + FileUploader ✅ **已完成**
+
+> 服务端对接 RustFS/MinIO/AWS S3：SDK 封装全部 /third/... 签名控制 API（不持有对象存储密钥，
+> 预签名 URL 由服务端鉴权后签发），并提供一站式上传引擎。
+
+| 组件 | 职责 |
+|------|------|
+| `ThirdMgr`（manager/third.go） | 10 个签名控制 API：PartLimit / PartSize / InitiateMultipartUpload / AuthSign / Complete / Abort / AccessURL / InitiateFormData / CompleteFormData / DeleteOutdatedData |
+| `FileUploader`（manager/file_uploader.go） | 组合 ThirdMgr：自动路径选择（≥8MB 走 Multipart）、并发 PUT（默认 4）、单片重试（默认 3）、进度回调、ctx 取消保留分片、ResumeState 断点续传、Abort 彻底放弃 |
+| `pkg/utils/parallel` | 通用并发控制（sem+wg+firstErr），从上传实现抽取复用 |
+| `pkg/utils/workerpool` | 任务队列；修复 Stop 竞态（先关任务通道再等待排空） |
+
+关键约束（实测踩坑）：
+- FormData 文件字段名固定 `file`，且必须为最后一个表单字段（否则 RustFS 400）
+- AuthSign 懒加载：仅在发现缺失分片时一次性批量补全，禁止重复调用/预签名所有分片
+- 私有桶直链 403 属正常：读取必须走 `/third/access_url` 预签名，URL 展示时重新签发，不可长期复用
+
+**完成判定**：✅ E8 四用例真实环境通过（FormData / Multipart / 断点续传 / Abort）；file_uploader + parallel/workerpool 单测全绿。
+
+---
+
+### Phase 4.8: 真实服务端集成测试（E0-E6 / E8）✅ **已完成**
+
+> 细则见 docs/INTEGRATION_TEST_PLAN.md（用例与执行记录）与 docs/INTEGRATION_CONCLUSIONS.md（对接结论备忘）。
+
+| 套件 | 覆盖 | 状态 |
+|------|------|------|
+| E0 冒烟 | admin token / 注册用户 / 登录全链路（含五类实体同步）/ 错误凭证 | ✅ 2026-10-28 |
+| E1 认证与连接 | LoginWithToken / 重复 Login（syncGen 取消旧轮）/ TokenProvider 续期 | ✅ |
+| E2 消息链路 | 单聊/群聊发送、离线 SeqSync 补齐、NewestSeq/PullMsgBySeq、历史落库、双路径持久化、推送落库不推游标 | ✅ 2026-11-03 |
+| E3 推送事件 | 2001 通知分流（撤回/删除/已读/好友/群/用户资料/在线状态/未映射兜底）、通知触发实体增量 | ✅ 2026-11-04 |
+| E4 五类实体增量 | 增量/全量回退/IDHash 校验；E4.5 用户态 SetConversation 切换（R16 闭环） | ✅ 2026-11-06 / 2026-11-11 |
+| E5 异常与重连 | 杀服自动重连重同步、离线窗口补齐、多端互踢、心跳保活、断网恢复、重连窗口发消息、HTTP 5xx 退避 | ✅ 2026-11-06 |
+| E6 存储与多账号 | SQLite 重启恢复、owner 隔离、clearData 全量重同步、内存存储模式 | ✅ 2026-11-06 |
+| E7 长稳测试 | 可选后续项 | ⏳ 未执行 |
+| E8 第三方存储上传 | FormData / Multipart / 断点续传 / Abort（真实 RustFS） | ✅ 2026-11-10 |
+
+- 测试基建：`test/integration/`（运行时环境变量控制 Skip，不用 //go:build 标签，保留 IDE 跳转）；多客户端 WithTag 标签日志；非目标消息暂存复用（推送乱序到达）
+- 缺陷闭环：14 项 BUG 全部修复，R1-R16 对接风险点全部闭环（R16 = 用户态 set_conversation，2026-11-11 服务端补路由 + SDK 封装），详见 INTEGRATION_CONCLUSIONS.md
+
+---
+
+### Phase 5: 跨语言封装 ✅ **已完成（call 层 + 平台入口）**
+
+> 前置条件已就绪：Phase 1-4.8 全部完成，真实服务端集成测试 E0-E6/E8 全绿。
+>
+> **实现状态（2026-11-12）**：
+> - ✅ `pkg/call` 反射调用内核（call.go / converter.go / middleware.go / error.go / handler.go / token.go）+ 17 项单测全绿
+> - ✅ `cmd/cgo`（main.go + export.go `//go:build cgo`，本机无 gcc 未实测 c-shared 链接）
+> - ✅ `cmd/wasm`（syscall/js 入口，`GOOS=js GOARCH=wasm` 交叉编译通过）
+> - ✅ `pkg/storage/sqlite.go` 加 `!(js && wasm)` 约束，`pkg/client` sqlite 构造拆分为平台 helper
+> - ✅ wasm IndexedDB 存储：`pkg/storage/idb_storage.go` + `cmd/wasm/idb_wrapper.js`（详见 `docs/IDB_STORAGE.md`）
+> - ✅ wasm 端到端验证（2026-11-12）：Node 与真实浏览器各 10/10 通过，修复 3 个缺陷（wasm 常驻死锁 / op 结果信封解析 / init 同步阻塞死锁），见 IDB_STORAGE.md §11
+> - ⏳ 后置：gomobile bind 实测（本机未装工具链）、cgo c-shared 链接实测（本机无 gcc）、四平台真机验证（§5.6）
+>
+> **与 §5.2 设计稿的落地差异**（以实现为准）：
+> - `Dispatcher.SetClient` 持有 `client.Client` 接口（NewClient 返回的是接口）
+> - argsJSON 约定为**位置参数 JSON 数组**（Go 反射拿不到参数名）：`'["u1","u2"]'`；单 struct 参数 `'[{...}]'`；无参 `'[]'` 或 `''`；多返回值编码为 JSON 数组
+> - 新增 `Init(configJSON)`（gomobile/wasm 场景由 call 层构建 Client）、`SetCallTimeoutSec`、`Methods()`（已注册方法清单）
+> - 登录态白名单在 §5.2 的 Login/ParseToken/Register 上增加 Status/SyncState（只读查询）
+> - `FileUploader.Upload`（io.Reader 参数）自动跳过注册，上传走 Native 侧直接 HTTP PUT
+> - call 层错误码：90010 未初始化 / 90011 未登录 / 90012 未知方法 / 90013 参数错误；panic 归一化为 90001
 >
 > **为什么需要 call 层？** gomobile / cgo / wasm 只能传 Go 基本类型（string/int/bool/[]byte），不能传 Go channel、泛型、复杂 interface。Phase 1-4 的 Client 接口返回 `(*model.SendMsgResp, error)`、`<-chan events.Event`、interface{} 载荷——这些在跨语言边界都无法直接导出。
 >
@@ -832,7 +949,7 @@ build / vet / 全量 go test ./pkg/... 全绿（含修复 hash 包缺失 test.tx
 │  Auth() / User() / Msg() / Group() / Rel() / Conv()        │
 │  Subscribe / SubscribeAll / OnConnect / OnDisconnect       │
 ├───────────────────────────────────────────────────────────┤
-│             pkg/manager 六个 Manager 实现                  │
+│             pkg/manager 八个 Manager 实现（含 Third/FileUploader） │
 ├───────────────────────────────────────────────────────────┤
 │             pkg/transport + pkg/storage                    │
 ├───────────────────────────────────────────────────────────┤
@@ -1062,29 +1179,37 @@ extern void GoimSdkSubscribe(int32_t eventType, void (*onEvent)(const char*));
 ##### Web（wasm + syscall/js）
 
 ```bash
-GOOS=js GOARCH=wasm go build -o goim.wasm -v ./wasm/cmd/main.go
-cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" ./
+GOOS=js GOARCH=wasm go build -o cmd/wasm/dist/goim.wasm ./cmd/wasm
+cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" cmd/wasm/dist/   # Go 1.26 已从 misc/wasm 迁到 lib/wasm
 ```
 
-**特殊约束**：
-- Storage 不能用 SQLite（wasm 没有文件系统），用 IndexedDB（`go-proton-idb` 或 `syscall/js` 封装）
-- `gorilla/websocket` 在 wasm 下自动降级为 `syscall/js.WebSocket`（gorilla 已内置支持）
-- Logger 输出到 `console.log`（`syscall/js.Global().Get("console").Call("log", ...)`）
-- glebarez/sqlite 在 wasm 下走 JS backend（pure-Go SQLite 有 wasm 支持）
+> `cmd/wasm/dist/` 是构建产物目录（已在 `.gitignore` 忽略）；`cmd/wasm/index.html` 是自测/演示页，
+> 本地起静态服务后打开即可跑 10 项端到端自测（详见 `docs/IDB_STORAGE.md` §11）。
 
-**JS 调用入口**（暴露到 `globalThis`）：
+**特殊约束**：
+- Storage 用 IndexedDB（`pkg/storage/idb_storage.go` + `cmd/wasm/idb_wrapper.js`），SQLite 无 js/wasm 后端
+- `gorilla/websocket` 在 wasm 下自动降级为 `syscall/js.WebSocket`（gorilla 已内置支持）
+- **会阻塞的导出函数必须是异步的**：`init` 走 `init(configJSON, onSuccess, onError)`，
+  因为 Go 打开 IndexedDB 时要等 JS Promise，而 JS 主线程不能同时卡在同步调用栈上；
+  `syncCall` 仅适用于纯本地方法（`Status` / `SyncState` / `Methods`），网络类调用必须用 `call`
+- **main 常驻必须留事件源**：`select{}` 或 `<-ch` 会被 runtime 判为 deadlock 并退出（只认 timer /
+  netpoll / 可运行 goroutine）；实现用「`time.After` 循环保活 + `shutdownCh` 作退出开关」，
+  `goimSdk.shutdown(onDone)` 可优雅退出（断开 WS → 取消监听 → Go main 返回）
+
+**JS 调用入口**（暴露到 `globalThis.goimSdk`）：
 
 ```go
-// wasm/cmd/main.go
-func init() {
-    // JS 端: globalThis.goimSdk.call("MsgMgr.SendMsg", argsJSON, (resp)=>{}, (code,msg)=>{})
-    js.Global().Set("goimSdk", js.ValueOf(map[string]interface{}{
-        "call":        js.FuncOf(callJS),
-        "subscribe":   js.FuncOf(subscribeJS),
-        "login":       js.FuncOf(loginJS),
-        "logout":      js.FuncOf(logoutJS),
-    }))
-}
+// cmd/wasm/main.go
+js.Global().Set("goimSdk", js.ValueOf(map[string]interface{}{
+    "init":        js.FuncOf(initJS),        // 回调式：init(configJSON, onSuccess, onError)
+    "call":        js.FuncOf(callJS),
+    "syncCall":    js.FuncOf(syncCallJS),
+    "subscribe":   js.FuncOf(subscribeJS),
+    "login":       js.FuncOf(loginJS),
+    "logout":      js.FuncOf(logoutJS),
+    "shutdown":    js.FuncOf(shutdownJS),    // 优雅退出：shutdown(onDone)
+    // ... status / connect / disconnect / loginWithToken / setEventCallback / updateToken
+}))
 ```
 
 #### 5.5 gomobile 约束清单（call 层必须遵守）
@@ -1120,16 +1245,21 @@ func init() {
 #### 5.7 交付产物
 
 ```
-pkg/call/                      # 反射调用层（gomobile / cgo / wasm 共用）
-  ├── call.go
-  ├── converter.go
-  ├── middleware.go
-  ├── error.go
-  └── handler.go
+pkg/call/                      # ✅ 反射调用层（gomobile / cgo / wasm 共用）
+  ├── call.go                  # Dispatcher：Init/SetClient/Call/SyncCall/MessageCall/Subscribe/生命周期导出
+  ├── converter.go             # argsJSON（位置参数 JSON 数组）↔ 反射参数/返回值
+  ├── middleware.go            # panic recover + 登录态白名单
+  ├── error.go                 # NormalizeError + call 层错误码（90010-90013）
+  ├── handler.go               # EventPayload / CallBack / RegisterCallback / 事件名映射
+  ├── token.go                 # TokenProviderBridge / UpdateToken 预取缓存
+  └── call_test.go             # 17 项单测（分发表/错误归一化/panic/事件桥接/Token 桥）
 
-cmd/cgo/main.go                # PC 平台 C 导出函数入口
-wasm/cmd/main.go               # Web 平台 syscall/js 入口
-wasm/storage/idb.go            # IndexedDB 实现（Storage 接口的 wasm 版本）
+cmd/cgo/main.go                # ✅ PC 平台入口（func main 占位，-buildmode=c-shared 要求）
+cmd/cgo/export.go              # ✅ C ABI 导出（//go:build cgo；本机无 gcc，链接实测后置）
+cmd/wasm/main.go               # ✅ Web 平台 syscall/js 入口（GOOS=js GOARCH=wasm 交叉编译通过）
+cmd/wasm/idb_wrapper.js        # ✅ 浏览器侧 IndexedDB 桥接（随 wasm 产物一起加载）
+cmd/wasm/index.html            # ✅ 端到端自测/演示页（10 项检查，见 IDB_STORAGE.md §11）
+pkg/storage/idb_storage.go     # ✅ //go:build js && wasm — IdbStorage（Storage 接口的 wasm 实现）
 ```
 
 ---
@@ -1219,7 +1349,9 @@ const (
 
 ## 9. EventType 枚举（events/event.go）
 
-覆盖文档 10.2 节全部推送事件，与 transport 解耦（transport 只负责路由到 PushHandler，EventType 判定由 handler 内 proto.Unmarshal 完成）。
+共 53 个：WS 推送 33 + 传输层生命周期 4 + 认证 3 + 同步引擎 9 + Manager 操作结果 4。
+与 transport 解耦（transport 只负责路由到 PushHandler，EventType 判定由 handler 内 proto.Unmarshal 完成）。
+同步相关事件（EventSyncStart/Finish/Failed/...Synced）见 Phase 4.6 与 docs/SYNC_ARCHITECTURE.md。
 
 ---
 
@@ -1279,11 +1411,11 @@ IDHash 复用 pkg/utils/hash.HashStringSet、双同步引擎（pkg/sync）——
 
 | 测试类型 | 工具 | 状态 |
 |---|---|---|
-| 单元测试 | `testing` | ✅ transport 33 用例通过 |
-| 接口测试 | httptest / websocket upgarde | ✅ WS 端到端（真服务端 echo） |
+| 单元测试 | `testing` + testify | ✅ 全包通过（transport/manager/client/sync/storage/utils/logger） |
+| 接口测试 | httptest / websocket upgrade | ✅ WS 端到端（真服务端 echo） |
 | 竞态交错 | 3000 次迭代 stress | ✅ TokenStore 过期删除竞态已修复 |
-| 集成测试 | mock 服务 | ⏳ Phase 4 目标 |
-| 平台编译 | gomobile + wasm | ⏳ Phase 5 目标 |
+| 集成测试 | test/integration + 真实服务端 | ✅ E0-E6/E8 全绿，14 项缺陷闭环（Phase 4.8）；E7 长稳可选未执行 |
+| 平台编译 | gomobile + wasm | ✅ wasm 交叉编译通过；gomobile bind / cgo c-shared 链接待工具链实测 |
 
 ### 已覆盖的测试点
 
@@ -1303,14 +1435,13 @@ IDHash 复用 pkg/utils/hash.HashStringSet、双同步引擎（pkg/sync）——
 github.com/gorilla/websocket         # WebSocket
 github.com/google/uuid               # 通过 uuidx 封装间接依赖
 go.uber.org/zap                      # 日志（通过 logger 接口间接依赖）
-gorm.io/gorm                         # ORM (Phase 4)
-github.com/glebarez/sqlite           # pure-Go SQLite 驱动 (Phase 4)
-github.com/PaperMan11/goim/pkg/protocol  # proto 定义（镜像）
+gorm.io/gorm                         # ORM
+github.com/glebarez/sqlite           # pure-Go SQLite 驱动（modernc）
+github.com/PaperMan11/goim           # proto 定义（pkg/protocol 镜像 + sdkws/pbsdk 类型）
+google.golang.org/protobuf           # pbsdk proto 编解码（通知 payload 类型化，Phase 4.6）
+github.com/stretchr/testify          # 测试断言
 golang.org/x/crypto                  # utils/bcrypt 依赖
 github.com/pkg/errors                # utils/hash 依赖
-github.com/golang-jwt/jwt/v4         # utils/jwtx 依赖
-github.com/PaperMan11/goim/pkg/utils/convert  # utils/convert 依赖
-github.com/PaperMan11/goim/pkg/utils/timex     # utils/timex 依赖
 ```
 
 ---
@@ -1318,15 +1449,21 @@ github.com/PaperMan11/goim/pkg/utils/timex     # utils/timex 依赖
 ## 14. 开发进度总览
 
 ```
-✅ Phase 1    model → events → logger → transport (33 单元测试)
+✅ Phase 1    model → events → logger → transport（单元测试全绿）
 ✅ Phase 2    六个 Manager interface 骨架
-✅ Phase 2.5  Client interface 骨架 + EventType 扩展（42 枚举）
+✅ Phase 2.5  Client interface 骨架 + EventType 扩展（现 53 枚举）
 ✅ Phase 3    六个 Manager 实现（WS 链路 + 事件派发）
 ✅ Phase 4    Storage 接口 + DefaultClient 完整实现（生命周期钩子入 interface、推送路由）
 ✅ Phase 4.0a time → timex 全量替换（26 文件）+ 业务转换统一走 utils/convert（7 文件）
-✅ Phase 4.0b 高频便捷回调补齐（10 个 On* + EventConnecting + 推送路由重写为 MsgData 信封 + ContentType 分流）
-✅ Phase 4.5  本地存储落地（SQLite 8 表，storage 8 测）+ 数据同步引擎（SeqSyncEngine + EntitySyncEngine，sync 10 测）+ Login 链路集成
-⏳ Phase 5    gomobile / cgo / wasm 编译输出（暂缓）  ← 下一步
+✅ Phase 4.0b 高频便捷回调补齐（On* + EventConnecting + 推送路由重写为 MsgData 信封 + ContentType 分流）
+✅ Phase 4.5  本地存储落地（SQLite 8 表）+ 双同步引擎（SeqSyncEngine + EntitySyncEngine）+ Login 链路集成
+✅ Phase 4.6  登录/同步解耦（SyncState + 后台同步 + 轮次守卫）+ 推送落库 + 通知触发定向增量 + WithTag
+✅ Phase 4.7  第三方存储 ThirdMgr + FileUploader（FormData/Multipart/断点续传，E8 真实环境通过）
+✅ Phase 4.8  真实服务端集成测试 E0-E6/E8 全绿，14 项缺陷闭环（INTEGRATION_CONCLUSIONS.md）
+✅ Phase 5    pkg/call 反射调用内核 + cgo / wasm 平台入口
+✅ Phase 5.1  wasm IndexedDB 存储 + 端到端验证（Node 与真实浏览器各 10/10，修复 3 个缺陷）
+⏳ Phase 5.2  gomobile bind 实测 + cgo c-shared 链接 + 四平台真机验证（§5.6）  ← 下一步
+⏳ E7         长稳测试（可选后续项）
 ```
 
 **每个 Phase 的完成判定**：编译通过 + 对应单元测试覆盖核心路径 + `go vet` 无告警。

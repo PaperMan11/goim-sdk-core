@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E0 冒烟 —— 对接第一步，全部后续阶段的前置（docs/INTEGRATION_TEST_PLAN.md §3 E0）

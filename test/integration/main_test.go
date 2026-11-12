@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 // 集成测试入口 —— 与 goim 服务端真实对接（docs/INTEGRATION_TEST_PLAN.md §2.2）
 //
 // 隔离机制：不使用 build tag（保证 gopls 可索引、IDE 跳转正常），

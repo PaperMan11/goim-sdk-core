@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E3 推送事件：WS 2001 系统通知分流（docs/INTEGRATION_TEST_PLAN.md §3 E3）

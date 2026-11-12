@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>goim-sdk-core wasm 端到端自测</title>
+<style>
+  body { font: 14px/1.6 -apple-system, "Segoe UI", sans-serif; margin: 24px; color: #222; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  #summary { padding: 8px 12px; border-radius: 6px; background: #f4f4f4; margin-bottom: 12px; white-space: pre-wrap; }
+  #summary.pass { background: #e6f7ec; border: 1px solid #8fd6a8; }
+  #summary.fail { background: #fdecea; border: 1px solid #f0a8a0; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #fafafa; font-weight: 600; width: 42%; }
+  td.ok { color: #147a3c; } td.bad { color: #b3261e; }
+  #log { font: 12px/1.5 Consolas, monospace; background: #111; color: #d6d6d6;
+         padding: 10px; border-radius: 6px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>goim-sdk-core · wasm 端到端自测</h1>
+<div id="summary">加载中…</div>
+<table id="steps"></table>
+<h2 style="font-size:15px;margin:16px 0 6px">日志</h2>
+<div id="log"></div>
+
+<!-- 顺序敏感：idb_wrapper.js 先注册 goimIdb，wasm_exec.js 提供 Go 类 -->
+<script src="idb_wrapper.js"></script>
+<script src="dist/wasm_exec.js"></script>
+<script>
+const logEl = document.getElementById("log");
+const stepsEl = document.getElementById("steps");
+const summaryEl = document.getElementById("summary");
+
+function log(msg) {
+  logEl.textContent += msg + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+const results = [];
+window.__selftest = { done: false, pass: true, steps: results };
+
+function record(name, pass, detail) {
+  results.push({ name, pass, detail });
+  if (!pass) window.__selftest.pass = false;
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<th>${name}</th><td class="${pass ? "ok" : "bad"}">${detail}</td>`;
+  stepsEl.appendChild(tr);
+  log(`[${pass ? "PASS" : "FAIL"}] ${name}: ${detail}`);
+}
+
+function waitFor(fn, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    (function poll() {
+      let v;
+      try { v = fn(); } catch (_) { v = undefined; }
+      if (v !== undefined && v !== null) return resolve(v);
+      if (Date.now() - t0 > timeoutMs) return reject(new Error("timeout waiting " + label));
+      setTimeout(poll, 30);
+    })();
+  });
+}
+
+// 直接读浏览器侧 IndexedDB，验证 Go 层写入确实落库
+function readIDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("goim_sdk");
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const stores = Array.from(db.objectStoreNames);
+      if (!stores.includes("meta")) return resolve({ stores, meta: [] });
+      const tx = db.transaction(["meta"], "readonly");
+      const get = tx.objectStore("meta").getAll();
+      get.onsuccess = () => resolve({ stores, meta: get.result });
+      get.onerror = () => reject(get.error);
+    };
+  });
+}
+
+(async function run() {
+  try {
+    const go = new Go();
+    const inst = await WebAssembly.instantiateStreaming(fetch("dist/goim.wasm"), go.importObject);
+    go.run(inst.instance); // 启动 Go 运行时（main 以 timer 保活），不 await 等它退出
+    log("wasm 实例已启动，等待 goimSdk 注册…");
+    await waitFor(() => window.goimSdk, 5000, "goimSdk");
+
+    // 1. IndexedDB 桥接层就绪
+    record("goimIdb 桥接脚本", typeof goimIdb === "object" && goimIdb !== null,
+      typeof goimIdb === "object" ? "goimIdb.open/op 已注册" : "未找到 goimIdb（idb_wrapper.js 未加载）");
+
+    // 2. init（异步；sessionDataPath 非空 → wasm 下走 IndexedDB）
+    //    注意：不能在 JS 同步调用里等 Go 完成——Go 打开 IndexedDB 需等 JS Promise，
+    //    而 JS 主线程会卡在调用栈上，必须用回调式
+    const initErr = await new Promise((resolve) => {
+      goimSdk.init(JSON.stringify({ sessionDataPath: "idb", platformID: 1 }),
+        () => resolve(""),
+        (code, msg) => resolve("code=" + code + " msg=" + msg));
+    });
+    record("init(configJSON)", initErr === "",
+      initErr === "" ? "Client 构建成功（IdbStorage）" : initErr);
+
+    // 3. 状态查询（未登录也应可调：白名单）
+    record("status()", goimSdk.status() === 0, "transport status = " + goimSdk.status());
+
+    const statusRes = goimSdk.syncCall("Status", "");
+    record("syncCall(Status)", statusRes.includes('"code":0'), statusRes);
+
+    const syncRes = goimSdk.syncCall("SyncState", "");
+    record("syncCall(SyncState)", syncRes.includes('"code":0'), syncRes);
+
+    // 4. 反射分发表 + 错误归一化
+    const unknownRes = goimSdk.syncCall("NoSuchMethod", "");
+    record("未知方法归一化", !unknownRes.includes('"code":0'), unknownRes);
+
+    const notLoginRes = goimSdk.syncCall("UserMgr.GetUsersInfo", '[["u1"]]');
+    record("未登录拦截", !notLoginRes.includes('"code":0'), notLoginRes);
+
+    // 5. 事件订阅 JS 桥
+    const subId = goimSdk.subscribe(2001, (evJson) => log("收到事件: " + evJson));
+    record("subscribe(2001)", typeof subId === "number" && subId > 0, "订阅 id = " + subId);
+    goimSdk.unsubscribe(subId);
+
+    // 6. IndexedDB 落库校验（init 时 deviceID 写入 meta store）
+    const idb = await readIDB();
+    const hasAllStores = idb.stores.length >= 9;
+    record("IndexedDB stores 自动建表", hasAllStores, idb.stores.join(", "));
+
+    const devRow = idb.meta.find((r) => r.key === "device_id");
+    record("deviceID 持久化到 meta", !!devRow && !!devRow.value,
+      devRow ? "device_id = " + devRow.value : "meta 中未找到 device_id");
+
+    window.__selftest.deviceID = devRow ? devRow.value : null;
+    window.__selftest.done = true;
+    summaryEl.className = window.__selftest.pass ? "pass" : "fail";
+    summaryEl.textContent = window.__selftest.pass
+      ? "全部通过（" + results.length + " 项）"
+      : "存在失败项，见下表";
+  } catch (e) {
+    window.__selftest.done = true;
+    window.__selftest.pass = false;
+    summaryEl.className = "fail";
+    summaryEl.textContent = "自测异常: " + (e && e.message ? e.message : e);
+    log("异常: " + (e && e.stack ? e.stack : e));
+  }
+})();
+</script>
+</body>
+</html>

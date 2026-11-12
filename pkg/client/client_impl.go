@@ -118,7 +118,7 @@ func NewClient(cfg *ClientConfig) Client {
 	if cfg.Storage != nil {
 		stor = cfg.Storage
 	} else if cfg.SessionDataPath != "" {
-		db, err := storage.NewSQLiteStorage(cfg.SessionDataPath, l)
+		db, err := newSQLiteStorage(cfg.SessionDataPath, l)
 		if err != nil {
 			l.Errorf("client: init sqlite storage, path=%s, error=%v", cfg.SessionDataPath, err.Error())
 			return nil

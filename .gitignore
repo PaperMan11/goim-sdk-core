@@ -40,6 +40,9 @@ go.work.sum
 *.sqlite3
 sdk_data/
 
+# wasm 构建产物（go build -o cmd/wasm/dist/goim.wasm + wasm_exec.js 拷贝）
+cmd/wasm/dist/
+
 # IDE/Agent 本地缓存
 .screenshots/
 .trae/

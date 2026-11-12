@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E1 认证与连接（docs/INTEGRATION_TEST_PLAN.md §3 E1）

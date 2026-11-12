@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // 公共测试基建：SDK Client 构造、admin 注册、事件收集与等待

@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E8 第三方存储上传（真实环境：im-api 签发预签名 → RustFS 存储）

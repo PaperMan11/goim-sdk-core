@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E5 异常与重连（docs/INTEGRATION_TEST_PLAN.md §3 E5）

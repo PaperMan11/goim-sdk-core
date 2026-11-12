@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E6 存储与多账号（docs/INTEGRATION_TEST_PLAN.md §3 E6）

@@ -1,3 +1,5 @@
+﻿//go:build !(js && wasm)
+
 package integration
 
 // E2 消息链路（docs/INTEGRATION_TEST_PLAN.md §3 E2，核心）
