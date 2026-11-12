@@ -24,11 +24,22 @@
 //	goimSdk.status()                                  → 0/1/2
 //	goimSdk.subscribe(eventType, onEvent)             → 订阅 id；goimSdk.unsubscribe(id)
 //	goimSdk.setEventCallback(cb)                      // cb(eventTypeString, payloadJSON)，null 注销
+//	goimSdk.setLogCallback(cb)                        // cb(level, msg)，null 注销；日志级别/开关走 init 的 logging 配置
 //	goimSdk.updateToken(userID, platformID, token, expireTimeSeconds)   // 预取模式 token 注入
 //	goimSdk.shutdown(onDone)                          // 优雅退出：断开 WS + 取消监听 → Go 运行时结束
 //
+// 日志回调示例（浏览器 wasm 无 stdout，SDK 日志必须经 setLogCallback 输出）：
+//
+//	// 1) 先注册回调（init 前后均可，按写入时状态动态分发）
+//	goimSdk.setLogCallback((level, msg) => console.log(`[goim-sdk][${level}] ${msg}`));
+//	// 2) 再用 logging 配置打开日志开关 / 级别（level 缺省 info；disable=true 全静默）
+//	goimSdk.init(JSON.stringify({ logging: { level: "debug", format: "console" } }),
+//	  () => console.info("sdk init ok"),
+//	  (code, msg) => console.error(`sdk init failed: ${code} ${msg}`));
+//
 // ⚠️ shutdown 后 Go 运行时返回、wasm 实例退出，goimSdk 上的其它方法全部失效；
-//    页面需重新实例化 wasm 才能再初始化。
+//
+//	页面需重新实例化 wasm 才能再初始化。
 package main
 
 import (
@@ -65,6 +76,7 @@ func main() {
 		"subscribe":        js.FuncOf(subscribeJS),
 		"unsubscribe":      js.FuncOf(unsubscribeJS),
 		"setEventCallback": js.FuncOf(setEventCallbackJS),
+		"setLogCallback":   js.FuncOf(setLogCallbackJS),
 		"updateToken":      js.FuncOf(updateTokenJS),
 		"shutdown":         js.FuncOf(shutdownJS),
 	}))
@@ -234,6 +246,25 @@ func setEventCallbackJS(this js.Value, args []js.Value) interface{} {
 		return nil
 	}
 	dispatcher.RegisterCallback(&jsEventCallback{cb: cb})
+	return nil
+}
+
+// jsLogCallback 实现 call.LogCallback
+type jsLogCallback struct{ cb js.Value }
+
+func (c *jsLogCallback) OnLog(level string, msg string) {
+	c.cb.Invoke(level, msg)
+}
+
+// setLogCallbackJS 注册日志回调（null 注销），可在 init 前后调用。
+// 浏览器 wasm 无 stdout，日志必须经此回调输出；级别/开关由 init 的 logging 配置控制。
+func setLogCallbackJS(this js.Value, args []js.Value) interface{} {
+	cb := args[0]
+	if cb.IsNull() || cb.IsUndefined() {
+		dispatcher.SetLogCallback(nil)
+		return nil
+	}
+	dispatcher.SetLogCallback(&jsLogCallback{cb: cb})
 	return nil
 }
 

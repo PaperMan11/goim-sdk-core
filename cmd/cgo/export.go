@@ -10,6 +10,10 @@ typedef void (*goim_success_cb)(char*);
 typedef void (*goim_error_cb)(int32_t, char*);
 typedef void (*goim_event_cb)(char*);
 
+// 日志回调：level 取 debug/info/warn/error，msg 为已格式化文本。
+// C 侧须线程安全且不得阻塞（SDK 在内部 goroutine 上同步调用）。
+typedef void (*goim_log_cb)(const char* level, const char* msg);
+
 // 终端模式 token 续期回调：C 侧实现，返回 malloc 的 JSON 字符串
 // {"token":"...","expireTimeSeconds":3600}；失败返回 NULL。
 // Go 侧会 free 该返回字符串。
@@ -18,6 +22,7 @@ typedef char* (*goim_token_provider_cb)(const char* userID, int32_t platformID);
 static void goim_invoke_success(goim_success_cb cb, char* s) { if (cb) cb(s); }
 static void goim_invoke_error(goim_error_cb cb, int32_t code, char* s) { if (cb) cb(code, s); }
 static void goim_invoke_event(goim_event_cb cb, char* s) { if (cb) cb(s); }
+static void goim_invoke_log(goim_log_cb cb, char* level, char* msg) { if (cb) cb(level, msg); }
 static char* goim_invoke_token_provider(goim_token_provider_cb cb, const char* userID, int32_t platformID) {
     if (!cb) return NULL;
     return cb(userID, platformID);
@@ -42,12 +47,44 @@ var dispatcher = call.NewDispatcher()
 
 // configJSON 见 pkg/call initConfig；返回空串成功，否则错误消息（调用方负责 free）。
 //
+// 日志：configJSON 的 logging 字段控制开关/级别/本地输出，例如
+// {"logging":{"level":"debug","format":"console","outputPaths":["sdk.log"]}}；
+// 不配 logging 且未注册 GoimSdkSetLogCallback 时日志静默。
+//
 //export GoimSdkInit
 func GoimSdkInit(configJSON *C.char) *C.char {
 	if err := dispatcher.Init(C.GoString(configJSON)); err != nil {
 		return C.CString(err.Error())
 	}
 	return C.CString("")
+}
+
+// —— 日志输出 ——
+
+// cLogBridge 把 C 函数指针包装成 call.LogCallback
+type cLogBridge struct{ cb C.goim_log_cb }
+
+// OnLog 实现 call.LogCallback（Go 调用回调后立即 free 字符串，C 侧须在回调内拷贝）
+func (b *cLogBridge) OnLog(level string, msg string) {
+	cl := C.CString(level)
+	cm := C.CString(msg)
+	C.goim_invoke_log(b.cb, cl, cm)
+	C.free(unsafe.Pointer(cl))
+	C.free(unsafe.Pointer(cm))
+}
+
+//export GoimSdkSetLogCallback
+//
+// 注册日志回调（C 函数指针），传 NULL 注销；可在 GoimSdkInit 之前或之后调用。
+// SDK 日志出口按写入时状态动态分发：已注册回调 → 转发 C 侧；未注册 → 回落到
+// init configJSON 的 logging 配置（outputPaths 文件 / stdout，未配置即静默）。
+// 日志级别由 logging.level 控制（缺省 info），logging.disable=true 时整体静默。
+func GoimSdkSetLogCallback(cb C.goim_log_cb) {
+	if cb == nil {
+		dispatcher.SetLogCallback(nil)
+		return
+	}
+	dispatcher.SetLogCallback(&cLogBridge{cb: cb})
 }
 
 // 异步调用：结果走 onSuccess(resultJSON) / onError(code, msg)

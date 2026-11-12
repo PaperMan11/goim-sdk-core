@@ -92,18 +92,31 @@ function readIDB() {
     record("goimIdb 桥接脚本", typeof goimIdb === "object" && goimIdb !== null,
       typeof goimIdb === "object" ? "goimIdb.open/op 已注册" : "未找到 goimIdb（idb_wrapper.js 未加载）");
 
-    // 2. init（异步；sessionDataPath 非空 → wasm 下走 IndexedDB）
+    // 2. 日志回调：浏览器 wasm 无 stdout，SDK 日志必须经 setLogCallback 注入
+    //    回调在 init 前后注册都生效；级别/开关由 init 的 logging 配置控制
+    const hasLogApi = typeof goimSdk.setLogCallback === "function";
+    if (hasLogApi) {
+      goimSdk.setLogCallback((level, msg) => log(`[sdk][${level}] ${msg}`));
+    }
+    record("setLogCallback(cb)", hasLogApi,
+      hasLogApi ? "已注册，SDK 日志将写入面板" : "当前 wasm 不含日志回调 API");
+
+    // 3. init（异步；sessionDataPath 非空 → wasm 下走 IndexedDB）
     //    注意：不能在 JS 同步调用里等 Go 完成——Go 打开 IndexedDB 需等 JS Promise，
     //    而 JS 主线程会卡在调用栈上，必须用回调式
     const initErr = await new Promise((resolve) => {
-      goimSdk.init(JSON.stringify({ sessionDataPath: "idb", platformID: 1 }),
+      goimSdk.init(JSON.stringify({
+        sessionDataPath: "idb",
+        platformID: 1,
+        logging: { level: "debug", format: "console" }, // 打开 SDK 日志开关
+      }),
         () => resolve(""),
         (code, msg) => resolve("code=" + code + " msg=" + msg));
     });
     record("init(configJSON)", initErr === "",
-      initErr === "" ? "Client 构建成功（IdbStorage）" : initErr);
+      initErr === "" ? "Client 构建成功（IdbStorage）；SDK 日志回调已注册" : initErr);
 
-    // 3. 状态查询（未登录也应可调：白名单）
+    // 4. 状态查询（未登录也应可调：白名单）
     record("status()", goimSdk.status() === 0, "transport status = " + goimSdk.status());
 
     const statusRes = goimSdk.syncCall("Status", "");
@@ -112,19 +125,19 @@ function readIDB() {
     const syncRes = goimSdk.syncCall("SyncState", "");
     record("syncCall(SyncState)", syncRes.includes('"code":0'), syncRes);
 
-    // 4. 反射分发表 + 错误归一化
+    // 5. 反射分发表 + 错误归一化
     const unknownRes = goimSdk.syncCall("NoSuchMethod", "");
     record("未知方法归一化", !unknownRes.includes('"code":0'), unknownRes);
 
     const notLoginRes = goimSdk.syncCall("UserMgr.GetUsersInfo", '[["u1"]]');
     record("未登录拦截", !notLoginRes.includes('"code":0'), notLoginRes);
 
-    // 5. 事件订阅 JS 桥
+    // 6. 事件订阅 JS 桥
     const subId = goimSdk.subscribe(2001, (evJson) => log("收到事件: " + evJson));
     record("subscribe(2001)", typeof subId === "number" && subId > 0, "订阅 id = " + subId);
     goimSdk.unsubscribe(subId);
 
-    // 6. IndexedDB 落库校验（init 时 deviceID 写入 meta store）
+    // 7. IndexedDB 落库校验（init 时 deviceID 写入 meta store）
     const idb = await readIDB();
     const hasAllStores = idb.stores.length >= 9;
     record("IndexedDB stores 自动建表", hasAllStores, idb.stores.join(", "));

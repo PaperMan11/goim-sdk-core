@@ -31,6 +31,7 @@ import (
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/client"
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
+	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
@@ -58,6 +59,11 @@ type Dispatcher struct {
 	// 全量事件回调（RegisterCallback 注册；SetClient 后自动重绑）
 	cb       CallBack
 	cbCancel context.CancelFunc
+
+	// 日志回调（SetLogCallback 注册，Init 构建的日志出口按写入时状态动态分发）
+	logCB LogCallback
+	// Init 构建的日志出口（Close 时释放其本地文件句柄；SetClient 场景为 nil）
+	logSink logger.Logger
 }
 
 // defaultCallTimeout 单次反射调用的默认超时
@@ -84,20 +90,24 @@ func (d *Dispatcher) SetCallTimeoutSec(sec int64) {
 
 // initConfig Init 的 JSON 配置（client.ClientConfig 的可序列化子集）
 type initConfig struct {
-	BaseURL         string `json:"baseURL"`         // HTTP API 基础地址（含 /api/v1 前缀）
-	Endpoint        string `json:"endpoint"`        // WS 连接地址（ws:// / wss://）
-	PlatformID      int32  `json:"platformID"`      // 默认平台 ID
-	DeviceID        string `json:"deviceID"`        // 设备 ID（空则自动生成并持久化）
-	SDKVersion      string `json:"sdkVersion"`      // SDK 版本号（空用编译期 Version）
-	Compression     string `json:"compression"`     // 压缩算法（none / gzip / zlib）
-	SessionDataPath string `json:"sessionDataPath"` // SQLite 文件路径（空用内存存储；wasm 不支持）
-	AdminSecret     string `json:"adminSecret"`     // 应用密钥（仅受信环境；终端模式用 LoginWithToken）
-	AdminUserID     string `json:"adminUserID"`     // 管理员账号（默认 imAdmin）
+	BaseURL         string         `json:"baseURL"`         // HTTP API 基础地址（含 /api/v1 前缀）
+	Endpoint        string         `json:"endpoint"`        // WS 连接地址（ws:// / wss://）
+	PlatformID      int32          `json:"platformID"`      // 默认平台 ID
+	DeviceID        string         `json:"deviceID"`        // 设备 ID（空则自动生成并持久化）
+	SDKVersion      string         `json:"sdkVersion"`      // SDK 版本号（空用编译期 Version）
+	Compression     string         `json:"compression"`     // 压缩算法（none / gzip / zlib）
+	SessionDataPath string         `json:"sessionDataPath"` // SQLite 文件路径（空用内存存储；wasm 不支持）
+	AdminSecret     string         `json:"adminSecret"`     // 应用密钥（仅受信环境；终端模式用 LoginWithToken）
+	AdminUserID     string         `json:"adminUserID"`     // 管理员账号（默认 imAdmin）
+	Logging         *logger.Config `json:"logging"`         // 日志开关/级别/本地输出（nil 时仅回调节点生效，无回调即静默）
 }
 
 // Init 按 JSON 配置构建 Client 并注入 Dispatcher（gomobile / wasm 场景入口）。
 //
 // 若此前调用过 SetTokenProvider，桥接会被包装进 ClientConfig.TokenProvider。
+//
+// 日志：configJSON 的 logging 字段控制开关/级别/本地输出（见 logger.Config）；
+// 已注册 LogCallback 时日志优先转发宿主，未注册时回落到 logging 配置的本地输出。
 // 重复调用会先 Close 旧 Client。
 func (d *Dispatcher) Init(configJSON string) error {
 	var cfg initConfig
@@ -117,6 +127,10 @@ func (d *Dispatcher) Init(configJSON string) error {
 		AdminUserID:        cfg.AdminUserID,
 	}
 
+	// 日志出口（含跨语言回调注入路径）——必须在 NewClient 前注入，
+	// 保证 Client 构建期（如 SQLite 初始化失败）的日志也能被宿主拿到
+	lg := d.replaceLogSink(cfg.Logging)
+	cc.Logger = lg
 	// TokenProvider：桥优先；其次预取缓存（wasm / 无回调平台）；
 	// 配了 AdminSecret 时保持 nil，走 core 层 admin bootstrap（见 client_impl.go refresh 闭包优先级）
 	cc.TokenProvider = d.resolveTokenProvider(cfg.AdminSecret != "")
@@ -151,10 +165,9 @@ func (d *Dispatcher) SetClient(c client.Client) {
 	d.bindCallback()
 }
 
-// Close 释放内部资源（取消事件监听；不 Close Client——所有权在注入方 / Init 方重复 Init 时才转移）
+// Close 释放内部资源（取消事件监听、关闭日志本地输出；不 Close Client——所有权在注入方 / Init 方重复 Init 时才转移）
 func (d *Dispatcher) Close() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.watchCancel != nil {
 		d.watchCancel()
 		d.watchCancel = nil
@@ -163,6 +176,11 @@ func (d *Dispatcher) Close() {
 		d.cbCancel()
 		d.cbCancel = nil
 	}
+	sink := d.logSink
+	d.logSink = nil
+	d.mu.Unlock()
+
+	closeLogSink(sink)
 }
 
 // ———————————————————————————— 反射调用内核 ————————————————————————————

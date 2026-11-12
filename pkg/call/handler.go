@@ -11,9 +11,9 @@ import (
 //
 // events.Event.Payload 是 interface{} 无法直接导出，统一序列化为 JSON string。
 type EventPayload struct {
-	Type      int32  `json:"type"`                // events.EventType 数值
-	Timestamp int64  `json:"timestamp"`           // 事件时间戳（毫秒）
-	Payload   string `json:"payload,omitempty"`   // 具体事件对象的 JSON 序列化（空串表示无载荷）
+	Type      int32  `json:"type"`              // events.EventType 数值
+	Timestamp int64  `json:"timestamp"`         // 事件时间戳（毫秒）
+	Payload   string `json:"payload,omitempty"` // 具体事件对象的 JSON 序列化（空串表示无载荷）
 }
 
 // CallBack 唯一的跨语言回调契约（gomobile 硬约束：Native 只能实现单方法 interface）

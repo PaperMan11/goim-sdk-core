@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Logger 通用日志接口（printf 风格）
@@ -112,20 +113,36 @@ const (
 //	l := logger.New(&logger.Config{Level: logger.LevelDebug, Format: logger.FormatConsole})
 type Config struct {
 	// Disable 禁用日志（true 时 New 返回 NopLogger，默认 false）
-	Disable bool
+	Disable bool `json:"disable"`
 
 	// Level 日志级别：debug / info / warn / error；为空或非法值按 info 处理
-	Level string
+	Level string `json:"level"`
 
 	// Format 输出格式：console / json；为空或非法值按 console 处理
-	Format string
+	Format string `json:"format"`
 
 	// OutputPaths 输出目标：["stdout"] / ["stderr"] / 文件路径（可多个，如 ["sdk.log"]）
 	// 为空时默认 ["stdout"]；路径不可用时降级 stdout
-	OutputPaths []string
+	OutputPaths []string `json:"outputPaths"`
 
 	// Development 开发模式：console 彩色级别 + Warn 及以上打印调用堆栈
-	Development bool
+	Development bool `json:"development"`
+}
+
+// LevelValue 日志级别的可比较数值（Debug=0 Info=1 Warn=2 Error=3）
+//
+// 供自建日志出口按阈值过滤；空或非法值按 Info(1) 处理，与 New 的级别归一化一致。
+func LevelValue(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case LevelDebug:
+		return 0
+	case LevelWarn:
+		return 2
+	case LevelError:
+		return 3
+	default:
+		return 1
+	}
 }
 
 // NopLogger 空实现 —— 测试/禁用日志时用
