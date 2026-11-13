@@ -1,3 +1,5 @@
+//go:build !(js && wasm)
+
 package transport
 
 import (
@@ -24,22 +26,6 @@ const (
 	wsSendTimeout       = 5 * timex.Second
 	wsResponseTimeout   = 15 * timex.Second
 )
-
-// encodeQuery 把认证参数编码为 URL query（WS 特有，与服务端字段名逐一对齐）
-func encodeQuery(p ConnectParams) url.Values {
-	q := url.Values{}
-	q.Set("userID", p.UserID)
-	q.Set("token", p.Token)
-	q.Set("platformID", convert.ToString(p.PlatformID))
-	q.Set("deviceID", p.DeviceID)
-	q.Set("operationID", p.OperationID)
-	q.Set("sendResponse", convert.ToString(p.SendResponse))
-	q.Set("isBackground", convert.ToString(p.IsBackground))
-	q.Set("compression", p.Compression)
-	q.Set("sdkType", p.SDKType)
-	q.Set("sdkVersion", p.SDKVersion)
-	return q
-}
 
 // DefaultWSClient WebSocket 传输层实现（读写分离 + encoder/compressor + 消息路由）
 //
