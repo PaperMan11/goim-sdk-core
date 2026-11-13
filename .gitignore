@@ -43,6 +43,9 @@ sdk_data/
 # wasm 构建产物（go build -o cmd/wasm/dist/goim.wasm + wasm_exec.js 拷贝）
 cmd/wasm/dist/
 
+# PC 动态库 / gomobile 产物（make dist）
+dist/
+
 # IDE/Agent 本地缓存
 .screenshots/
 .trae/
