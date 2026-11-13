@@ -141,17 +141,18 @@ for ev := range ch {
 
 ```bash
 # iOS / Android（gomobile）
-gomobile bind -target=ios     -o goim-sdk.framework ./pkg/call
-gomobile bind -target=android -o goim-sdk.aar      ./pkg/call
+gomobile bind -target=ios     -o dist/goim-sdk.framework ./pkg/call
+gomobile bind -target=android -o dist/goim-sdk.aar      ./pkg/call
 
 # PC 桌面（cgo C ABI，导出 GoimSdkInit / GoimSdkCall / GoimSdkSetLogCallback 等）
-CGO_ENABLED=1 go build -buildmode=c-shared -o goim-sdk.dll ./cmd/cgo
+CGO_ENABLED=1 go build -buildmode=c-shared -o dist/goim-sdk.dll ./cmd/cgo
 
-# Web（wasm）
-GOOS=js GOARCH=wasm go build -o cmd/wasm/dist/goim.wasm ./cmd/wasm
+# Web（wasm）：与动态库统一输出到 dist/
+GOOS=js GOARCH=wasm go build -o dist/goim.wasm ./cmd/wasm
+cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" dist/
 ```
 
-Web 侧把 `wasm_exec.js`、`idb_wrapper.js`、`goim.wasm` 放到同一目录，打开 `cmd/wasm/index.html` 可跑自测页（init / 状态 / IDB 建表 / 事件订阅 / 日志回调）。
+Web 侧 `make wasm` 会把 `goim.wasm`、`wasm_exec.js` 输出到根目录 `dist/`（与 `goim-sdk.dll` 等动态库产物同目录）；自测页 `cmd/wasm/index.html` 通过 `../dist/` 加载，起静态服务时以**仓库根目录**为根，打开 `/cmd/wasm/index.html` 即可（init / 状态 / IDB 建表 / 事件订阅 / 日志回调）。
 
 ## 日志
 

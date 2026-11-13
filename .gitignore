@@ -40,10 +40,7 @@ go.work.sum
 *.sqlite3
 sdk_data/
 
-# wasm 构建产物（go build -o cmd/wasm/dist/goim.wasm + wasm_exec.js 拷贝）
-cmd/wasm/dist/
-
-# PC 动态库 / gomobile 产物（make dist）
+# 构建产物统一输出目录（wasm / PC 动态库 / gomobile）
 dist/
 
 # IDE/Agent 本地缓存

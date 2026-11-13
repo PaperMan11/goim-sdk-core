@@ -4,8 +4,8 @@
 //
 // 构建：
 //
-//	GOOS=js GOARCH=wasm go build -o goim.wasm ./cmd/wasm
-//	cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" ./
+//	GOOS=js GOARCH=wasm go build -o dist/goim.wasm ./cmd/wasm
+//	cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" dist/
 //
 // JS 侧调用（全部挂到 globalThis.goimSdk）：
 //

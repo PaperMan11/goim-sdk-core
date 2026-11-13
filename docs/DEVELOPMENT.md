@@ -1179,12 +1179,12 @@ extern void GoimSdkSubscribe(int32_t eventType, void (*onEvent)(const char*));
 ##### Web（wasm + syscall/js）
 
 ```bash
-GOOS=js GOARCH=wasm go build -o cmd/wasm/dist/goim.wasm ./cmd/wasm
-cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" cmd/wasm/dist/   # Go 1.26 已从 misc/wasm 迁到 lib/wasm
+GOOS=js GOARCH=wasm go build -o dist/goim.wasm ./cmd/wasm
+cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" dist/   # Go 1.26 已从 misc/wasm 迁到 lib/wasm
 ```
 
-> `cmd/wasm/dist/` 是构建产物目录（已在 `.gitignore` 忽略）；`cmd/wasm/index.html` 是自测/演示页，
-> 本地起静态服务后打开即可跑 10 项端到端自测（详见 `docs/IDB_STORAGE.md` §11）。
+> `dist/` 是统一构建产物目录（wasm 与 PC 动态库同目录，已在 `.gitignore` 忽略）；
+> `cmd/wasm/index.html` 是自测/演示页，通过 `../dist/` 加载产物，本地起静态服务后打开即可跑 10 项端到端自测（详见 `docs/IDB_STORAGE.md` §11）。
 
 **特殊约束**：
 - Storage 用 IndexedDB（`pkg/storage/idb_storage.go` + `cmd/wasm/idb_wrapper.js`），SQLite 无 js/wasm 后端

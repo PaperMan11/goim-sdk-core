@@ -34,8 +34,8 @@ cmd/wasm/
 └── idb_wrapper.js        # 浏览器侧 JS 桥接（宿主页面随 wasm 产物一起加载）
 ```
 
-> `idb_wrapper.js` 放在 `cmd/wasm/`：它与 `goim.wasm`、`wasm_exec.js` 同属 Web 运行时资源，
-> 构建产物和宿主 `index.html` 都落在这个目录，一次拷贝即可部署。
+> `idb_wrapper.js` 放在 `cmd/wasm/`：它与宿主 `index.html` 同属 Web 运行时资源；
+> `goim.wasm`、`wasm_exec.js` 等构建产物统一输出到仓库根目录 `dist/`（与 PC 动态库同目录），页面通过 `../dist/` 加载。
 
 **不需要单独目录**。wasm 平台只有这一对实现，和 SQLite 对称，走 build tag 区分即可。`wasm/storage/idb.go` 的原始设计（已废弃）是多此一举。
 
@@ -349,17 +349,17 @@ wasm 单线程事件循环 → 所有 Go 方法调用在主 goroutine 串行执�
 
 ```powershell
 # 1) 构建 wasm（产物被 .gitignore 忽略）；Windows PowerShell 写法
-New-Item -ItemType Directory -Force cmd\wasm\dist | Out-Null
+New-Item -ItemType Directory -Force dist | Out-Null
 $env:GOOS="js"; $env:GOARCH="wasm"
-go build -o cmd\wasm\dist\goim.wasm ./cmd/wasm
-Copy-Item "$(go env GOROOT)\lib\wasm\wasm_exec.js" cmd\wasm\dist\wasm_exec.js -Force
+go build -o dist\goim.wasm ./cmd/wasm
+Copy-Item "$(go env GOROOT)\lib\wasm\wasm_exec.js" dist\wasm_exec.js -Force
 # Go 1.26 的 wasm_exec.js 在 lib/wasm（早期版本在 misc/wasm）
 
 # 2) 起本地静态服务（wasm 不能用 file:// 加载；.wasm 必须是 application/wasm）
-#    在项目根目录执行，无需安装依赖
-node -e "const h=require('http'),f=require('fs'),p=require('path');const root='cmd/wasm';h.createServer((q,s)=>{const u=q.url.split('?')[0];const fp=p.join(root,u==='/'?'index.html':u);f.readFile(fp,(e,d)=>{if(e){s.writeHead(404);return s.end('not found')}const m={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.wasm':'application/wasm'}[p.extname(fp)]||'application/octet-stream';s.writeHead(200,{'Content-Type':m,'Cache-Control':'no-store'});s.end(d)})}).listen(8765,'127.0.0.1',()=>console.log('http://127.0.0.1:8765/index.html'))"
+#    在项目根目录执行（root='.'），无需安装依赖
+node -e "const h=require('http'),f=require('fs'),p=require('path');const root='.';h.createServer((q,s)=>{const u=q.url.split('?')[0];const fp=p.join(root,u==='/'?'cmd/wasm/index.html':u);f.readFile(fp,(e,d)=>{if(e){s.writeHead(404);return s.end('not found')}const m={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.wasm':'application/wasm'}[p.extname(fp)]||'application/octet-stream';s.writeHead(200,{'Content-Type':m,'Cache-Control':'no-store'});s.end(d)})}).listen(8765,'127.0.0.1',()=>console.log('http://127.0.0.1:8765/cmd/wasm/index.html'))"
 
-# 3) 浏览器打开 http://127.0.0.1:8765/index.html
+# 3) 浏览器打开 http://127.0.0.1:8765/cmd/wasm/index.html
 #    页面加载后自动跑 10 项自测，结果写 window.__selftest
 ```
 
@@ -370,7 +370,7 @@ node -e "const h=require('http'),f=require('fs'),p=require('path');const root='c
 - DevTools → Application → IndexedDB → `goim_sdk`，应看到 9 个 store，`meta` 里有 `device_id`
 - 控制台可手动验证优雅退出：`goimSdk.shutdown(() => console.log('shutdown done'))`（执行后实例退出，需刷新页面重新加载）
 
-`cmd/wasm/index.html` 是自测/演示页，script 顺序：`idb_wrapper.js` → `dist/wasm_exec.js` → 实例化 `dist/goim.wasm`。
+`cmd/wasm/index.html` 是自测/演示页，script 顺序：`idb_wrapper.js` → `../dist/wasm_exec.js` → 实例化 `../dist/goim.wasm`。
 Node 侧自测脚本额外覆盖 2 项 shutdown 验证（页面不自动跑：`shutdown` 会结束 Go 运行时，实例不可再用）。
 
 ### 11.2 覆盖项（12 项，Node 全跑通过；浏览器覆盖前 10 项）

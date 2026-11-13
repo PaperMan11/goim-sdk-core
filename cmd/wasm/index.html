@@ -26,7 +26,7 @@
 
 <!-- 顺序敏感：idb_wrapper.js 先注册 goimIdb，wasm_exec.js 提供 Go 类 -->
 <script src="idb_wrapper.js"></script>
-<script src="dist/wasm_exec.js"></script>
+<script src="../dist/wasm_exec.js"></script>
 <script>
 const logEl = document.getElementById("log");
 const stepsEl = document.getElementById("steps");
@@ -83,7 +83,7 @@ function readIDB() {
 (async function run() {
   try {
     const go = new Go();
-    const inst = await WebAssembly.instantiateStreaming(fetch("dist/goim.wasm"), go.importObject);
+    const inst = await WebAssembly.instantiateStreaming(fetch("../dist/goim.wasm"), go.importObject);
     go.run(inst.instance); // 启动 Go 运行时（main 以 timer 保活），不 await 等它退出
     log("wasm 实例已启动，等待 goimSdk 注册…");
     await waitFor(() => window.goimSdk, 5000, "goimSdk");
