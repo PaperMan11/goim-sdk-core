@@ -269,6 +269,15 @@ func (b *baseTransport) routeMessage(resp *Response) {
 	}
 }
 
+// 重连策略：指数退避重拨，连续失败达到上限后放弃
+//
+// 服务长期不可用时无限重拨会让宿主（尤其浏览器）在每个退避周期产生一次连接错误，
+// 因此连续失败 reconnectMaxAttempts 次后停止，由上层（用户重新登录 / 手动 Connect）恢复。
+const (
+	reconnectMaxAttempts = 5
+	reconnectMaxBackoff  = 30 * timex.Second
+)
+
 // runReconnectLoop 通用指数退避重连循环
 // 使用之前在 Connect 时注入的 reconnectDial / reconnectOnConnected
 func (b *baseTransport) runReconnectLoop() {
@@ -300,6 +309,7 @@ func (b *baseTransport) runReconnectLoop() {
 	b.setState(TransportStatusDisconnected)
 
 	backoff := timex.Second
+	attempts := 0
 	for {
 		// 主动 Disconnect 会 cancel 该 ctx，立刻结束重连
 		select {
@@ -338,12 +348,19 @@ func (b *baseTransport) runReconnectLoop() {
 			return
 		}
 
+		attempts++
 		b.logger.Warnf("transport reconnect failed, target=%s, error=%v", b.reconnectTarget, err)
 		b.setState(TransportStatusDisconnected)
 
+		// 连续失败达到上限：停止重连并停留在 Disconnected，避免持续刷连接错误
+		if attempts >= reconnectMaxAttempts {
+			b.logger.Errorf("transport reconnect gave up after %d attempts, target=%s", attempts, b.reconnectTarget)
+			return
+		}
+
 		backoff *= 2
-		if backoff > 30*timex.Second {
-			backoff = 30 * timex.Second
+		if backoff > reconnectMaxBackoff {
+			backoff = reconnectMaxBackoff
 		}
 	}
 }
