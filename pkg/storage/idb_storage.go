@@ -67,6 +67,18 @@ func awaitPromise(promise js.Value) (js.Value, error) {
 	}
 }
 
+// stringifyJS 把 js.Value 序列化为 JSON 文本。
+//
+// js.Value 未实现 json.Marshaler（结构体字段全部不可导出），encoding/json 直接
+// 序列化只会得到 "{}"，必须回到 JS 侧 JSON.stringify。
+func stringifyJS(v js.Value) ([]byte, error) {
+	encoded := js.Global().Get("JSON").Call("stringify", v)
+	if encoded.Type() != js.TypeString {
+		return nil, fmt.Errorf("JSON.stringify result type %s", encoded.Type().String())
+	}
+	return []byte(encoded.String()), nil
+}
+
 func NewIdbStorage() (*IdbStorage, error) {
 	g := js.Global().Get("goimIdb")
 	if g.IsUndefined() || g.IsNull() {
@@ -122,7 +134,7 @@ func (s *IdbStorage) opJSONList(operation string, args any) ([]json.RawMessage, 
 	if v.IsNull() || v.IsUndefined() || !v.Truthy() {
 		return nil, nil
 	}
-	bs, err := json.Marshal(v)
+	bs, err := stringifyJS(v)
 	if err != nil {
 		return nil, fmt.Errorf("storage: %s marshal result: %w", operation, err)
 	}
@@ -168,25 +180,18 @@ func (s *IdbStorage) GetMaxSeqs(owner string) (map[string]int64, map[string]int6
 	if v.IsNull() || v.IsUndefined() || !v.Truthy() {
 		return nil, nil, nil
 	}
-	bs, err := json.Marshal(v)
-	if err != nil {
-		return nil, nil, err
-	}
-	var seqs struct {
-		MaxSeqsJSON string `json:"maxSeqsJSON"`
-		MinSeqsJSON string `json:"minSeqsJSON"`
-	}
-	if err := json.Unmarshal(bs, &seqs); err != nil {
-		return nil, nil, fmt.Errorf("storage: getMaxSeqs row: %w", err)
-	}
+	// 直接读字段（js.Value 无 MarshalJSON，不能 json.Marshal(v)）
+	maxJSON := v.Get("maxSeqsJSON").String()
+	minJSON := v.Get("minSeqsJSON").String()
+
 	var maxSeqs, minSeqs map[string]int64
-	if seqs.MaxSeqsJSON != "" {
-		if err := json.Unmarshal([]byte(seqs.MaxSeqsJSON), &maxSeqs); err != nil {
+	if maxJSON != "" {
+		if err := json.Unmarshal([]byte(maxJSON), &maxSeqs); err != nil {
 			return nil, nil, fmt.Errorf("storage: getMaxSeqs maxSeqsJSON: %w", err)
 		}
 	}
-	if seqs.MinSeqsJSON != "" {
-		if err := json.Unmarshal([]byte(seqs.MinSeqsJSON), &minSeqs); err != nil {
+	if minJSON != "" {
+		if err := json.Unmarshal([]byte(minJSON), &minSeqs); err != nil {
 			return nil, nil, fmt.Errorf("storage: getMaxSeqs minSeqsJSON: %w", err)
 		}
 	}
