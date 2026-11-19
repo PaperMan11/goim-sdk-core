@@ -119,6 +119,16 @@ for ev := range ch {
 | `SetTokenProvider` / `UpdateToken` | 终端模式 token 桥 / 预取 token 注入 |
 | `SetLogCallback(LogCallback)` | 宿主接收 SDK 日志（`OnLog(level, msg)`） |
 | `SetCallTimeoutSec` / `Methods()` | 调用超时 / 已注册方法清单 |
+| `UnreadCount(convID)` / `UnreadTotal` | 本地未读数（离线可用，按 `hasReadSeq` 推导，见下） |
+| `GetHistoryMsgs(convID, beforeSeq, count)` / `GetNewerMsgs(convID, afterSeq, count)` | 服务端分页历史 / 更新消息（结果写入本地缓存） |
+
+本地未读：`UnreadCount(conversationID)` / `UnreadTotal()` 不发起网络请求，`hasReadSeq` 取本地已读消息的最大 seq，
+未读数 = 缓存中 `seq > hasReadSeq` 且未撤回的条数；消息缓存不完整时结果为下界，跨端一致性依赖 2200 已读回执，
+其他端已读而本端未收到回执时会偏大。需要服务端精确值用 `ConvMgr.GetSortedConversationList`（返回 `unreadTotal` / `unreadCount`）。
+
+历史消息：`GetHistoryMsgs` 走 `POST /msg/pull_msg_by_seq`（HTTP，不依赖 WS），降序返回区间内最新一批；
+首屏传 `beforeSeq<=0`，上滑加载更早传上一页 `page.OldestSeq-1`（闭区间）；`GetNewerMsgs` 升序补齐更新的消息。
+拉取结果自动 upsert 到本地消息缓存，重装/冷启动后可逐页回填，不再只依赖增量同步。
 
 可用方法名见 `Dispatcher.Methods()`，例如 `MsgMgr.SendMsg`、`UserMgr.GetUsersInfo`、`ConvMgr.GetAllConversations`。
 

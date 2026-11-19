@@ -333,6 +333,20 @@ func (d *Dispatcher) buildMethodTable() {
 	d.methods["SyncState"] = reflect.ValueOf(func(ctx context.Context) int32 {
 		return int32(c.SyncState())
 	})
+	// 本地未读查询（离线可用）：UnreadCount("convID") / UnreadTotal()
+	d.methods["UnreadCount"] = reflect.ValueOf(func(ctx context.Context, conversationID string) (int64, error) {
+		return c.UnreadCount(conversationID)
+	})
+	d.methods["UnreadTotal"] = reflect.ValueOf(func(ctx context.Context) (int64, error) {
+		return c.UnreadTotal()
+	})
+	// 服务端分页历史（写入本地缓存）：GetHistoryMsgs(convID, beforeSeq, count) / GetNewerMsgs(convID, afterSeq, count)
+	d.methods["GetHistoryMsgs"] = reflect.ValueOf(func(ctx context.Context, conversationID string, beforeSeq int64, count int32) (*model.HistoryMsgsPage, error) {
+		return c.GetHistoryMsgs(ctx, conversationID, beforeSeq, count)
+	})
+	d.methods["GetNewerMsgs"] = reflect.ValueOf(func(ctx context.Context, conversationID string, afterSeq int64, count int32) (*model.HistoryMsgsPage, error) {
+		return c.GetNewerMsgs(ctx, conversationID, afterSeq, count)
+	})
 
 	// 2. Manager 接口方法反射注册
 	for _, recv := range managerReceivers {

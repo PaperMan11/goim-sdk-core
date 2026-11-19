@@ -1081,6 +1081,139 @@ func (c *DefaultClient) applyMsgCache(name, conversationID string, fn func(owner
 	}
 }
 
+// UnreadCount 本地推导的单会话未读数（离线可用，不发网络请求）。
+//
+// 推导规则：hasReadSeq 取本地缓存中已读（IsRead=true）消息的最大 seq；
+// 未读数 = 缓存中 seq > hasReadSeq 且未撤回的条数。
+// 消息缓存不完整（只缓存了最近若干条）时结果为下界；其他端已读而本端
+// 未收到 2200 回执时结果偏大——跨端一致性有限，需要精确值时应走服务端
+// ConvMgr.GetSortedConversationList（返回 unreadTotal / unreadCount）。
+func (c *DefaultClient) UnreadCount(conversationID string) (int64, error) {
+	if conversationID == "" {
+		return 0, fmt.Errorf("unread count: conversationID is empty")
+	}
+	owner, err := c.localOwner()
+	if err != nil {
+		return 0, err
+	}
+	convs, err := c.storage.ListConversations(owner)
+	if err != nil {
+		return 0, fmt.Errorf("unread count: list conversations: %w", err)
+	}
+	var conv *model.Conversation
+	for _, cv := range convs {
+		if cv != nil && cv.ConversationID == conversationID {
+			conv = cv
+			break
+		}
+	}
+	return c.unreadCountFor(owner, conversationID, conv)
+}
+
+// UnreadTotal 本地推导的全部业务会话未读总和（不含 n_ 通知会话）
+func (c *DefaultClient) UnreadTotal() (int64, error) {
+	owner, err := c.localOwner()
+	if err != nil {
+		return 0, err
+	}
+	convs, err := c.storage.ListConversations(owner)
+	if err != nil {
+		return 0, fmt.Errorf("unread total: list conversations: %w", err)
+	}
+	var total int64
+	for _, cv := range convs {
+		if cv == nil || manager.IsNotificationConversation(cv.ConversationID) {
+			continue
+		}
+		n, err := c.unreadCountFor(owner, cv.ConversationID, cv)
+		if err != nil {
+			c.logger.Warnf("client: unread total skip conv=%s, error=%v", cv.ConversationID, err.Error())
+			continue
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// localOwner 当前登录用户（本地查询的数据隔离维度）
+func (c *DefaultClient) localOwner() (string, error) {
+	c.mu.RLock()
+	owner := c.userID
+	c.mu.RUnlock()
+	if owner == "" {
+		return "", fmt.Errorf("unread: not logged in")
+	}
+	return owner, nil
+}
+
+// unreadCountFor 单会话未读推导；消息缓存为空时回落到会话缓存的 unreadCount 字段。
+func (c *DefaultClient) unreadCountFor(owner, conversationID string, conv *model.Conversation) (int64, error) {
+	msgs, err := c.storage.ListMsgsByConversation(owner, conversationID)
+	if err != nil {
+		return 0, fmt.Errorf("unread count: list msgs of %s: %w", conversationID, err)
+	}
+	if len(msgs) == 0 {
+		if conv != nil && conv.UnreadCount > 0 {
+			return int64(conv.UnreadCount), nil
+		}
+		return 0, nil
+	}
+	var hasReadSeq int64
+	for _, m := range msgs {
+		if m != nil && m.IsRead && m.Seq > hasReadSeq {
+			hasReadSeq = m.Seq
+		}
+	}
+	var unread int64
+	for _, m := range msgs {
+		if m == nil || m.Seq <= hasReadSeq || m.Status == model.MsgStatusRevoked {
+			continue
+		}
+		unread++
+	}
+	return unread, nil
+}
+
+// GetHistoryMsgs 服务端分页历史消息（降序，最新在前），结果写入本地消息缓存。
+//
+// 分页：第 1 页传 beforeSeq<=0；之后传上一页的 OldestSeq-1（服务端区间为闭区间）。
+func (c *DefaultClient) GetHistoryMsgs(ctx context.Context, conversationID string, beforeSeq int64, count int32) (*model.HistoryMsgsPage, error) {
+	page, err := c.msg.PullHistoryMsgs(ctx, conversationID, 1, beforeSeq, count, 1)
+	if err != nil {
+		return nil, err
+	}
+	c.cacheFetchedMsgs("history", conversationID, page)
+	return page, nil
+}
+
+// GetNewerMsgs 服务端分页增量消息（升序），用于补齐比本地更新的消息，结果写入本地缓存。
+func (c *DefaultClient) GetNewerMsgs(ctx context.Context, conversationID string, afterSeq int64, count int32) (*model.HistoryMsgsPage, error) {
+	begin := afterSeq
+	if begin < 0 {
+		begin = 0
+	}
+	page, err := c.msg.PullHistoryMsgs(ctx, conversationID, begin+1, 0, count, 0)
+	if err != nil {
+		return nil, err
+	}
+	c.cacheFetchedMsgs("newer", conversationID, page)
+	return page, nil
+}
+
+// cacheFetchedMsgs 把服务端拉取的消息写入本地缓存（未登录/空页时跳过）
+func (c *DefaultClient) cacheFetchedMsgs(name, conversationID string, page *model.HistoryMsgsPage) {
+	if page == nil || len(page.Msgs) == 0 {
+		return
+	}
+	owner, err := c.localOwner()
+	if err != nil {
+		return
+	}
+	if err := c.storage.UpsertMsgs(owner, page.Msgs); err != nil {
+		c.logger.Warnf("client: cache %s msgs of conv=%s, error=%v", name, conversationID, err.Error())
+	}
+}
+
 // extractNotificationDetail 解出通知 Detail：Content = JSON(NotificationElem{Detail: JSON(tips)})
 func extractNotificationDetail(content string) string {
 	elem := &pbsdk.NotificationElem{}

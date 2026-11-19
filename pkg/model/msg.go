@@ -57,6 +57,17 @@ type PullMsgsResult struct {
 	EndSeq string     `json:"endSeq"`
 }
 
+// HistoryMsgsPage 服务端分页历史消息结果（单会话）
+type HistoryMsgsPage struct {
+	Msgs []*MsgData `json:"msgs"`
+	// IsEnd 服务端标记的区间末尾（isEnd 语义见服务端 PullOrder）
+	IsEnd bool `json:"isEnd"`
+	// OldestSeq / NewestSeq 本页实际最小、最大 seq；继续向更早翻页时
+	// 以 OldestSeq-1 作为下一次 beforeSeq
+	OldestSeq int64 `json:"oldestSeq"`
+	NewestSeq int64 `json:"newestSeq"`
+}
+
 // SeqRange 消息 seq 范围查询（Begin/End 对齐服务端 proto int64）
 type SeqRange struct {
 	ConversationID string `json:"conversationID"`

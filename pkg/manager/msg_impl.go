@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"google.golang.org/protobuf/proto"
 
@@ -201,6 +202,78 @@ func (m *DefaultMsgMgr) PullMsgBySeq(ctx context.Context, userID string, seqRang
 		}
 	}
 	return result, nil
+}
+
+// 历史消息分页参数
+const (
+	// DefaultHistoryPageSize 历史消息默认单页条数
+	DefaultHistoryPageSize int32 = 20
+	// MaxHistoryPageSize 历史消息单页上限
+	MaxHistoryPageSize int32 = 100
+)
+
+// PullHistoryMsgs 服务端分页历史消息（HTTP /msg/pull_msg_by_seq）
+//
+// 与 WS 版 PullMsgBySeq 的差异：
+//   - 走 HTTP，未建立 WS 连接也能用（重装/冷启动补历史）
+//   - 单会话 + 单页语义，返回本页 msgs/OldestSeq/NewestSeq，便于连续翻页
+//
+// 翻页方式（降序加载更早消息）：
+//
+//	第 1 页：PullHistoryMsgs(conv, 1, 0, 20, 1)            // 最新 20 条
+//	第 n 页：PullHistoryMsgs(conv, 1, page.OldestSeq-1, 20, 1)
+func (m *DefaultMsgMgr) PullHistoryMsgs(ctx context.Context, conversationID string, beginSeq, endSeq int64, count int32, order int32) (*model.HistoryMsgsPage, error) {
+	if conversationID == "" {
+		return nil, fmt.Errorf("pull history: conversationID is empty")
+	}
+	if count <= 0 {
+		count = DefaultHistoryPageSize
+	}
+	if count > MaxHistoryPageSize {
+		count = MaxHistoryPageSize
+	}
+	if beginSeq <= 0 {
+		beginSeq = 1
+	}
+	if endSeq <= 0 {
+		endSeq = math.MaxInt64
+	}
+
+	req := &pbsdk.PullMessageBySeqsReq{
+		UserID: m.senderID,
+		SeqRanges: []*pbsdk.SeqRange{{
+			ConversationID: conversationID,
+			Begin:          beginSeq,
+			End:            endSeq,
+			Num:            int64(count),
+		}},
+		Order: pbsdk.PullOrder(order),
+	}
+	var resp pbsdk.PullMessageBySeqsResp
+	if err := m.http.Post(ctx, "/msg/pull_msg_by_seq", req, &resp); err != nil {
+		return nil, fmt.Errorf("pull history msgs: %w", err)
+	}
+
+	page := &model.HistoryMsgsPage{Msgs: []*model.MsgData{}}
+	pbMsgs := resp.Msgs[conversationID]
+	if pbMsgs == nil {
+		pbMsgs = resp.NotificationMsgs[conversationID]
+	}
+	if pbMsgs == nil {
+		return page, nil
+	}
+	page.Msgs = fromProtoMsgList(pbMsgs.Msgs)
+	page.IsEnd = pbMsgs.IsEnd
+	for _, mm := range page.Msgs {
+		mm.ConversationID = conversationID // 服务端 MsgData 无会话字段，按请求回填
+		if page.OldestSeq == 0 || mm.Seq < page.OldestSeq {
+			page.OldestSeq = mm.Seq
+		}
+		if mm.Seq > page.NewestSeq {
+			page.NewestSeq = mm.Seq
+		}
+	}
+	return page, nil
 }
 
 // —— HTTP 接口 ——

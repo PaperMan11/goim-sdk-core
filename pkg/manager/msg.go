@@ -20,6 +20,10 @@ type MsgMgr interface {
 	BatchSendMsg(ctx context.Context, recvIDList []string, msg *model.MsgData) (*model.SendMsgResp, error)
 	NewestSeq(ctx context.Context) (maxSeqs, minSeqs map[string]int64, err error)
 	PullMsgBySeq(ctx context.Context, userID string, seqRanges []*model.SeqRange, order int32) (map[string]*model.PullMsgsResult, error)
+	// PullHistoryMsgs 服务端分页历史消息（HTTP /msg/pull_msg_by_seq，不依赖 WS 连接）。
+	// beginSeq/endSeq 为闭区间（<=0 表示该端不限制），count 为单页上限（<=0 用默认 20，上限 100），
+	// order 0=升序（区间内最早一批）/ 1=降序（区间内最新一批，结果最新在前）。
+	PullHistoryMsgs(ctx context.Context, conversationID string, beginSeq, endSeq int64, count int32, order int32) (*model.HistoryMsgsPage, error)
 	RevokeMsg(ctx context.Context, conversationID string, seq int64) error
 	MarkMsgsAsRead(ctx context.Context, conversationID string, seqs []int64) error
 	MarkConversationAsRead(ctx context.Context, conversationID string, hasReadSeq int64, seqs []int64) error
