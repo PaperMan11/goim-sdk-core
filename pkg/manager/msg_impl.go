@@ -273,6 +273,13 @@ func (m *DefaultMsgMgr) PullHistoryMsgs(ctx context.Context, conversationID stri
 			page.NewestSeq = mm.Seq
 		}
 	}
+	// 服务端 isEnd 是"请求区间是否覆盖边界"的语义（end<=0 时恒为 true），
+	// 不能直接用于翻页终止；这里按页大小推导同方向是否还有下一批。
+	if order == 1 {
+		page.HasMore = int32(len(page.Msgs)) >= count && page.OldestSeq > 1
+	} else {
+		page.HasMore = int32(len(page.Msgs)) >= count
+	}
 	return page, nil
 }
 

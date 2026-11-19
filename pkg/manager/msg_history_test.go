@@ -53,6 +53,7 @@ func TestPullHistoryMsgsHTTP(t *testing.T) {
 	require.Equal(t, int64(7), page.OldestSeq)
 	require.Equal(t, int64(8), page.NewestSeq)
 	require.Equal(t, "si_x", page.Msgs[0].ConversationID, "会话 ID 由请求回填")
+	require.True(t, page.HasMore, "满页且还有更早 seq 时应标记可继续翻页")
 
 	// 请求参数：end<=0 转 MaxInt64，num 走 count，order=1（降序）
 	require.Len(t, gotReq.SeqRanges, 1)

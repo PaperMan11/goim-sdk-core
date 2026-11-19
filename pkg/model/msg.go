@@ -60,12 +60,15 @@ type PullMsgsResult struct {
 // HistoryMsgsPage 服务端分页历史消息结果（单会话）
 type HistoryMsgsPage struct {
 	Msgs []*MsgData `json:"msgs"`
-	// IsEnd 服务端标记的区间末尾（isEnd 语义见服务端 PullOrder）
+	// IsEnd 服务端标记的区间末尾（语义取决于 PullOrder，分页判断请用 HasMore）
 	IsEnd bool `json:"isEnd"`
 	// OldestSeq / NewestSeq 本页实际最小、最大 seq；继续向更早翻页时
 	// 以 OldestSeq-1 作为下一次 beforeSeq
 	OldestSeq int64 `json:"oldestSeq"`
 	NewestSeq int64 `json:"newestSeq"`
+	// HasMore 同方向是否可能还有下一批：降序看 OldestSeq > 1 且满页；
+	// 升序看是否满页（再拉一次返回空页即到头）
+	HasMore bool `json:"hasMore"`
 }
 
 // SeqRange 消息 seq 范围查询（Begin/End 对齐服务端 proto int64）
