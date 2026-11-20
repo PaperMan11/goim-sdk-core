@@ -107,13 +107,18 @@ const (
 	HandleResultRejected    = -1
 )
 
-// Message status
+// Message status（对齐 goim docs/protocol-message.md §1：
+// 1 发送中 / 2 发送成功 / 3 发送失败 / 4 已删除 / 5 已过滤）
 const (
-	MsgStatusSuccess int32 = 1
-	MsgStatusSending int32 = 2
-	MsgStatusFailed  int32 = 3
-	MsgStatusRevoked int32 = 4 // 已撤回（2101 撤回通知的本地缓存标记）
+	MsgStatusSending  int32 = 1
+	MsgStatusSuccess  int32 = 2
+	MsgStatusFailed   int32 = 3
+	MsgStatusDeleted  int32 = 4
+	MsgStatusFiltered int32 = 5
 )
+
+// MsgStatusRevoked 撤回通知的本地缓存标记，语义等同于已删除（UI 展示「已撤回」）
+const MsgStatusRevoked = MsgStatusDeleted
 
 // DeleteSyncOpt flag
 const (
