@@ -96,9 +96,11 @@ func NewClient(cfg *ClientConfig) Client {
 	bus := eventbus.New(eventbus.WithLogger(l))
 
 	// TokenStore 刷新闭包：token 过期时获取新 token。
-	// 优先级：TokenProvider 宿主回调（终端模式）> AdminSecret 自动 bootstrap > 失败
+	// 优先级：TokenProvider 宿主回调（终端模式）> AdminSecret 自动 bootstrap > 失败。
+	// 成功/失败都发布事件：wasm 预取模式没有同步刷新回调，宿主只能靠
+	// EventTokenRefreshed / EventTokenRefreshFailed 感知续期结果并补发 token。
 	var c *DefaultClient
-	refresh := func(ctx context.Context, userID string, platformID int32) (string, int64, error) {
+	fetchToken := func(ctx context.Context, userID string, platformID int32) (string, int64, error) {
 		if cfg.TokenProvider != nil {
 			return cfg.TokenProvider(ctx, userID, platformID)
 		}
@@ -114,6 +116,27 @@ func NewClient(cfg *ClientConfig) Client {
 			return "", 0, err
 		}
 		return resp.Token, resp.ExpireTimeSeconds, nil
+	}
+	refresh := func(ctx context.Context, userID string, platformID int32) (string, int64, error) {
+		token, expire, err := fetchToken(ctx, userID, platformID)
+		if err != nil {
+			bus.Publish(events.EventTokenRefreshFailed, events.Event{
+				Type: events.EventTokenRefreshFailed,
+				Payload: &model.TokenRefreshFailedData{
+					UserID:     userID,
+					PlatformID: platformID,
+					Error:      err.Error(),
+				},
+				Timestamp: timex.UnixMilli(),
+			})
+			return "", 0, err
+		}
+		bus.Publish(events.EventTokenRefreshed, events.Event{
+			Type:      events.EventTokenRefreshed,
+			Payload:   &model.TokenRefreshedData{UserID: userID, PlatformID: platformID},
+			Timestamp: timex.UnixMilli(),
+		})
+		return token, expire, nil
 	}
 	tokens := transport.NewTokenStore(refresh)
 

@@ -567,7 +567,8 @@ EventDisconnect           // WS 连接断开
 EventReconnect            // 重连成功
 EventLoginSuccess         // 登录成功（Token 获取 + WS 连接 + Seq 同步）
 EventLoginFailed          // 登录失败
-EventTokenRefreshed       // Token 刷新成功
+EventTokenRefreshed       // Token 刷新成功（Payload: *model.TokenRefreshedData）
+EventTokenRefreshFailed   // Token 刷新失败（Payload: *model.TokenRefreshFailedData；预取模式宿主据此补发 token）
 EventSeqSynced            // 全量同步完成
 ```
 

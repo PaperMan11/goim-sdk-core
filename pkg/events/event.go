@@ -53,7 +53,7 @@ const (
 	// —— 认证 ——
 	EventLoginSuccess   // 登录成功（Token 获取 + WS 连接）
 	EventLoginFailed    // 登录失败
-	EventTokenRefreshed // Token 刷新成功
+	EventTokenRefreshed // Token 刷新成功（Payload: *model.TokenRefreshedData）
 
 	// —— 同步引擎 ——
 	EventSyncStart          // 登录/重连触发的后台数据同步开始（同步与登录解耦，独立于登录结果）
@@ -71,6 +71,11 @@ const (
 	EventMsgRevoked          // 撤回操作成功
 	EventGroupMemberInvited  // 邀请入群成功
 	EventConversationCreated // 会话创建成功
+
+	// —— 认证续期 ——
+	// Token 自动刷新失败（Payload: *model.TokenRefreshFailedData）。
+	// 追加在末尾：保持已有事件数值不变（跨语言按数值透传）。
+	EventTokenRefreshFailed
 )
 
 // Event WS 事件通用封装

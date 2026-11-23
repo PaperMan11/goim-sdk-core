@@ -196,4 +196,5 @@ var eventTypeNames = []string{
 	"EventMsgRevoked",                // 51
 	"EventGroupMemberInvited",        // 52
 	"EventConversationCreated",       // 53
+	"EventTokenRefreshFailed",        // 54
 }

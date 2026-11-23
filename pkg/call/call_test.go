@@ -430,3 +430,29 @@ func assertNotCode(t *testing.T, err error, notWant int32) {
 		t.Fatalf("error code should not be %d (err: %v)", notWant, err)
 	}
 }
+
+// TestEventTokenRefreshFailedName 跨语言事件名映射与失败载荷序列化
+func TestEventTokenRefreshFailedName(t *testing.T) {
+	if got := eventTypeName(events.EventTokenRefreshFailed); got != "EventTokenRefreshFailed" {
+		t.Fatalf("eventTypeName = %q, want EventTokenRefreshFailed", got)
+	}
+	bs, err := marshalEvent(events.Event{
+		Type: events.EventTokenRefreshFailed,
+		Payload: &model.TokenRefreshFailedData{
+			UserID:     "u1",
+			PlatformID: 1,
+			Error:      "no prefetched token",
+		},
+		Timestamp: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshalEvent: %v", err)
+	}
+	var p EventPayload
+	if err := json.Unmarshal(bs, &p); err != nil {
+		t.Fatalf("payload not EventPayload JSON: %v", err)
+	}
+	if p.Type != int32(events.EventTokenRefreshFailed) || !strings.Contains(p.Payload, "no prefetched token") {
+		t.Fatalf("payload = %+v", p)
+	}
+}

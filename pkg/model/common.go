@@ -49,3 +49,19 @@ type ConversationReq struct {
 	MsgDestructTime  *Int64Value  `json:"msgDestructTime,omitempty"`
 	IsMsgDestruct    *BoolValue   `json:"isMsgDestruct,omitempty"`
 }
+
+// —— Token 刷新事件载荷 ——
+
+// TokenRefreshedData EventTokenRefreshed 载荷（宿主可按账号记录最近一次续期结果）
+type TokenRefreshedData struct {
+	UserID     string `json:"userID"`
+	PlatformID int32  `json:"platformID"`
+}
+
+// TokenRefreshFailedData EventTokenRefreshFailed 载荷（Error 为刷新失败原因，
+// 预取模式下宿主可据此感知「缓存无可用 token」并主动更新）
+type TokenRefreshFailedData struct {
+	UserID     string `json:"userID"`
+	PlatformID int32  `json:"platformID"`
+	Error      string `json:"error"`
+}
