@@ -347,6 +347,10 @@ func (d *Dispatcher) buildMethodTable() {
 	d.methods["GetNewerMsgs"] = reflect.ValueOf(func(ctx context.Context, conversationID string, afterSeq int64, count int32) (*model.HistoryMsgsPage, error) {
 		return c.GetNewerMsgs(ctx, conversationID, afterSeq, count)
 	})
+	// 本地单会话读取（不发网络请求）：GetConversation(convID)；服务端最新态用 Conv.GetConversation
+	d.methods["GetConversation"] = reflect.ValueOf(func(ctx context.Context, conversationID string) (*model.Conversation, error) {
+		return c.GetConversation(conversationID)
+	})
 
 	// 2. Manager 接口方法反射注册
 	for _, recv := range managerReceivers {

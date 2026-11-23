@@ -105,6 +105,9 @@ type Client interface {
 	GetHistoryMsgs(ctx context.Context, conversationID string, beforeSeq int64, count int32) (*model.HistoryMsgsPage, error)
 	// GetNewerMsgs 拉取 afterSeq 之后的一页（升序），用于补齐比本地更新的消息
 	GetNewerMsgs(ctx context.Context, conversationID string, afterSeq int64, count int32) (*model.HistoryMsgsPage, error)
+	// GetConversation 读取本地会话缓存中的单个会话（不发网络请求）；不存在返回 (nil, nil)。
+	// 需要服务端最新状态时用 Conv().GetConversation(ctx, userID, conversationID)。
+	GetConversation(conversationID string) (*model.Conversation, error)
 
 	// —— 事件订阅（统一走 eventbus）——
 	// Subscribe 订阅指定 EventType，返回事件 channel 和取消函数

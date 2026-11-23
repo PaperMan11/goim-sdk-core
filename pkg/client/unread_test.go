@@ -52,3 +52,29 @@ func TestLocalUnread(t *testing.T) {
 	_, err = (&DefaultClient{storage: stor}).UnreadTotal()
 	require.Error(t, err)
 }
+
+// TestGetConversationLocal 单会话直读：命中缓存返回该会话，未命中返回 (nil, nil)，
+// 未登录报错；不触发全量会话列表读取。
+func TestGetConversationLocal(t *testing.T) {
+	const owner = "u1"
+	stor := storage.NewMemoryStorage()
+	require.NoError(t, stor.UpsertConversations(owner, []*model.Conversation{
+		{ConversationID: "si_c1", ConversationType: model.SessionTypeC2C, UserID: "c1"},
+	}))
+
+	c := &DefaultClient{storage: stor, userID: owner, logger: &logger.NopLogger{}}
+
+	conv, err := c.GetConversation("si_c1")
+	require.NoError(t, err)
+	require.NotNil(t, conv)
+	require.Equal(t, "c1", conv.UserID)
+
+	conv, err = c.GetConversation("si_missing")
+	require.NoError(t, err)
+	require.Nil(t, conv)
+
+	_, err = c.GetConversation("")
+	require.Error(t, err)
+	_, err = (&DefaultClient{storage: stor}).GetConversation("si_c1")
+	require.Error(t, err)
+}

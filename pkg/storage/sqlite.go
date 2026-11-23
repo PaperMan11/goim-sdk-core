@@ -5,6 +5,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -283,6 +284,26 @@ func (s *SQLiteStorage) MarkMsgsRevoked(owner, conversationID string, seqs []int
 
 // === 会话 ===
 
+func (s *SQLiteStorage) GetLatestMsg(owner, conversationID string) (*model.MsgData, error) {
+	if conversationID == "" {
+		return nil, nil
+	}
+	var row MessageRow
+	err := s.db.Where("owner_user_id = ? AND conversation_id = ?", owner, conversationID).
+		Order("seq DESC").First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get latest msg of %s: %w", conversationID, err)
+	}
+	m := &model.MsgData{}
+	if err := jsonUnmarshal(row.DataJSON, m); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal latest msg %s: %w", conversationID, err)
+	}
+	return m, nil
+}
+
 func convToRow(owner string, c *model.Conversation) (*ConversationRow, error) {
 	b, err := jsonMarshal(c)
 	if err != nil {
@@ -304,11 +325,43 @@ func convToRow(owner string, c *model.Conversation) (*ConversationRow, error) {
 }
 
 func (s *SQLiteStorage) UpsertConversations(owner string, convs []*model.Conversation) error {
+	ids := make([]string, 0, len(convs))
+	for _, c := range convs {
+		if c != nil && c.ConversationID != "" {
+			ids = append(ids, c.ConversationID)
+		}
+	}
+	// 读取已有会话，保留 SDK 本地扩展字段（服务端 DTO 不携带摘要）；
+	// 仅当入参存在缺少摘要的会话（同步路径）时才需要读旧值
+	needMerge := false
+	for _, c := range convs {
+		if c != nil && c.ConversationID != "" && c.MsgInfo == nil && c.LatestMsgSendTime == 0 {
+			needMerge = true
+			break
+		}
+	}
+	existing := make(map[string]*model.Conversation, len(ids))
+	if needMerge && len(ids) > 0 {
+		var rows []ConversationRow
+		if err := s.db.Where("owner_user_id = ? AND conversation_id IN ?", owner, ids).
+			Find(&rows).Error; err != nil {
+			return fmt.Errorf("storage: load conversations for merge: %w", err)
+		}
+		for i := range rows {
+			c := &model.Conversation{}
+			if err := jsonUnmarshal(rows[i].DataJSON, c); err != nil {
+				continue
+			}
+			existing[rows[i].ConversationID] = c
+		}
+	}
+
 	rows := make([]*ConversationRow, 0, len(convs))
 	for _, c := range convs {
 		if c == nil || c.ConversationID == "" {
 			continue
 		}
+		mergeConversationLocalFields(existing[c.ConversationID], c)
 		row, err := convToRow(owner, c)
 		if err != nil {
 			return fmt.Errorf("storage: marshal conv %s: %w", c.ConversationID, err)
@@ -333,6 +386,26 @@ func (s *SQLiteStorage) DeleteConversations(owner string, conversationIDs []stri
 		return fmt.Errorf("storage: delete conversations: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLiteStorage) GetConversation(owner, conversationID string) (*model.Conversation, error) {
+	if conversationID == "" {
+		return nil, nil
+	}
+	var row ConversationRow
+	err := s.db.Where("owner_user_id = ? AND conversation_id = ?", owner, conversationID).
+		First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get conversation %s: %w", conversationID, err)
+	}
+	c := &model.Conversation{}
+	if err := jsonUnmarshal(row.DataJSON, c); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal conv %s: %w", conversationID, err)
+	}
+	return c, nil
 }
 
 func (s *SQLiteStorage) ListConversations(owner string) ([]*model.Conversation, error) {

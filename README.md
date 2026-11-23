@@ -120,6 +120,7 @@ for ev := range ch {
 | `SetLogCallback(LogCallback)` | 宿主接收 SDK 日志（`OnLog(level, msg)`） |
 | `SetCallTimeoutSec` / `Methods()` | 调用超时 / 已注册方法清单 |
 | `UnreadCount(convID)` / `UnreadTotal` | 本地未读数（离线可用，按 `hasReadSeq` 推导，见下） |
+| `GetConversation(convID)` | 本地单会话直读（不发网络请求，不存在返回 `nil`）；服务端最新态用 `Conv.GetConversation` |
 | `GetHistoryMsgs(convID, beforeSeq, count)` / `GetNewerMsgs(convID, afterSeq, count)` | 服务端分页历史 / 更新消息（结果写入本地缓存） |
 
 本地未读：`UnreadCount(conversationID)` / `UnreadTotal()` 不发起网络请求，`hasReadSeq` 取本地已读消息的最大 seq，

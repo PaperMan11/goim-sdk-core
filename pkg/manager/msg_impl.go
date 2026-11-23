@@ -36,6 +36,9 @@ type DefaultMsgMgr struct {
 
 	// 发送者身份（登录后设置；Phase 4 由 DefaultClient 注入）
 	senderID string
+
+	// 发送成功回调（client 层注入，用于维护会话本地摘要）
+	onSent func(msg *model.MsgData, resp *model.SendMsgResp)
 }
 
 // NewMsgMgr 构造 MsgMgr
@@ -44,6 +47,11 @@ func NewMsgMgr(http transport.HTTPClient, ws transport.MessageTransport, bus *ev
 }
 
 func (m *DefaultMsgMgr) SetSenderID(userID string) { m.senderID = userID }
+
+// SetOnSent 注入发送成功回调（msg 为本次发送入参，resp 为服务端回包）
+func (m *DefaultMsgMgr) SetOnSent(fn func(msg *model.MsgData, resp *model.SendMsgResp)) {
+	m.onSent = fn
+}
 
 // —— WS 发送 / 拉取 ——
 
@@ -94,6 +102,9 @@ func (m *DefaultMsgMgr) sendWSMsg(ctx context.Context, msg *model.MsgData, reqID
 			Timestamp: timex.UnixMilli(),
 			Payload:   sendResp,
 		})
+	}
+	if m.onSent != nil {
+		m.onSent(msg, sendResp)
 	}
 	return sendResp, nil
 }

@@ -305,6 +305,27 @@ func (s *IdbStorage) ListMsgsByConversation(owner, conversationID string) ([]*mo
 	return out, nil
 }
 
+func (s *IdbStorage) GetLatestMsg(owner, conversationID string) (*model.MsgData, error) {
+	if conversationID == "" {
+		return nil, nil
+	}
+	v, err := s.op("getLatestMsg", map[string]any{
+		"owner":          owner,
+		"conversationID": conversationID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if v.IsNull() || v.IsUndefined() || !v.Truthy() {
+		return nil, nil
+	}
+	m := &model.MsgData{}
+	if err := json.Unmarshal([]byte(v.Get("dataJSON").String()), m); err != nil {
+		return nil, fmt.Errorf("storage: getLatestMsg decode: %w", err)
+	}
+	return m, nil
+}
+
 func (s *IdbStorage) DeleteMsgs(owner, conversationID string, seqs []int64) error {
 	if conversationID == "" || len(seqs) == 0 {
 		return nil
@@ -359,11 +380,33 @@ func (s *IdbStorage) UpsertConversations(owner string, convs []*model.Conversati
 	if len(convs) == 0 {
 		return nil
 	}
+	// 读取已有会话，保留 SDK 本地扩展字段（服务端 DTO 不携带摘要）；
+	// 仅当入参存在缺少摘要的会话（同步路径）时才需要读旧值
+	needMerge := false
+	for _, c := range convs {
+		if c != nil && c.ConversationID != "" && c.MsgInfo == nil && c.LatestMsgSendTime == 0 {
+			needMerge = true
+			break
+		}
+	}
+	existing := make(map[string]*model.Conversation, len(convs))
+	if needMerge {
+		if rows, err := s.opJSONList("listConversations", map[string]any{"owner": owner}); err == nil {
+			for _, r := range rows {
+				c := &model.Conversation{}
+				if dataFromRow(r, c) == nil {
+					existing[c.ConversationID] = c
+				}
+			}
+		}
+	}
+
 	rows := make([]map[string]any, 0, len(convs))
 	for _, c := range convs {
 		if c == nil || c.ConversationID == "" {
 			continue
 		}
+		mergeConversationLocalFields(existing[c.ConversationID], c)
 		dataJSON, _ := json.Marshal(c)
 		rows = append(rows, map[string]any{
 			"owner":             owner,
@@ -388,6 +431,28 @@ func (s *IdbStorage) DeleteConversations(owner string, conversationIDs []string)
 		"conversationIDs": conversationIDs,
 	})
 	return err
+}
+
+func (s *IdbStorage) GetConversation(owner, conversationID string) (*model.Conversation, error) {
+	if conversationID == "" {
+		return nil, nil
+	}
+	v, err := s.op("getConversation", map[string]any{"owner": owner, "conversationID": conversationID})
+	if err != nil {
+		return nil, err
+	}
+	if v.IsNull() || v.IsUndefined() {
+		return nil, nil
+	}
+	bs, err := stringifyJS(v)
+	if err != nil {
+		return nil, fmt.Errorf("storage: getConversation marshal result: %w", err)
+	}
+	c := &model.Conversation{}
+	if err := dataFromRow(json.RawMessage(bs), c); err != nil {
+		return nil, fmt.Errorf("storage: getConversation: %w", err)
+	}
+	return c, nil
 }
 
 func (s *IdbStorage) ListConversations(owner string) ([]*model.Conversation, error) {

@@ -153,6 +153,20 @@
         return rows;
       });
     },
+    async getLatestMsg(db, args) {
+      return runTx(db, "messages", "readonly", async (tx, s) => {
+        const rows = await reqPromise(s.getAll(IDBKeyRange.bound(
+          [args.owner, args.conversationID, -Infinity],
+          [args.owner, args.conversationID, Infinity]
+        )));
+        if (!rows.length) return null;
+        let latest = rows[0];
+        for (const row of rows) {
+          if (row.seq > latest.seq) latest = row;
+        }
+        return latest;
+      });
+    },
     async deleteMsgs(db, args) {
       return runTx(db, "messages", "readwrite", async (tx, s) => {
         for (const seq of args.seqs || []) s.delete([args.owner, args.conversationID, seq]);
@@ -179,6 +193,12 @@
       return runTx(db, "conversations", "readwrite", async (tx, s) => {
         for (const id of args.conversationIDs || []) s.delete([args.owner, id]);
         return null;
+      });
+    },
+    async getConversation(db, args) {
+      return runTx(db, "conversations", "readonly", async (tx, s) => {
+        const row = await reqPromise(s.get([args.owner, args.conversationID]));
+        return row || null;
       });
     },
     async listConversations(db, args) {

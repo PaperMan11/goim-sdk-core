@@ -53,6 +53,8 @@ type Storage interface {
 	UpsertMsgs(ownerUserID string, msgs []*model.MsgData) error
 	// ListMsgsByConversation 按会话取消息缓存（seq 升序）
 	ListMsgsByConversation(ownerUserID, conversationID string) ([]*model.MsgData, error)
+	// GetLatestMsg 会话缓存中 seq 最大的消息（无缓存返回 nil；会话摘要兜底用）
+	GetLatestMsg(ownerUserID, conversationID string) (*model.MsgData, error)
 	// DeleteMsgs 按 seq 删除消息缓存（2102 删除通知实时应用）
 	DeleteMsgs(ownerUserID, conversationID string, seqs []int64) error
 	// MarkMsgsRead 按 seq 标记已读（2200 已读回执实时应用）
@@ -70,6 +72,8 @@ type Storage interface {
 	DeleteConversations(ownerUserID string, conversationIDs []string) error
 	// ListConversations 会话列表（LatestMsgSendTime 倒序）
 	ListConversations(ownerUserID string) ([]*model.Conversation, error)
+	// GetConversation 单会话读取（不存在返回 nil, nil；避免全量列表再筛选）
+	GetConversation(ownerUserID, conversationID string) (*model.Conversation, error)
 	// ListConversationIDs 仅 ID 列表（IDHash 校验用）
 	ListConversationIDs(ownerUserID string) ([]string, error)
 
@@ -277,6 +281,24 @@ func (s *MemoryStorage) updateMsgs(owner, conversationID string, seqs []int64, m
 	}
 }
 
+func (s *MemoryStorage) GetLatestMsg(owner, conversationID string) (*model.MsgData, error) {
+	if conversationID == "" {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var latest *model.MsgData
+	for _, m := range s.msgs[owner] {
+		if m == nil || m.ConversationID != conversationID {
+			continue
+		}
+		if latest == nil || m.Seq > latest.Seq {
+			latest = m
+		}
+	}
+	return latest, nil
+}
+
 func (s *MemoryStorage) DeleteMsgs(owner, conversationID string, seqs []int64) error {
 	if conversationID == "" || len(seqs) == 0 {
 		return nil
@@ -333,6 +355,24 @@ func (s *MemoryStorage) MarkMsgsRevoked(owner, conversationID string, seqs []int
 
 // === 会话 ===
 
+// mergeConversationLocalFields 服务端会话 DTO 不含 SDK 本地扩展字段（摘要/草稿/未读），
+// 同步 upsert 时保留已有本地值，避免增量同步把消息推送维护的摘要清空。
+func mergeConversationLocalFields(existing, incoming *model.Conversation) {
+	if existing == nil || incoming == nil {
+		return
+	}
+	if incoming.MsgInfo == nil && incoming.LatestMsgSendTime == 0 {
+		incoming.MsgInfo = existing.MsgInfo
+		incoming.LatestMsgSendTime = existing.LatestMsgSendTime
+	}
+	if incoming.DraftText == "" {
+		incoming.DraftText = existing.DraftText
+	}
+	if incoming.UnreadCount == 0 {
+		incoming.UnreadCount = existing.UnreadCount
+	}
+}
+
 func (s *MemoryStorage) UpsertConversations(owner string, convs []*model.Conversation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -343,6 +383,7 @@ func (s *MemoryStorage) UpsertConversations(owner string, convs []*model.Convers
 		if c == nil || c.ConversationID == "" {
 			continue
 		}
+		mergeConversationLocalFields(s.convs[owner][c.ConversationID], c)
 		s.convs[owner][c.ConversationID] = c
 	}
 	return nil
@@ -373,6 +414,15 @@ func (s *MemoryStorage) ListConversations(owner string) ([]*model.Conversation, 
 		}
 	}
 	return out, nil
+}
+
+func (s *MemoryStorage) GetConversation(owner, conversationID string) (*model.Conversation, error) {
+	if conversationID == "" {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.convs[owner][conversationID], nil
 }
 
 func (s *MemoryStorage) ListConversationIDs(owner string) ([]string, error) {

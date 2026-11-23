@@ -585,6 +585,9 @@ func (e *EntitySyncEngine) SyncGroupMembers(ctx context.Context, groupID string)
 // === 会话 ===
 
 // SyncConversations 会话增量同步
+//
+// 服务端会话 DTO 不含最新消息摘要（MsgInfo/latestMsgSendTime），摘要由 SDK 本地维护。
+// 同步落库后为缺失摘要的会话用本地最新消息兜底补齐，保证本地会话列表可直接展示摘要。
 func (e *EntitySyncEngine) SyncConversations(ctx context.Context) error {
 	return runIncSync(e, ctx,
 		incSyncSpec[model.Conversation]{
@@ -602,6 +605,13 @@ func (e *EntitySyncEngine) SyncConversations(ctx context.Context) error {
 			},
 			upsert: e.stor.UpsertConversations,
 			del:    e.stor.DeleteConversations,
+			afterSync: func(ctx context.Context, ch incChanges[model.Conversation]) error {
+				changed, err := e.storedConversationsByID(ctx, ch.insert)
+				if err != nil {
+					return err
+				}
+				return e.refreshConversationSummaries(changed)
+			},
 		},
 		fullSyncSpec[model.Conversation]{
 			key:   storage.EntityConversations,
@@ -623,7 +633,72 @@ func (e *EntitySyncEngine) SyncConversations(ctx context.Context) error {
 				return e.conv.GetAllConversations(ctx, e.owner)
 			},
 			upsert: e.stor.UpsertConversations,
+			afterFull: func(ctx context.Context) error {
+				stored, err := e.stor.ListConversations(e.owner)
+				if err != nil {
+					return err
+				}
+				return e.refreshConversationSummaries(stored)
+			},
 		})
+}
+
+// storedConversationsByID 按变更会话 ID 取出落库后的会话（upsert 已合并本地摘要）
+func (e *EntitySyncEngine) storedConversationsByID(_ context.Context, changed []*model.Conversation) ([]*model.Conversation, error) {
+	if len(changed) == 0 {
+		return nil, nil
+	}
+	stored, err := e.stor.ListConversations(e.owner)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*model.Conversation, len(stored))
+	for _, c := range stored {
+		if c != nil {
+			byID[c.ConversationID] = c
+		}
+	}
+	out := make([]*model.Conversation, 0, len(changed))
+	for _, c := range changed {
+		if c == nil {
+			continue
+		}
+		if sc := byID[c.ConversationID]; sc != nil {
+			out = append(out, sc)
+		}
+	}
+	return out, nil
+}
+
+// refreshConversationSummaries 用本地最新消息刷新会话摘要并落库
+//
+// 覆盖两类场景：会话完全没有摘要（首次同步/全量重建），以及会话摘要落后于
+// 本地消息缓存（离线期间收到的新消息已在 SeqSync 入库但未被推送维护）。
+// 本地最新消息不比现有摘要新时保持原值（发送消息不入消息缓存，摘要由发送回调维护）。
+func (e *EntitySyncEngine) refreshConversationSummaries(convs []*model.Conversation) error {
+	patches := make([]*model.Conversation, 0, len(convs))
+	for _, c := range convs {
+		if c == nil {
+			continue
+		}
+		msg, err := e.stor.GetLatestMsg(e.owner, c.ConversationID)
+		if err != nil {
+			return err
+		}
+		if msg == nil {
+			continue
+		}
+		if c.MsgInfo != nil && c.LatestMsgSendTime >= msg.SendTime {
+			continue
+		}
+		c.MsgInfo = model.MsgInfoFromMsg(msg)
+		c.LatestMsgSendTime = msg.SendTime
+		patches = append(patches, c)
+	}
+	if len(patches) == 0 {
+		return nil
+	}
+	return e.stor.UpsertConversations(e.owner, patches)
 }
 
 // === 分页全量拉取 helper ===

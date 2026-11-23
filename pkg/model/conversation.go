@@ -1,25 +1,75 @@
 package model
 
+// ChatConversationID 由消息构造业务会话 ID，对齐服务端 msgprocessor.GetConversationIDByMsg：
+//   - 单聊 si_<较小 ID>_<较大 ID>
+//   - 写扩散群 g_<groupID>
+//   - 读扩散群 sg_<groupID>
+func ChatConversationID(sessionType int32, sendID, recvID, groupID string) string {
+	switch sessionType {
+	case SessionTypeC2C:
+		if sendID == "" || recvID == "" {
+			return ""
+		}
+		if sendID > recvID {
+			sendID, recvID = recvID, sendID
+		}
+		return "si_" + sendID + "_" + recvID
+	case 2: // 写扩散群聊
+		if groupID == "" {
+			return ""
+		}
+		return "g_" + groupID
+	case SessionTypeGroup:
+		if groupID == "" {
+			return ""
+		}
+		return "sg_" + groupID
+	}
+	return ""
+}
+
+// MsgInfoFromMsg 由消息构造会话摘要（服务端会话 DTO 不含摘要，由客户端本地维护）
+func MsgInfoFromMsg(m *MsgData) *MsgInfo {
+	if m == nil {
+		return nil
+	}
+	return &MsgInfo{
+		ServerMsgID:       m.ServerMsgID,
+		ClientMsgID:       m.ClientMsgID,
+		SessionType:       m.SessionType,
+		SendID:            m.SendID,
+		RecvID:            m.RecvID,
+		SenderName:        m.SenderNickname,
+		FaceURL:           m.SenderFaceURL,
+		GroupID:           m.GroupID,
+		LatestMsgRecvTime: m.SendTime,
+		MsgFrom:           m.MsgFrom,
+		ContentType:       m.ContentType,
+		Content:           m.Content,
+		Ex:                m.Ex,
+	}
+}
+
 // Conversation 会话完整信息（字段与 JSON tag 对齐服务端 conversation.Conversation）
 // 带「SDK 本地」标注的字段为客户端缓存扩展，服务端不返回
 type Conversation struct {
-	OwnerUserID      string `json:"ownerUserID,omitempty"`
-	ConversationID   string `json:"conversationID,omitempty"`
-	RecvMsgOpt       int32  `json:"recvMsgOpt,omitempty"`
-	ConversationType int32  `json:"conversationType,omitempty"` // SessionTypeC2C / SessionTypeGroup
-	UserID           string `json:"userID,omitempty"`           // 对方用户ID（单聊）
-	GroupID          string `json:"groupID,omitempty"`          // 群组ID（群聊）
-	IsPinned         bool   `json:"isPinned,omitempty"`
-	AttachedInfo     string `json:"attachedInfo,omitempty"`
-	IsPrivateChat    bool   `json:"isPrivateChat,omitempty"`
-	GroupAtType      int32  `json:"groupAtType,omitempty"`
-	Ex               string `json:"ex,omitempty"`
-	BurnDuration     int32  `json:"burnDuration,omitempty"`
-	MinSeq           int64  `json:"minSeq,omitempty"`
-	MaxSeq           int64  `json:"maxSeq,omitempty"`
-	MsgDestructTime  int64  `json:"msgDestructTime,omitempty"`
-	LatestMsgDestructTime int64 `json:"latestMsgDestructTime,omitempty"`
-	IsMsgDestruct    bool   `json:"isMsgDestruct,omitempty"`
+	OwnerUserID           string `json:"ownerUserID,omitempty"`
+	ConversationID        string `json:"conversationID,omitempty"`
+	RecvMsgOpt            int32  `json:"recvMsgOpt,omitempty"`
+	ConversationType      int32  `json:"conversationType,omitempty"` // SessionTypeC2C / SessionTypeGroup
+	UserID                string `json:"userID,omitempty"`           // 对方用户ID（单聊）
+	GroupID               string `json:"groupID,omitempty"`          // 群组ID（群聊）
+	IsPinned              bool   `json:"isPinned,omitempty"`
+	AttachedInfo          string `json:"attachedInfo,omitempty"`
+	IsPrivateChat         bool   `json:"isPrivateChat,omitempty"`
+	GroupAtType           int32  `json:"groupAtType,omitempty"`
+	Ex                    string `json:"ex,omitempty"`
+	BurnDuration          int32  `json:"burnDuration,omitempty"`
+	MinSeq                int64  `json:"minSeq,omitempty"`
+	MaxSeq                int64  `json:"maxSeq,omitempty"`
+	MsgDestructTime       int64  `json:"msgDestructTime,omitempty"`
+	LatestMsgDestructTime int64  `json:"latestMsgDestructTime,omitempty"`
+	IsMsgDestruct         bool   `json:"isMsgDestruct,omitempty"`
 
 	// —— SDK 本地扩展（服务端 Conversation 无此字段，由客户端计算/维护）——
 	UnreadCount       int32    `json:"unreadCount,omitempty"`
@@ -38,23 +88,23 @@ func (c *Conversation) PeerID() string {
 
 // MsgInfo 会话最新消息摘要（字段与 JSON tag 对齐服务端 conversation.MsgInfo）
 type MsgInfo struct {
-	ServerMsgID      string `json:"serverMsgID,omitempty"`
-	ClientMsgID      string `json:"clientMsgID,omitempty"`
-	SessionType      int32  `json:"sessionType,omitempty"`
-	SendID           string `json:"sendID,omitempty"`
-	RecvID           string `json:"recvID,omitempty"`
-	SenderName       string `json:"senderName,omitempty"`
-	FaceURL          string `json:"faceURL,omitempty"`
-	GroupID          string `json:"groupID,omitempty"`
-	GroupName        string `json:"groupName,omitempty"`
-	GroupFaceURL     string `json:"groupFaceURL,omitempty"`
-	GroupType        int32  `json:"groupType,omitempty"`
-	GroupMemberCount uint32 `json:"groupMemberCount,omitempty"`
-	LatestMsgRecvTime int64 `json:"LatestMsgRecvTime,omitempty"` // 注意：服务端 tag 首字母大写
-	MsgFrom          int32  `json:"msgFrom,omitempty"`
-	ContentType      int32  `json:"contentType,omitempty"`
-	Content          string `json:"content,omitempty"`
-	Ex               string `json:"ex,omitempty"`
+	ServerMsgID       string `json:"serverMsgID,omitempty"`
+	ClientMsgID       string `json:"clientMsgID,omitempty"`
+	SessionType       int32  `json:"sessionType,omitempty"`
+	SendID            string `json:"sendID,omitempty"`
+	RecvID            string `json:"recvID,omitempty"`
+	SenderName        string `json:"senderName,omitempty"`
+	FaceURL           string `json:"faceURL,omitempty"`
+	GroupID           string `json:"groupID,omitempty"`
+	GroupName         string `json:"groupName,omitempty"`
+	GroupFaceURL      string `json:"groupFaceURL,omitempty"`
+	GroupType         int32  `json:"groupType,omitempty"`
+	GroupMemberCount  uint32 `json:"groupMemberCount,omitempty"`
+	LatestMsgRecvTime int64  `json:"LatestMsgRecvTime,omitempty"` // 注意：服务端 tag 首字母大写
+	MsgFrom           int32  `json:"msgFrom,omitempty"`
+	ContentType       int32  `json:"contentType,omitempty"`
+	Content           string `json:"content,omitempty"`
+	Ex                string `json:"ex,omitempty"`
 }
 
 // ConversationElem 会话列表元素（对齐服务端 conversation.ConversationElem；IsPinned tag 服务端为首字母大写）

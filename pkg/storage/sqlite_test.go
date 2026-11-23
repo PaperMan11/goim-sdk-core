@@ -190,6 +190,20 @@ func TestSQLiteStorage_Conversations(t *testing.T) {
 		t.Fatalf("msg_info lost: %+v", got[2].MsgInfo)
 	}
 
+	// 单会话直读：存在时返回同一条，不存在返回 nil
+	one, err := s.GetConversation("u1", "si_a")
+	if err != nil || one == nil || one.ConversationID != "si_a" || one.MsgInfo == nil {
+		t.Fatalf("get conv: %+v, err=%v", one, err)
+	}
+	missing, err := s.GetConversation("u1", "si_none")
+	if err != nil || missing != nil {
+		t.Fatalf("missing conv = %+v, err=%v", missing, err)
+	}
+	otherOwner, err := s.GetConversation("u2", "si_a")
+	if err != nil || otherOwner != nil {
+		t.Fatalf("owner isolation: %+v, err=%v", otherOwner, err)
+	}
+
 	ids, _ := s.ListConversationIDs("u1")
 	if len(ids) != 3 {
 		t.Fatalf("ids = %v", ids)

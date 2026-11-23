@@ -69,6 +69,9 @@ type DefaultClient struct {
 	entitySyncTimer   *time.Timer
 	entitySyncPending map[sdkSync.EntityKind]struct{} // 去抖窗口内累积的待同步实体类型
 	syncRunMu         sync.Mutex
+
+	// 会话摘要写入串行化：推送与发送回调可能并发，避免读改写互相覆盖
+	convSummaryMu sync.Mutex
 }
 
 // NewClient 构造 DefaultClient
@@ -194,6 +197,9 @@ func NewClient(cfg *ClientConfig) Client {
 		fileUpload: fileUploader,
 	}
 
+	// 发送成功回调：维护会话本地摘要（服务端会话 DTO 不含摘要）
+	c.msg.SetOnSent(c.applySentConversationSummary)
+
 	// 3. 传输层生命周期钩子（通过 MessageTransport interface setter 注入）
 	ws.SetOnConnecting(func() {
 		bus.Publish(events.EventConnecting, events.Event{
@@ -208,10 +214,7 @@ func NewClient(cfg *ClientConfig) Client {
 		})
 		// 重连后：gap 拉取 + 五类实体带游标增量，走后台同步（进度经
 		// EventSyncStart/EventSyncFinish/EventSyncFailed 暴露；失败下轮重连再补）
-		c.mu.RLock()
-		owner := c.userID
-		loggedIn := c.loggedIn
-		c.mu.RUnlock()
+		owner, loggedIn := c.sessionOwner()
 		if !loggedIn || owner == "" {
 			return
 		}
@@ -514,9 +517,7 @@ func (c *DefaultClient) runEntitySyncDebounced() {
 	if len(pending) == 0 {
 		return
 	}
-	c.mu.RLock()
-	owner, loggedIn := c.userID, c.loggedIn
-	c.mu.RUnlock()
+	owner, loggedIn := c.sessionOwner()
 	if !loggedIn || owner == "" {
 		return
 	}
@@ -529,9 +530,7 @@ func (c *DefaultClient) runEntitySyncDebounced() {
 	defer c.syncRunMu.Unlock()
 	// 拿锁后复查登录态：前面读取登录态与真正执行之间可能已 Logout/Close，
 	// 复查与 syncRunMu 握手共同保证不会访问已关闭的存储
-	c.mu.RLock()
-	loggedIn = c.loggedIn
-	c.mu.RUnlock()
+	_, loggedIn = c.sessionOwner()
 	if !loggedIn {
 		return
 	}
@@ -861,7 +860,9 @@ func (c *DefaultClient) handleMessagePush(resp *transport.Response) {
 			c.dispatchNotification(msgData, mm, timestamp)
 			return
 		}
-		// 普通消息 → EventNewMsg（payload 为已转换的 model，携带推送 map key 得到的 ConversationID）
+		// 普通消息 → 更新会话摘要 + EventNewMsg
+		// （payload 为已转换的 model，携带推送 map key 得到的 ConversationID）
+		c.applyConversationSummary(mm, convID)
 		c.bus.Publish(events.EventNewMsg, events.Event{
 			Type:       events.EventNewMsg,
 			Payload:    mm,
@@ -1052,9 +1053,7 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 // persistPushMsg 服务端实时推送的消息/通知写入本地消息缓存（owner 未登录或 seq<=0 跳过，
 // 与存储层 UpsertMsgs 约定一致）
 func (c *DefaultClient) persistPushMsg(mm *model.MsgData) {
-	c.mu.RLock()
-	owner := c.userID
-	c.mu.RUnlock()
+	owner := c.currentOwner()
 	if owner == "" || mm == nil || mm.Seq <= 0 || mm.ConversationID == "" {
 		return
 	}
@@ -1065,14 +1064,96 @@ func (c *DefaultClient) persistPushMsg(mm *model.MsgData) {
 	c.logger.Infof("client: persist pushed msg, conv=%s, msgID=%s, seq=%d", mm.ConversationID, mm.ClientMsgID, mm.Seq)
 }
 
+// applySentConversationSummary 发送成功后更新会话摘要（会话 ID 由消息收发双方推导）
+//
+// 发送消息本地不入消息缓存（seq 由服务端分配），因此摘要直接由发送消息构造；
+// 后续会话增量同步 upsert 时会保留该本地摘要，不会被服务端空摘要覆盖。
+func (c *DefaultClient) applySentConversationSummary(msg *model.MsgData, resp *model.SendMsgResp) {
+	if msg == nil {
+		return
+	}
+	conversationID := model.ChatConversationID(msg.SessionType, msg.SendID, msg.RecvID, msg.GroupID)
+	if conversationID == "" {
+		return
+	}
+	out := *msg
+	out.ConversationID = conversationID
+	if resp != nil {
+		out.ServerMsgID = resp.ServerMsgID
+		out.SendTime = resp.SendTime
+	}
+	c.updateConversationSummary(&out, conversationID)
+}
+
+// applyConversationSummary 收到推送消息后更新会话摘要并发布会话变更事件
+func (c *DefaultClient) applyConversationSummary(msg *model.MsgData, conversationID string) {
+	if msg == nil || conversationID == "" || manager.IsNotificationConversation(conversationID) {
+		return
+	}
+	c.updateConversationSummary(msg, conversationID)
+}
+
+// updateConversationSummary 用消息维护本地会话摘要（MsgInfo + latestMsgSendTime），
+// 完成后发布 EventConversationUpdate，让宿主（如 Web 会话列表）从本地缓存刷新。
+func (c *DefaultClient) updateConversationSummary(msg *model.MsgData, conversationID string) {
+	owner := c.currentOwner()
+	if owner == "" {
+		return
+	}
+
+	c.convSummaryMu.Lock()
+	defer c.convSummaryMu.Unlock()
+
+	conv, err := c.storage.GetConversation(owner, conversationID)
+	if err != nil {
+		c.logger.Warnf("client: update conversation summary, get conv error=%v", err.Error())
+		return
+	}
+	if conv == nil {
+		conv = &model.Conversation{ConversationID: conversationID}
+	}
+	// 推送乱序：比当前摘要更早的消息不回退摘要
+	if conv.LatestMsgSendTime > 0 && msg.SendTime > 0 && msg.SendTime < conv.LatestMsgSendTime {
+		return
+	}
+
+	if conv.ConversationType == 0 {
+		conv.ConversationType = msg.SessionType
+	}
+	if msg.SessionType == model.SessionTypeC2C {
+		if conv.UserID == "" {
+			if msg.SendID == owner {
+				conv.UserID = msg.RecvID
+			} else {
+				conv.UserID = msg.SendID
+			}
+		}
+	} else if conv.GroupID == "" {
+		conv.GroupID = msg.GroupID
+	}
+	conv.MsgInfo = model.MsgInfoFromMsg(msg)
+	conv.LatestMsgSendTime = msg.SendTime
+
+	if err := c.storage.UpsertConversations(owner, []*model.Conversation{conv}); err != nil {
+		c.logger.Warnf("client: update conversation summary, conv=%s, error=%v", conversationID, err.Error())
+		return
+	}
+	c.bus.Publish(events.EventConversationUpdate, events.Event{
+		Type: events.EventConversationUpdate,
+		Payload: &events.ConversationUpdateTips{
+			UserID:             owner,
+			ConversationIDList: []string{conversationID},
+		},
+		Timestamp: timex.UnixMilli(),
+	})
+}
+
 // applyMsgCache 消息类通知应用到本地消息缓存
 //
 // 未登录/无会话上下文跳过；失败仅告警不阻断事件分发——缓存最终由
 // SeqSyncEngine 缺口拉取收敛（撤回/删除/已读状态在拉取时由服务端改写）。
 func (c *DefaultClient) applyMsgCache(name, conversationID string, fn func(owner string) error) {
-	c.mu.RLock()
-	owner := c.userID
-	c.mu.RUnlock()
+	owner := c.currentOwner()
 	if owner == "" || conversationID == "" {
 		return
 	}
@@ -1096,16 +1177,9 @@ func (c *DefaultClient) UnreadCount(conversationID string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	convs, err := c.storage.ListConversations(owner)
+	conv, err := c.storage.GetConversation(owner, conversationID)
 	if err != nil {
-		return 0, fmt.Errorf("unread count: list conversations: %w", err)
-	}
-	var conv *model.Conversation
-	for _, cv := range convs {
-		if cv != nil && cv.ConversationID == conversationID {
-			conv = cv
-			break
-		}
+		return 0, fmt.Errorf("unread count: get conversation %s: %w", conversationID, err)
 	}
 	return c.unreadCountFor(owner, conversationID, conv)
 }
@@ -1118,7 +1192,7 @@ func (c *DefaultClient) UnreadTotal() (int64, error) {
 	}
 	convs, err := c.storage.ListConversations(owner)
 	if err != nil {
-		return 0, fmt.Errorf("unread total: list conversations: %w", err)
+		return 0, fmt.Errorf("unread count: list conversations: %w", err)
 	}
 	var total int64
 	for _, cv := range convs {
@@ -1135,13 +1209,40 @@ func (c *DefaultClient) UnreadTotal() (int64, error) {
 	return total, nil
 }
 
+// GetConversation 读取本地会话缓存中的单个会话（不发网络请求）；不存在返回 (nil, nil)。
+func (c *DefaultClient) GetConversation(conversationID string) (*model.Conversation, error) {
+	if conversationID == "" {
+		return nil, fmt.Errorf("get conversation: conversationID is empty")
+	}
+	owner, err := c.localOwner()
+	if err != nil {
+		return nil, err
+	}
+	conv, err := c.storage.GetConversation(owner, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("get conversation %s: %w", conversationID, err)
+	}
+	return conv, nil
+}
+
+// sessionOwner 当前登录态快照（userID 与 loggedIn 一并读取，避免多次加锁不一致）
+func (c *DefaultClient) sessionOwner() (owner string, loggedIn bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.userID, c.loggedIn
+}
+
+// currentOwner 当前登录 userID 只读快照（未登录返回空串）
+func (c *DefaultClient) currentOwner() string {
+	owner, _ := c.sessionOwner()
+	return owner
+}
+
 // localOwner 当前登录用户（本地查询的数据隔离维度）
 func (c *DefaultClient) localOwner() (string, error) {
-	c.mu.RLock()
-	owner := c.userID
-	c.mu.RUnlock()
+	owner, _ := c.sessionOwner()
 	if owner == "" {
-		return "", fmt.Errorf("unread: not logged in")
+		return "", fmt.Errorf("client: not logged in")
 	}
 	return owner, nil
 }
