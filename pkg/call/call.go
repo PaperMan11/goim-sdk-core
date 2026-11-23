@@ -292,13 +292,14 @@ var managerReceivers = []struct {
 	{"ConvMgr", func(c client.Client) interface{} { return c.Conv() }, reflect.TypeOf((*manager.ConvMgr)(nil)).Elem()},
 	{"ThirdMgr", func(c client.Client) interface{} { return c.Third() }, reflect.TypeOf((*manager.ThirdMgr)(nil)).Elem()},
 	{"FileUploader", func(c client.Client) interface{} { return c.FileUploader() }, reflect.TypeOf((*manager.FileUploader)(nil)).Elem()},
+	{"Local", func(c client.Client) interface{} { return c.Local() }, reflect.TypeOf((*manager.LocalDataMgr)(nil)).Elem()},
 }
 
 // buildMethodTable 构建 method string → bound func 分发表
 //
 // 两部分：
 //  1. 生命周期方法（Login / Logout / Connect ...）——包装为 func(ctx, ...) 闭包
-//  2. 八个 Manager 的全部接口方法——反射绑定
+//  2. 九个 Manager（含本地数据门面 Local）的全部接口方法——反射绑定
 //
 // 参数类型不可 JSON 解码的方法（io.Reader / func / chan 等）跳过注册。
 func (d *Dispatcher) buildMethodTable() {
@@ -333,23 +334,12 @@ func (d *Dispatcher) buildMethodTable() {
 	d.methods["SyncState"] = reflect.ValueOf(func(ctx context.Context) int32 {
 		return int32(c.SyncState())
 	})
-	// 本地未读查询（离线可用）：UnreadCount("convID") / UnreadTotal()
-	d.methods["UnreadCount"] = reflect.ValueOf(func(ctx context.Context, conversationID string) (int64, error) {
-		return c.UnreadCount(conversationID)
-	})
-	d.methods["UnreadTotal"] = reflect.ValueOf(func(ctx context.Context) (int64, error) {
-		return c.UnreadTotal()
-	})
 	// 服务端分页历史（写入本地缓存）：GetHistoryMsgs(convID, beforeSeq, count) / GetNewerMsgs(convID, afterSeq, count)
 	d.methods["GetHistoryMsgs"] = reflect.ValueOf(func(ctx context.Context, conversationID string, beforeSeq int64, count int32) (*model.HistoryMsgsPage, error) {
 		return c.GetHistoryMsgs(ctx, conversationID, beforeSeq, count)
 	})
 	d.methods["GetNewerMsgs"] = reflect.ValueOf(func(ctx context.Context, conversationID string, afterSeq int64, count int32) (*model.HistoryMsgsPage, error) {
 		return c.GetNewerMsgs(ctx, conversationID, afterSeq, count)
-	})
-	// 本地单会话读取（不发网络请求）：GetConversation(convID)；服务端最新态用 Conv.GetConversation
-	d.methods["GetConversation"] = reflect.ValueOf(func(ctx context.Context, conversationID string) (*model.Conversation, error) {
-		return c.GetConversation(conversationID)
 	})
 
 	// 2. Manager 接口方法反射注册

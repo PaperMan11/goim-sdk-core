@@ -14,6 +14,7 @@ package storage
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -104,6 +105,36 @@ type Storage interface {
 	DeleteGroupMembers(ownerUserID, groupID string, userIDs []string) error
 	ListGroupMembers(ownerUserID, groupID string) ([]*model.GroupMemberFullInfo, error)
 	ListGroupMemberIDs(ownerUserID, groupID string) ([]string, error)
+
+	// === 本地分页 / 单条查询（Local Data API，见 docs/LOCAL_DATA_API.md）===
+
+	// ListConversationsPage 会话分页（置顶优先 + LatestMsgSendTime 倒序）
+	ListConversationsPage(ownerUserID string, offset, limit int32) (*model.ConversationPage, error)
+	// GetConversations 批量直读（返回命中的会话，顺序与入参一致；不存在的跳过）
+	GetConversations(ownerUserID string, conversationIDs []string) ([]*model.Conversation, error)
+	// ListMsgsPage 消息分页：desc=true 按 seq 倒序（seq<=0 取最新；否则取 <=seq），
+	// desc=false 按 seq 升序（seq<=0 从头；否则取 >seq）
+	ListMsgsPage(ownerUserID, conversationID string, seq int64, limit int32, desc bool) (*model.MsgPage, error)
+	// GetMsg 按 seq 直读单条消息（不存在返回 nil, nil）
+	GetMsg(ownerUserID, conversationID string, seq int64) (*model.MsgData, error)
+	// GetMsgByClientID 按客户端消息 ID 直读单条消息（不存在返回 nil, nil）
+	GetMsgByClientID(ownerUserID, conversationID, clientMsgID string) (*model.MsgData, error)
+	// ListFriendsPage 好友分页（置顶优先 + userID 升序）
+	ListFriendsPage(ownerUserID string, offset, limit int32) (*model.FriendPage, error)
+	// GetFriend 单好友直读（不存在返回 nil, nil）
+	GetFriend(ownerUserID, friendUserID string) (*model.FriendInfo, error)
+	// ListBlacksPage 黑名单分页（blackUserID 升序）
+	ListBlacksPage(ownerUserID string, offset, limit int32) (*model.BlackPage, error)
+	// GetBlack 单条黑名单直读（不存在返回 nil, nil）
+	GetBlack(ownerUserID, blackUserID string) (*model.BlackInfo, error)
+	// ListGroupsPage 群分页（群名升序）
+	ListGroupsPage(ownerUserID string, offset, limit int32) (*model.GroupPage, error)
+	// GetGroup 单群直读（不存在返回 nil, nil）
+	GetGroup(ownerUserID, groupID string) (*model.GroupInfo, error)
+	// ListGroupMembersPage 群成员分页（角色高优先 + JoinTime 升序）
+	ListGroupMembersPage(ownerUserID, groupID string, offset, limit int32) (*model.GroupMemberPage, error)
+	// GetGroupMember 单群成员直读（不存在返回 nil, nil）
+	GetGroupMember(ownerUserID, groupID, userID string) (*model.GroupMemberFullInfo, error)
 
 	// === 生命周期 ===
 
@@ -622,6 +653,206 @@ func (s *MemoryStorage) ListGroupMemberIDs(owner, groupID string) ([]string, err
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+// === 本地分页 / 单条查询（Local Data API）===
+
+// pageSlice 通用分页切片：返回 [start,end) 与是否还有下一页
+func pageSlice(total int, offset, limit int32) (start, end int, hasMore bool) {
+	if offset < 0 {
+		offset = 0
+	}
+	start = int(offset)
+	if start >= total {
+		return total, total, false
+	}
+	end = total
+	if limit > 0 && start+int(limit) < total {
+		end = start + int(limit)
+	}
+	return start, end, end < total
+}
+
+func (s *MemoryStorage) ListConversationsPage(owner string, offset, limit int32) (*model.ConversationPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]*model.Conversation, 0, len(s.convs[owner]))
+	for _, c := range s.convs[owner] {
+		if c != nil {
+			all = append(all, c)
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].IsPinned != all[j].IsPinned {
+			return all[i].IsPinned
+		}
+		return all[i].LatestMsgSendTime > all[j].LatestMsgSendTime
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.ConversationPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) GetConversations(owner string, conversationIDs []string) ([]*model.Conversation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.Conversation, 0, len(conversationIDs))
+	for _, id := range conversationIDs {
+		if c := s.convs[owner][id]; c != nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStorage) ListMsgsPage(owner, conversationID string, seq int64, limit int32, desc bool) (*model.MsgPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]*model.MsgData, 0, len(s.msgs[owner]))
+	for _, m := range s.msgs[owner] {
+		if m == nil || m.ConversationID != conversationID {
+			continue
+		}
+		if desc {
+			if seq > 0 && m.Seq > seq {
+				continue
+			}
+		} else if seq > 0 && m.Seq <= seq {
+			continue
+		}
+		all = append(all, m)
+	}
+	if desc {
+		sort.SliceStable(all, func(i, j int) bool { return all[i].Seq > all[j].Seq })
+	} else {
+		sort.SliceStable(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
+	}
+	start, end, hasMore := pageSlice(len(all), 0, limit)
+	items := all[start:end]
+	page := &model.MsgPage{Items: items, HasMore: hasMore}
+	for _, m := range items {
+		if page.OldestSeq == 0 || m.Seq < page.OldestSeq {
+			page.OldestSeq = m.Seq
+		}
+		if m.Seq > page.NewestSeq {
+			page.NewestSeq = m.Seq
+		}
+	}
+	return page, nil
+}
+
+func (s *MemoryStorage) GetMsg(owner, conversationID string, seq int64) (*model.MsgData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.msgs[owner][conversationID+"#"+strconv.FormatInt(seq, 10)], nil
+}
+
+func (s *MemoryStorage) GetMsgByClientID(owner, conversationID, clientMsgID string) (*model.MsgData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, m := range s.msgs[owner] {
+		if m != nil && m.ConversationID == conversationID && m.ClientMsgID == clientMsgID {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *MemoryStorage) ListFriendsPage(owner string, offset, limit int32) (*model.FriendPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]*model.FriendInfo, 0, len(s.friends[owner]))
+	for _, f := range s.friends[owner] {
+		if f != nil {
+			all = append(all, f)
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].IsPinned != all[j].IsPinned {
+			return all[i].IsPinned
+		}
+		return all[i].FriendUserID() < all[j].FriendUserID()
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.FriendPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) GetFriend(owner, friendUserID string) (*model.FriendInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.friends[owner][friendUserID], nil
+}
+
+func (s *MemoryStorage) ListBlacksPage(owner string, offset, limit int32) (*model.BlackPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]*model.BlackInfo, 0, len(s.blacks[owner]))
+	for _, b := range s.blacks[owner] {
+		if b != nil {
+			all = append(all, b)
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].BlackUserID() < all[j].BlackUserID() })
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.BlackPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) GetBlack(owner, blackUserID string) (*model.BlackInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.blacks[owner][blackUserID], nil
+}
+
+func (s *MemoryStorage) ListGroupsPage(owner string, offset, limit int32) (*model.GroupPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]*model.GroupInfo, 0, len(s.groups[owner]))
+	for _, g := range s.groups[owner] {
+		if g != nil {
+			all = append(all, g)
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].GroupName != all[j].GroupName {
+			return all[i].GroupName < all[j].GroupName
+		}
+		return all[i].GroupID < all[j].GroupID
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.GroupPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) GetGroup(owner, groupID string) (*model.GroupInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.groups[owner][groupID], nil
+}
+
+func (s *MemoryStorage) ListGroupMembersPage(owner, groupID string, offset, limit int32) (*model.GroupMemberPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]*model.GroupMemberFullInfo, 0, len(s.groupMembers[owner][groupID]))
+	for _, m := range s.groupMembers[owner][groupID] {
+		if m != nil {
+			all = append(all, m)
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].RoleLevel != all[j].RoleLevel {
+			return all[i].RoleLevel > all[j].RoleLevel
+		}
+		if all[i].JoinTime != all[j].JoinTime {
+			return all[i].JoinTime < all[j].JoinTime
+		}
+		return all[i].UserID < all[j].UserID
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.GroupMemberPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) GetGroupMember(owner, groupID, userID string) (*model.GroupMemberFullInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.groupMembers[owner][groupID][userID], nil
 }
 
 // === 生命周期 ===

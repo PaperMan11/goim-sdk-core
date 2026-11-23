@@ -119,11 +119,17 @@ for ev := range ch {
 | `SetTokenProvider` / `UpdateToken` | 终端模式 token 桥 / 预取 token 注入 |
 | `SetLogCallback(LogCallback)` | 宿主接收 SDK 日志（`OnLog(level, msg)`） |
 | `SetCallTimeoutSec` / `Methods()` | 调用超时 / 已注册方法清单 |
-| `UnreadCount(convID)` / `UnreadTotal` | 本地未读数（离线可用，按 `hasReadSeq` 推导，见下） |
-| `GetConversation(convID)` | 本地单会话直读（不发网络请求，不存在返回 `nil`）；服务端最新态用 `Conv.GetConversation` |
+| `Local.UnreadCount(convID)` / `Local.UnreadTotal()` | 本地未读数（离线可用，按 `hasReadSeq` 推导，见下） |
+| `Local.GetConversation(convID)` | 本地单会话直读（不发网络请求，不存在返回 `null`）；服务端最新态用 `Conv.GetConversation` |
+| `Local.*`（会话/消息/好友/黑名单/群/成员） | 本地缓存直读与分页（只读、不发网络请求）；P1 已实现，见 [LOCAL_DATA_API.md](docs/LOCAL_DATA_API.md) |
 | `GetHistoryMsgs(convID, beforeSeq, count)` / `GetNewerMsgs(convID, afterSeq, count)` | 服务端分页历史 / 更新消息（结果写入本地缓存） |
 
-本地未读：`UnreadCount(conversationID)` / `UnreadTotal()` 不发起网络请求，`hasReadSeq` 取本地已读消息的最大 seq，
+本地数据门面：`Client.Local()` 暴露 `LocalDataMgr`，跨语言方法名以 `Local.` 前缀注册（如 `Local.ListConversations`、
+`Local.ListMsgs`、`Local.GetFriend`）。实体分页 `offset+limit`（默认 50 / 上限 200）返回 `Total` 与 `HasMore`；
+消息分页用 seq 游标：`Local.ListMsgs(convID, beforeSeq, limit)` 降序取更早、`Local.ListMsgsAfter` 升序；
+未登录返回 `NotLoggedIn`，单条不存在返回 `null`。
+
+本地未读：`Local.UnreadCount(conversationID)` / `Local.UnreadTotal()` 不发起网络请求，`hasReadSeq` 取本地已读消息的最大 seq，
 未读数 = 缓存中 `seq > hasReadSeq` 且未撤回的条数；消息缓存不完整时结果为下界，跨端一致性依赖 2200 已读回执，
 其他端已读而本端未收到回执时会偏大。需要服务端精确值用 `ConvMgr.GetSortedConversationList`（返回 `unreadTotal` / `unreadCount`）。
 
@@ -238,6 +244,7 @@ go test ./test/integration -v
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 架构、包结构、开发阶段与跨语言封装细节
 - [docs/SYNC_ARCHITECTURE.md](docs/SYNC_ARCHITECTURE.md) — 数据同步引擎设计
 - [docs/IDB_STORAGE.md](docs/IDB_STORAGE.md) — wasm IndexedDB 存储桥接
+- [docs/LOCAL_DATA_API.md](docs/LOCAL_DATA_API.md) — 本地数据能力 API（P1 已实现：会话/消息/好友/黑名单/群/成员直读与分页）
 - [docs/INTEGRATION_TEST_PLAN.md](docs/INTEGRATION_TEST_PLAN.md) — 集成测试用例与环境配置
 - [docs/INTEGRATION_CONCLUSIONS.md](docs/INTEGRATION_CONCLUSIONS.md) — 集成测试结论
 

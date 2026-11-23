@@ -707,6 +707,323 @@ func (s *SQLiteStorage) ListGroupMemberIDs(owner, groupID string) ([]string, err
 	return ids, nil
 }
 
+// === 本地分页 / 单条查询（Local Data API）===
+
+func (s *SQLiteStorage) ListConversationsPage(owner string, offset, limit int32) (*model.ConversationPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.db.Model(&ConversationRow{}).Where("owner_user_id = ?", owner).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: count conversations: %w", err)
+	}
+	db := s.db.Where("owner_user_id = ?", owner).
+		Order("is_pinned DESC").Order("latest_msg_send_time DESC").
+		Offset(int(offset))
+	if limit > 0 {
+		db = db.Limit(int(limit))
+	}
+	var rows []ConversationRow
+	if err := db.Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: list conversations page: %w", err)
+	}
+	items := make([]*model.Conversation, 0, len(rows))
+	for i := range rows {
+		c := &model.Conversation{}
+		if err := jsonUnmarshal(rows[i].DataJSON, c); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal conv %s: %w", rows[i].ConversationID, err)
+		}
+		items = append(items, c)
+	}
+	hasMore := int64(int(offset)+len(items)) < total
+	return &model.ConversationPage{Items: items, Total: total, HasMore: hasMore}, nil
+}
+
+func (s *SQLiteStorage) GetConversations(owner string, conversationIDs []string) ([]*model.Conversation, error) {
+	if len(conversationIDs) == 0 {
+		return nil, nil
+	}
+	var rows []ConversationRow
+	if err := s.db.Where("owner_user_id = ? AND conversation_id IN ?", owner, conversationIDs).
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: get conversations: %w", err)
+	}
+	byID := make(map[string]*model.Conversation, len(rows))
+	for i := range rows {
+		c := &model.Conversation{}
+		if err := jsonUnmarshal(rows[i].DataJSON, c); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal conv %s: %w", rows[i].ConversationID, err)
+		}
+		byID[rows[i].ConversationID] = c
+	}
+	out := make([]*model.Conversation, 0, len(byID))
+	for _, id := range conversationIDs {
+		if c := byID[id]; c != nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (s *SQLiteStorage) ListMsgsPage(owner, conversationID string, seq int64, limit int32, desc bool) (*model.MsgPage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	db := s.db.Model(&MessageRow{}).Where("owner_user_id = ? AND conversation_id = ?", owner, conversationID)
+	if desc {
+		if seq > 0 {
+			db = db.Where("seq <= ?", seq)
+		}
+		db = db.Order("seq DESC")
+	} else {
+		if seq > 0 {
+			db = db.Where("seq > ?", seq)
+		}
+		db = db.Order("seq ASC")
+	}
+	var rows []MessageRow
+	if err := db.Limit(int(limit) + 1).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: list msgs page: %w", err)
+	}
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:limit]
+	}
+	page := &model.MsgPage{Items: make([]*model.MsgData, 0, len(rows)), HasMore: hasMore}
+	for i := range rows {
+		m := &model.MsgData{}
+		if err := jsonUnmarshal(rows[i].DataJSON, m); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal msg %s: %w", rows[i].ClientMsgID, err)
+		}
+		if page.OldestSeq == 0 || m.Seq < page.OldestSeq {
+			page.OldestSeq = m.Seq
+		}
+		if m.Seq > page.NewestSeq {
+			page.NewestSeq = m.Seq
+		}
+		page.Items = append(page.Items, m)
+	}
+	return page, nil
+}
+
+func (s *SQLiteStorage) GetMsg(owner, conversationID string, seq int64) (*model.MsgData, error) {
+	var row MessageRow
+	err := s.db.Where("owner_user_id = ? AND conversation_id = ? AND seq = ?", owner, conversationID, seq).
+		First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get msg seq=%d: %w", seq, err)
+	}
+	m := &model.MsgData{}
+	if err := jsonUnmarshal(row.DataJSON, m); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal msg %s: %w", row.ClientMsgID, err)
+	}
+	return m, nil
+}
+
+func (s *SQLiteStorage) GetMsgByClientID(owner, conversationID, clientMsgID string) (*model.MsgData, error) {
+	var row MessageRow
+	err := s.db.Where("owner_user_id = ? AND client_msg_id = ? AND conversation_id = ?",
+		owner, clientMsgID, conversationID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get msg by clientMsgID %s: %w", clientMsgID, err)
+	}
+	m := &model.MsgData{}
+	if err := jsonUnmarshal(row.DataJSON, m); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal msg %s: %w", clientMsgID, err)
+	}
+	return m, nil
+}
+
+func (s *SQLiteStorage) ListFriendsPage(owner string, offset, limit int32) (*model.FriendPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.db.Model(&FriendRow{}).Where("owner_user_id = ?", owner).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: count friends: %w", err)
+	}
+	db := s.db.Where("owner_user_id = ?", owner).
+		Order("is_pinned DESC").Order("friend_user_id ASC").
+		Offset(int(offset))
+	if limit > 0 {
+		db = db.Limit(int(limit))
+	}
+	var rows []FriendRow
+	if err := db.Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: list friends page: %w", err)
+	}
+	items := make([]*model.FriendInfo, 0, len(rows))
+	for i := range rows {
+		f := &model.FriendInfo{}
+		if err := jsonUnmarshal(rows[i].DataJSON, f); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal friend %s: %w", rows[i].FriendUserID, err)
+		}
+		items = append(items, f)
+	}
+	hasMore := int64(int(offset)+len(items)) < total
+	return &model.FriendPage{Items: items, Total: total, HasMore: hasMore}, nil
+}
+
+func (s *SQLiteStorage) GetFriend(owner, friendUserID string) (*model.FriendInfo, error) {
+	var row FriendRow
+	err := s.db.Where("owner_user_id = ? AND friend_user_id = ?", owner, friendUserID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get friend %s: %w", friendUserID, err)
+	}
+	f := &model.FriendInfo{}
+	if err := jsonUnmarshal(row.DataJSON, f); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal friend %s: %w", friendUserID, err)
+	}
+	return f, nil
+}
+
+func (s *SQLiteStorage) ListBlacksPage(owner string, offset, limit int32) (*model.BlackPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.db.Model(&BlackRow{}).Where("owner_user_id = ?", owner).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: count blacks: %w", err)
+	}
+	db := s.db.Where("owner_user_id = ?", owner).Order("black_user_id ASC").Offset(int(offset))
+	if limit > 0 {
+		db = db.Limit(int(limit))
+	}
+	var rows []BlackRow
+	if err := db.Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: list blacks page: %w", err)
+	}
+	items := make([]*model.BlackInfo, 0, len(rows))
+	for i := range rows {
+		b := &model.BlackInfo{}
+		if err := jsonUnmarshal(rows[i].DataJSON, b); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal black %s: %w", rows[i].BlackUserID, err)
+		}
+		items = append(items, b)
+	}
+	hasMore := int64(int(offset)+len(items)) < total
+	return &model.BlackPage{Items: items, Total: total, HasMore: hasMore}, nil
+}
+
+func (s *SQLiteStorage) GetBlack(owner, blackUserID string) (*model.BlackInfo, error) {
+	var row BlackRow
+	err := s.db.Where("owner_user_id = ? AND black_user_id = ?", owner, blackUserID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get black %s: %w", blackUserID, err)
+	}
+	b := &model.BlackInfo{}
+	if err := jsonUnmarshal(row.DataJSON, b); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal black %s: %w", blackUserID, err)
+	}
+	return b, nil
+}
+
+func (s *SQLiteStorage) ListGroupsPage(owner string, offset, limit int32) (*model.GroupPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.db.Model(&GroupRow{}).Where("owner_user_id = ?", owner).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: count groups: %w", err)
+	}
+	db := s.db.Where("owner_user_id = ?", owner).
+		Order("group_name ASC").Order("group_id ASC").
+		Offset(int(offset))
+	if limit > 0 {
+		db = db.Limit(int(limit))
+	}
+	var rows []GroupRow
+	if err := db.Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: list groups page: %w", err)
+	}
+	items := make([]*model.GroupInfo, 0, len(rows))
+	for i := range rows {
+		g := &model.GroupInfo{}
+		if err := jsonUnmarshal(rows[i].DataJSON, g); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal group %s: %w", rows[i].GroupID, err)
+		}
+		items = append(items, g)
+	}
+	hasMore := int64(int(offset)+len(items)) < total
+	return &model.GroupPage{Items: items, Total: total, HasMore: hasMore}, nil
+}
+
+func (s *SQLiteStorage) GetGroup(owner, groupID string) (*model.GroupInfo, error) {
+	var row GroupRow
+	err := s.db.Where("owner_user_id = ? AND group_id = ?", owner, groupID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get group %s: %w", groupID, err)
+	}
+	g := &model.GroupInfo{}
+	if err := jsonUnmarshal(row.DataJSON, g); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal group %s: %w", groupID, err)
+	}
+	return g, nil
+}
+
+func (s *SQLiteStorage) ListGroupMembersPage(owner, groupID string, offset, limit int32) (*model.GroupMemberPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.db.Model(&GroupMemberRow{}).
+		Where("owner_user_id = ? AND group_id = ?", owner, groupID).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: count group members: %w", err)
+	}
+	db := s.db.Where("owner_user_id = ? AND group_id = ?", owner, groupID).
+		Order("role_level DESC").Order("join_time ASC").Order("user_id ASC").
+		Offset(int(offset))
+	if limit > 0 {
+		db = db.Limit(int(limit))
+	}
+	var rows []GroupMemberRow
+	if err := db.Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: list group members page: %w", err)
+	}
+	items := make([]*model.GroupMemberFullInfo, 0, len(rows))
+	for i := range rows {
+		m := &model.GroupMemberFullInfo{}
+		if err := jsonUnmarshal(rows[i].DataJSON, m); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal group member %s: %w", rows[i].UserID, err)
+		}
+		items = append(items, m)
+	}
+	hasMore := int64(int(offset)+len(items)) < total
+	return &model.GroupMemberPage{Items: items, Total: total, HasMore: hasMore}, nil
+}
+
+func (s *SQLiteStorage) GetGroupMember(owner, groupID, userID string) (*model.GroupMemberFullInfo, error) {
+	var row GroupMemberRow
+	err := s.db.Where("owner_user_id = ? AND group_id = ? AND user_id = ?", owner, groupID, userID).
+		First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: get group member %s: %w", userID, err)
+	}
+	m := &model.GroupMemberFullInfo{}
+	if err := jsonUnmarshal(row.DataJSON, m); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal group member %s: %w", userID, err)
+	}
+	return m, nil
+}
+
 // === 生命周期 ===
 
 func (s *SQLiteStorage) Clear(_ context.Context, owner string) error {

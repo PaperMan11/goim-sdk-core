@@ -32,24 +32,24 @@ func TestLocalUnread(t *testing.T) {
 	c := &DefaultClient{storage: stor, userID: owner, logger: &logger.NopLogger{}}
 
 	// si_c1：seq 2/3 未读，seq 1 已读，seq 4 已撤回不计
-	n, err := c.UnreadCount("si_c1")
+	n, err := c.Local().UnreadCount("si_c1")
 	require.NoError(t, err)
 	require.Equal(t, int64(2), n)
 
 	// si_c2：无消息缓存 → 回落到会话 unreadCount
-	n, err = c.UnreadCount("si_c2")
+	n, err = c.Local().UnreadCount("si_c2")
 	require.NoError(t, err)
 	require.Equal(t, int64(5), n)
 
 	// 通知会话 n_a_b 不参与业务未读
-	total, err := c.UnreadTotal()
+	total, err := c.Local().UnreadTotal()
 	require.NoError(t, err)
 	require.Equal(t, int64(7), total)
 
 	// 非法参数 / 未登录
-	_, err = c.UnreadCount("")
+	_, err = c.Local().UnreadCount("")
 	require.Error(t, err)
-	_, err = (&DefaultClient{storage: stor}).UnreadTotal()
+	_, err = (&DefaultClient{storage: stor}).Local().UnreadTotal()
 	require.Error(t, err)
 }
 
@@ -64,17 +64,17 @@ func TestGetConversationLocal(t *testing.T) {
 
 	c := &DefaultClient{storage: stor, userID: owner, logger: &logger.NopLogger{}}
 
-	conv, err := c.GetConversation("si_c1")
+	conv, err := c.Local().GetConversation("si_c1")
 	require.NoError(t, err)
 	require.NotNil(t, conv)
 	require.Equal(t, "c1", conv.UserID)
 
-	conv, err = c.GetConversation("si_missing")
+	conv, err = c.Local().GetConversation("si_missing")
 	require.NoError(t, err)
 	require.Nil(t, conv)
 
-	_, err = c.GetConversation("")
+	_, err = c.Local().GetConversation("")
 	require.Error(t, err)
-	_, err = (&DefaultClient{storage: stor}).GetConversation("si_c1")
+	_, err = (&DefaultClient{storage: stor}).Local().GetConversation("si_c1")
 	require.Error(t, err)
 }

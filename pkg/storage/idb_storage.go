@@ -723,6 +723,221 @@ func (s *IdbStorage) ListGroupMemberIDs(owner, groupID string) ([]string, error)
 	return idsFromRows(rows, "userID")
 }
 
+// === 本地分页 / 单条查询（Local Data API）===
+//
+// P1 阶段沿用现有 list* 全量读取后在 Go 侧排序/切片（语义与 SQLite 一致）；
+// P2 再把分页下推到 IndexedDB 复合键 range，避免全量反序列化。
+
+func (s *IdbStorage) ListConversationsPage(owner string, offset, limit int32) (*model.ConversationPage, error) {
+	all, err := s.ListConversations(owner)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].IsPinned != all[j].IsPinned {
+			return all[i].IsPinned
+		}
+		return all[i].LatestMsgSendTime > all[j].LatestMsgSendTime
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.ConversationPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *IdbStorage) GetConversations(owner string, conversationIDs []string) ([]*model.Conversation, error) {
+	if len(conversationIDs) == 0 {
+		return nil, nil
+	}
+	all, err := s.ListConversations(owner)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*model.Conversation, len(all))
+	for _, c := range all {
+		if c != nil {
+			byID[c.ConversationID] = c
+		}
+	}
+	out := make([]*model.Conversation, 0, len(conversationIDs))
+	for _, id := range conversationIDs {
+		if c := byID[id]; c != nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (s *IdbStorage) ListMsgsPage(owner, conversationID string, seq int64, limit int32, desc bool) (*model.MsgPage, error) {
+	all, err := s.ListMsgsByConversation(owner, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*model.MsgData, 0, len(all))
+	for _, m := range all {
+		if m == nil {
+			continue
+		}
+		if desc {
+			if seq > 0 && m.Seq > seq {
+				continue
+			}
+		} else if seq > 0 && m.Seq <= seq {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	if desc {
+		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Seq > filtered[j].Seq })
+	}
+	start, end, hasMore := pageSlice(len(filtered), 0, limit)
+	items := filtered[start:end]
+	page := &model.MsgPage{Items: items, HasMore: hasMore}
+	for _, m := range items {
+		if page.OldestSeq == 0 || m.Seq < page.OldestSeq {
+			page.OldestSeq = m.Seq
+		}
+		if m.Seq > page.NewestSeq {
+			page.NewestSeq = m.Seq
+		}
+	}
+	return page, nil
+}
+
+func (s *IdbStorage) GetMsg(owner, conversationID string, seq int64) (*model.MsgData, error) {
+	all, err := s.ListMsgsByConversation(owner, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range all {
+		if m != nil && m.Seq == seq {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *IdbStorage) GetMsgByClientID(owner, conversationID, clientMsgID string) (*model.MsgData, error) {
+	all, err := s.ListMsgsByConversation(owner, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range all {
+		if m != nil && m.ClientMsgID == clientMsgID {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *IdbStorage) ListFriendsPage(owner string, offset, limit int32) (*model.FriendPage, error) {
+	all, err := s.ListFriends(owner)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].IsPinned != all[j].IsPinned {
+			return all[i].IsPinned
+		}
+		return all[i].FriendUserID() < all[j].FriendUserID()
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.FriendPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *IdbStorage) GetFriend(owner, friendUserID string) (*model.FriendInfo, error) {
+	all, err := s.ListFriends(owner)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range all {
+		if f != nil && f.FriendUserID() == friendUserID {
+			return f, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *IdbStorage) ListBlacksPage(owner string, offset, limit int32) (*model.BlackPage, error) {
+	all, err := s.ListBlacks(owner)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].BlackUserID() < all[j].BlackUserID() })
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.BlackPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *IdbStorage) GetBlack(owner, blackUserID string) (*model.BlackInfo, error) {
+	all, err := s.ListBlacks(owner)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range all {
+		if b != nil && b.BlackUserID() == blackUserID {
+			return b, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *IdbStorage) ListGroupsPage(owner string, offset, limit int32) (*model.GroupPage, error) {
+	all, err := s.ListGroups(owner)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].GroupName != all[j].GroupName {
+			return all[i].GroupName < all[j].GroupName
+		}
+		return all[i].GroupID < all[j].GroupID
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.GroupPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *IdbStorage) GetGroup(owner, groupID string) (*model.GroupInfo, error) {
+	all, err := s.ListGroups(owner)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range all {
+		if g != nil && g.GroupID == groupID {
+			return g, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *IdbStorage) ListGroupMembersPage(owner, groupID string, offset, limit int32) (*model.GroupMemberPage, error) {
+	all, err := s.ListGroupMembers(owner, groupID)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].RoleLevel != all[j].RoleLevel {
+			return all[i].RoleLevel > all[j].RoleLevel
+		}
+		if all[i].JoinTime != all[j].JoinTime {
+			return all[i].JoinTime < all[j].JoinTime
+		}
+		return all[i].UserID < all[j].UserID
+	})
+	start, end, hasMore := pageSlice(len(all), offset, limit)
+	return &model.GroupMemberPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *IdbStorage) GetGroupMember(owner, groupID, userID string) (*model.GroupMemberFullInfo, error) {
+	all, err := s.ListGroupMembers(owner, groupID)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range all {
+		if m != nil && m.UserID == userID {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
 // === 生命周期 ===
 
 func (s *IdbStorage) Clear(_ context.Context, owner string) error {

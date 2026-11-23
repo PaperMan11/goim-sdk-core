@@ -1405,6 +1405,13 @@ SQLite 8 张业务表（models.go + sqlite.go）、Storage 接口扩展 + Memory
 IDHash 复用 pkg/utils/hash.HashStringSet、双同步引擎（pkg/sync）——
 交付明细见 **Phase 4.5（§4.5.1 - §4.5.6）**。wasm IndexedDB 方案仍归 Phase 5。
 
+### 11.3 本地数据能力 API（P1 已实现）
+
+对外暴露完整的本地缓存读取/分页/搜索/统计/清理能力（`Client.Local()` 门面，
+`Local.*` 跨语言前缀）。P1 已落地会话/消息/好友/黑名单/群/群成员的直读与分页
+（Memory/SQLite 完整实现，IndexedDB 过渡实现）；P2（搜索/`Stats`/IndexedDB 下推）、
+P3（`PurgeMsgs`/floor/同步联动）待实现，见 [LOCAL_DATA_API.md](LOCAL_DATA_API.md)。
+
 ---
 
 ## 12. 测试策略

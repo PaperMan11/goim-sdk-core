@@ -48,6 +48,7 @@ type DefaultClient struct {
 	conv       *manager.DefaultConvMgr
 	third      *manager.DefaultThirdMgr
 	fileUpload manager.FileUploader
+	local      manager.LocalDataMgr // 本地数据能力门面（只读缓存）
 
 	mu            sync.RWMutex
 	userID        string
@@ -199,6 +200,9 @@ func NewClient(cfg *ClientConfig) Client {
 
 	// 发送成功回调：维护会话本地摘要（服务端会话 DTO 不含摘要）
 	c.msg.SetOnSent(c.applySentConversationSummary)
+
+	// 本地数据能力门面（依赖 storage + 运行期当前 owner）
+	c.local = manager.NewLocalDataMgr(stor, c.currentOwner)
 
 	// 3. 传输层生命周期钩子（通过 MessageTransport interface setter 注入）
 	ws.SetOnConnecting(func() {
@@ -1162,67 +1166,13 @@ func (c *DefaultClient) applyMsgCache(name, conversationID string, fn func(owner
 	}
 }
 
-// UnreadCount 本地推导的单会话未读数（离线可用，不发网络请求）。
-//
-// 推导规则：hasReadSeq 取本地缓存中已读（IsRead=true）消息的最大 seq；
-// 未读数 = 缓存中 seq > hasReadSeq 且未撤回的条数。
-// 消息缓存不完整（只缓存了最近若干条）时结果为下界；其他端已读而本端
-// 未收到 2200 回执时结果偏大——跨端一致性有限，需要精确值时应走服务端
-// ConvMgr.GetSortedConversationList（返回 unreadTotal / unreadCount）。
-func (c *DefaultClient) UnreadCount(conversationID string) (int64, error) {
-	if conversationID == "" {
-		return 0, fmt.Errorf("unread count: conversationID is empty")
+// Local 本地数据能力门面（只读本地缓存，不发网络请求；设计见 docs/LOCAL_DATA_API.md）
+func (c *DefaultClient) Local() manager.LocalDataMgr {
+	if c.local != nil {
+		return c.local
 	}
-	owner, err := c.localOwner()
-	if err != nil {
-		return 0, err
-	}
-	conv, err := c.storage.GetConversation(owner, conversationID)
-	if err != nil {
-		return 0, fmt.Errorf("unread count: get conversation %s: %w", conversationID, err)
-	}
-	return c.unreadCountFor(owner, conversationID, conv)
-}
-
-// UnreadTotal 本地推导的全部业务会话未读总和（不含 n_ 通知会话）
-func (c *DefaultClient) UnreadTotal() (int64, error) {
-	owner, err := c.localOwner()
-	if err != nil {
-		return 0, err
-	}
-	convs, err := c.storage.ListConversations(owner)
-	if err != nil {
-		return 0, fmt.Errorf("unread count: list conversations: %w", err)
-	}
-	var total int64
-	for _, cv := range convs {
-		if cv == nil || manager.IsNotificationConversation(cv.ConversationID) {
-			continue
-		}
-		n, err := c.unreadCountFor(owner, cv.ConversationID, cv)
-		if err != nil {
-			c.logger.Warnf("client: unread total skip conv=%s, error=%v", cv.ConversationID, err.Error())
-			continue
-		}
-		total += n
-	}
-	return total, nil
-}
-
-// GetConversation 读取本地会话缓存中的单个会话（不发网络请求）；不存在返回 (nil, nil)。
-func (c *DefaultClient) GetConversation(conversationID string) (*model.Conversation, error) {
-	if conversationID == "" {
-		return nil, fmt.Errorf("get conversation: conversationID is empty")
-	}
-	owner, err := c.localOwner()
-	if err != nil {
-		return nil, err
-	}
-	conv, err := c.storage.GetConversation(owner, conversationID)
-	if err != nil {
-		return nil, fmt.Errorf("get conversation %s: %w", conversationID, err)
-	}
-	return conv, nil
+	// 测试等直接构造 DefaultClient 的场景：按需构造（依赖 storage + 当前 owner）
+	return manager.NewLocalDataMgr(c.storage, c.currentOwner)
 }
 
 // sessionOwner 当前登录态快照（userID 与 loggedIn 一并读取，避免多次加锁不一致）
@@ -1245,34 +1195,6 @@ func (c *DefaultClient) localOwner() (string, error) {
 		return "", fmt.Errorf("client: not logged in")
 	}
 	return owner, nil
-}
-
-// unreadCountFor 单会话未读推导；消息缓存为空时回落到会话缓存的 unreadCount 字段。
-func (c *DefaultClient) unreadCountFor(owner, conversationID string, conv *model.Conversation) (int64, error) {
-	msgs, err := c.storage.ListMsgsByConversation(owner, conversationID)
-	if err != nil {
-		return 0, fmt.Errorf("unread count: list msgs of %s: %w", conversationID, err)
-	}
-	if len(msgs) == 0 {
-		if conv != nil && conv.UnreadCount > 0 {
-			return int64(conv.UnreadCount), nil
-		}
-		return 0, nil
-	}
-	var hasReadSeq int64
-	for _, m := range msgs {
-		if m != nil && m.IsRead && m.Seq > hasReadSeq {
-			hasReadSeq = m.Seq
-		}
-	}
-	var unread int64
-	for _, m := range msgs {
-		if m == nil || m.Seq <= hasReadSeq || m.Status == model.MsgStatusRevoked {
-			continue
-		}
-		unread++
-	}
-	return unread, nil
 }
 
 // GetHistoryMsgs 服务端分页历史消息（降序，最新在前），结果写入本地消息缓存。

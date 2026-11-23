@@ -88,26 +88,16 @@ type Client interface {
 	Conv() manager.ConvMgr
 	Third() manager.ThirdMgr            // 第三方存储签名类 HTTP API 薄封装
 	FileUploader() manager.FileUploader // 第三方存储一站式上传引擎（组合 ThirdMgr）
+	// Local 本地数据能力门面（只读本地缓存，不发网络请求；设计见 docs/LOCAL_DATA_API.md）
+	Local() manager.LocalDataMgr
 
-	// —— 本地数据能力（未读 / 历史分页）——
+	// —— 服务端分页历史（HTTP 拉取 + 写穿本地缓存）——
 	//
-	// 未读为纯本地推导（离线可用，不发网络请求）；历史分页由 Client 编排
-	// 「HTTP 拉取 + 写穿本地缓存」，纯网络分页入口在 MsgMgr.PullHistoryMsgs（不碰存储）。
-	//
-	// UnreadCount 本地推导的单会话未读数：hasReadSeq = 缓存中已读消息的最大 seq，
-	// 未读 = 缓存中 seq > hasReadSeq 且未撤回的消息条数；缓存不完整时为下界。
-	// 跨端一致性依赖 2200 已读回执同步：其他端已读而本端未收到回执时会偏大。
-	UnreadCount(conversationID string) (int64, error)
-	// UnreadTotal 本地推导的全部业务会话未读总和（不含 n_ 通知会话）
-	UnreadTotal() (int64, error)
 	// GetHistoryMsgs 拉取 beforeSeq 及之前的一页历史（降序，最新在前）；beforeSeq<=0 取最新一页。
 	// 继续向更早翻页：下一次传 page.OldestSeq-1。返回页已写入本地缓存，重装后可逐页回填。
 	GetHistoryMsgs(ctx context.Context, conversationID string, beforeSeq int64, count int32) (*model.HistoryMsgsPage, error)
 	// GetNewerMsgs 拉取 afterSeq 之后的一页（升序），用于补齐比本地更新的消息
 	GetNewerMsgs(ctx context.Context, conversationID string, afterSeq int64, count int32) (*model.HistoryMsgsPage, error)
-	// GetConversation 读取本地会话缓存中的单个会话（不发网络请求）；不存在返回 (nil, nil)。
-	// 需要服务端最新状态时用 Conv().GetConversation(ctx, userID, conversationID)。
-	GetConversation(conversationID string) (*model.Conversation, error)
 
 	// —— 事件订阅（统一走 eventbus）——
 	// Subscribe 订阅指定 EventType，返回事件 channel 和取消函数
