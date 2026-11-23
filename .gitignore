@@ -46,5 +46,6 @@ dist/
 # IDE/Agent 本地缓存
 .screenshots/
 .trae/
+.trae-html-share-packages/
 .claude/
 
