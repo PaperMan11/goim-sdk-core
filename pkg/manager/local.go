@@ -3,6 +3,7 @@ package manager
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/storage"
@@ -57,6 +58,16 @@ type LocalDataMgr interface {
 	GetGroup(groupID string) (*model.GroupInfo, error)
 	ListGroupMembers(groupID string, offset, limit int32) (*model.GroupMemberPage, error)
 	GetGroupMember(groupID, userID string) (*model.GroupMemberFullInfo, error)
+
+	// —— 搜索 / 统计 ——
+	// 搜索为大小写不敏感子串匹配，keyword 为空返回参数错误；
+	// limit<=0 时实体搜索默认 50（上限 200）、消息搜索默认 30（上限 100）。
+	SearchConversations(keyword string, limit int32) (*model.ConversationPage, error)
+	SearchMsgs(conversationID, keyword string, limit int32) (*model.MsgPage, error)
+	SearchFriends(keyword string, limit int32) (*model.FriendPage, error)
+	SearchGroups(keyword string, limit int32) (*model.GroupPage, error)
+	// Stats 当前 owner 本地缓存条数统计（不打网络请求）
+	Stats() (*model.LocalDataStats, error)
 }
 
 // DefaultLocalDataMgr LocalDataMgr 默认实现
@@ -381,4 +392,84 @@ func (m *DefaultLocalDataMgr) GetGroupMember(groupID, userID string) (*model.Gro
 		return nil, err
 	}
 	return m.stor.GetGroupMember(owner, groupID, userID)
+}
+
+// —— 搜索 / 统计 ——
+
+func (m *DefaultLocalDataMgr) SearchConversations(keyword string, limit int32) (*model.ConversationPage, error) {
+	if strings.TrimSpace(keyword) == "" {
+		return nil, fmt.Errorf("local data: search conversations: keyword is empty")
+	}
+	owner, err := m.owner()
+	if err != nil {
+		return nil, err
+	}
+	_, limit = normalizeLocalPage(0, limit)
+	return m.stor.SearchConversations(owner, keyword, limit)
+}
+
+func (m *DefaultLocalDataMgr) SearchMsgs(conversationID, keyword string, limit int32) (*model.MsgPage, error) {
+	if conversationID == "" {
+		return nil, fmt.Errorf("local data: search msgs: conversationID is empty")
+	}
+	if strings.TrimSpace(keyword) == "" {
+		return nil, fmt.Errorf("local data: search msgs: keyword is empty")
+	}
+	owner, err := m.owner()
+	if err != nil {
+		return nil, err
+	}
+	return m.stor.SearchMsgs(owner, conversationID, keyword, normalizeMsgLimit(limit))
+}
+
+func (m *DefaultLocalDataMgr) SearchFriends(keyword string, limit int32) (*model.FriendPage, error) {
+	if strings.TrimSpace(keyword) == "" {
+		return nil, fmt.Errorf("local data: search friends: keyword is empty")
+	}
+	owner, err := m.owner()
+	if err != nil {
+		return nil, err
+	}
+	_, limit = normalizeLocalPage(0, limit)
+	return m.stor.SearchFriends(owner, keyword, limit)
+}
+
+func (m *DefaultLocalDataMgr) SearchGroups(keyword string, limit int32) (*model.GroupPage, error) {
+	if strings.TrimSpace(keyword) == "" {
+		return nil, fmt.Errorf("local data: search groups: keyword is empty")
+	}
+	owner, err := m.owner()
+	if err != nil {
+		return nil, err
+	}
+	_, limit = normalizeLocalPage(0, limit)
+	return m.stor.SearchGroups(owner, keyword, limit)
+}
+
+// Stats 汇总当前 owner 各实体缓存条数（消息/群成员为全量口径）
+func (m *DefaultLocalDataMgr) Stats() (*model.LocalDataStats, error) {
+	owner, err := m.owner()
+	if err != nil {
+		return nil, err
+	}
+	var st model.LocalDataStats
+	if st.Conversations, err = m.stor.CountConversations(owner); err != nil {
+		return nil, fmt.Errorf("local data: stats: count conversations: %w", err)
+	}
+	if st.Messages, err = m.stor.CountMsgs(owner, ""); err != nil {
+		return nil, fmt.Errorf("local data: stats: count messages: %w", err)
+	}
+	if st.Friends, err = m.stor.CountFriends(owner); err != nil {
+		return nil, fmt.Errorf("local data: stats: count friends: %w", err)
+	}
+	if st.Blacks, err = m.stor.CountBlacks(owner); err != nil {
+		return nil, fmt.Errorf("local data: stats: count blacks: %w", err)
+	}
+	if st.Groups, err = m.stor.CountGroups(owner); err != nil {
+		return nil, fmt.Errorf("local data: stats: count groups: %w", err)
+	}
+	if st.GroupMembers, err = m.stor.CountGroupMembers(owner, ""); err != nil {
+		return nil, fmt.Errorf("local data: stats: count group members: %w", err)
+	}
+	return &st, nil
 }

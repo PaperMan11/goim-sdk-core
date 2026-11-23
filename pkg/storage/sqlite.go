@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -1022,6 +1023,189 @@ func (s *SQLiteStorage) GetGroupMember(owner, groupID, userID string) (*model.Gr
 		return nil, fmt.Errorf("storage: unmarshal group member %s: %w", userID, err)
 	}
 	return m, nil
+}
+
+// === 本地搜索 / 计数（Local Data API P2）===
+
+// searchLikePattern 生成 LOWER(data_json) LIKE 的匹配串（转义 % _ \，避免用户关键字被当通配符）
+func searchLikePattern(keyword string) string {
+	kw := strings.ToLower(keyword)
+	kw = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(kw)
+	return "%" + kw + "%"
+}
+
+// searchKeywordCond 搜索 WHERE 片段：owner 隔离 + JSON 文本大小写不敏感匹配
+const searchKeywordCond = "LOWER(data_json) LIKE ? ESCAPE '\\'"
+
+func (s *SQLiteStorage) SearchConversations(owner, keyword string, limit int32) (*model.ConversationPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.ConversationPage{Items: []*model.Conversation{}, Total: 0}, nil
+	}
+	where := "owner_user_id = ? AND " + searchKeywordCond
+	var total int64
+	if err := s.db.Model(&ConversationRow{}).Where(where, owner, searchLikePattern(keyword)).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: search conversations count: %w", err)
+	}
+	var rows []ConversationRow
+	if err := s.db.Where(where, owner, searchLikePattern(keyword)).
+		Order("is_pinned DESC").Order("latest_msg_send_time DESC").
+		Limit(int(limit)).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: search conversations: %w", err)
+	}
+	items := make([]*model.Conversation, 0, len(rows))
+	for i := range rows {
+		c := &model.Conversation{}
+		if err := jsonUnmarshal(rows[i].DataJSON, c); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal conv %s: %w", rows[i].ConversationID, err)
+		}
+		items = append(items, c)
+	}
+	return &model.ConversationPage{Items: items, Total: total, HasMore: int64(len(items)) < total}, nil
+}
+
+func (s *SQLiteStorage) SearchMsgs(owner, conversationID, keyword string, limit int32) (*model.MsgPage, error) {
+	if limit <= 0 {
+		limit = msgSearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.MsgPage{Items: []*model.MsgData{}}, nil
+	}
+	var rows []MessageRow
+	if err := s.db.Where("owner_user_id = ? AND conversation_id = ? AND "+searchKeywordCond,
+		owner, conversationID, searchLikePattern(keyword)).
+		Order("seq DESC").Limit(int(limit) + 1).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: search msgs: %w", err)
+	}
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:limit]
+	}
+	items := make([]*model.MsgData, 0, len(rows))
+	for i := range rows {
+		m := &model.MsgData{}
+		if err := jsonUnmarshal(rows[i].DataJSON, m); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal msg %s: %w", rows[i].ClientMsgID, err)
+		}
+		items = append(items, m)
+	}
+	return buildMsgPage(items, hasMore), nil
+}
+
+func (s *SQLiteStorage) SearchFriends(owner, keyword string, limit int32) (*model.FriendPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.FriendPage{Items: []*model.FriendInfo{}, Total: 0}, nil
+	}
+	where := "owner_user_id = ? AND " + searchKeywordCond
+	var total int64
+	if err := s.db.Model(&FriendRow{}).Where(where, owner, searchLikePattern(keyword)).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: search friends count: %w", err)
+	}
+	var rows []FriendRow
+	if err := s.db.Where(where, owner, searchLikePattern(keyword)).
+		Order("is_pinned DESC").Order("friend_user_id ASC").
+		Limit(int(limit)).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: search friends: %w", err)
+	}
+	items := make([]*model.FriendInfo, 0, len(rows))
+	for i := range rows {
+		f := &model.FriendInfo{}
+		if err := jsonUnmarshal(rows[i].DataJSON, f); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal friend %s: %w", rows[i].FriendUserID, err)
+		}
+		items = append(items, f)
+	}
+	return &model.FriendPage{Items: items, Total: total, HasMore: int64(len(items)) < total}, nil
+}
+
+func (s *SQLiteStorage) SearchGroups(owner, keyword string, limit int32) (*model.GroupPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.GroupPage{Items: []*model.GroupInfo{}, Total: 0}, nil
+	}
+	where := "owner_user_id = ? AND " + searchKeywordCond
+	var total int64
+	if err := s.db.Model(&GroupRow{}).Where(where, owner, searchLikePattern(keyword)).Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("storage: search groups count: %w", err)
+	}
+	var rows []GroupRow
+	if err := s.db.Where(where, owner, searchLikePattern(keyword)).
+		Order("group_name ASC").Order("group_id ASC").
+		Limit(int(limit)).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("storage: search groups: %w", err)
+	}
+	items := make([]*model.GroupInfo, 0, len(rows))
+	for i := range rows {
+		g := &model.GroupInfo{}
+		if err := jsonUnmarshal(rows[i].DataJSON, g); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal group %s: %w", rows[i].GroupID, err)
+		}
+		items = append(items, g)
+	}
+	return &model.GroupPage{Items: items, Total: total, HasMore: int64(len(items)) < total}, nil
+}
+
+func (s *SQLiteStorage) CountConversations(owner string) (int64, error) {
+	var n int64
+	if err := s.db.Model(&ConversationRow{}).Where("owner_user_id = ?", owner).Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("storage: count conversations: %w", err)
+	}
+	return n, nil
+}
+
+func (s *SQLiteStorage) CountMsgs(owner, conversationID string) (int64, error) {
+	q := s.db.Model(&MessageRow{}).Where("owner_user_id = ?", owner)
+	if conversationID != "" {
+		q = q.Where("conversation_id = ?", conversationID)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("storage: count msgs: %w", err)
+	}
+	return n, nil
+}
+
+func (s *SQLiteStorage) CountFriends(owner string) (int64, error) {
+	var n int64
+	if err := s.db.Model(&FriendRow{}).Where("owner_user_id = ?", owner).Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("storage: count friends: %w", err)
+	}
+	return n, nil
+}
+
+func (s *SQLiteStorage) CountBlacks(owner string) (int64, error) {
+	var n int64
+	if err := s.db.Model(&BlackRow{}).Where("owner_user_id = ?", owner).Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("storage: count blacks: %w", err)
+	}
+	return n, nil
+}
+
+func (s *SQLiteStorage) CountGroups(owner string) (int64, error) {
+	var n int64
+	if err := s.db.Model(&GroupRow{}).Where("owner_user_id = ?", owner).Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("storage: count groups: %w", err)
+	}
+	return n, nil
+}
+
+func (s *SQLiteStorage) CountGroupMembers(owner, groupID string) (int64, error) {
+	q := s.db.Model(&GroupMemberRow{}).Where("owner_user_id = ?", owner)
+	if groupID != "" {
+		q = q.Where("group_id = ?", groupID)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("storage: count group members: %w", err)
+	}
+	return n, nil
 }
 
 // === 生命周期 ===

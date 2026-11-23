@@ -1,8 +1,8 @@
 # 本地数据能力 API 设计（Local Data API）
 
-> 状态：P1 已实现（`Client.Local()` 门面 + 会话/消息/好友/黑名单/群/群成员直读与分页；
-> Storage 三实现：Memory/SQLite 完整、IndexedDB 过渡实现）。
-> P2（搜索 / `Stats` / IndexedDB 下推与 schema 升级）、P3（`PurgeMsgs` / floor / 同步联动）仍为设计。
+> 状态：P1/P2 已实现（`Client.Local()` 门面 + 会话/消息/好友/黑名单/群/群成员直读、分页、搜索与
+> `Stats` 统计；Storage 三实现：Memory/SQLite 完整，IndexedDB 消息分页/直读/计数/搜索已下推，DB 升至 v2）。
+> P3（`PurgeMsgs` / floor / 同步联动）仍为设计。
 
 ## 1. 背景与现状
 
@@ -161,7 +161,11 @@ type MsgPage struct {
 | 消息 floor | `GetMsgFloor(owner, convID)`, `SetMsgFloor(owner, convID, seq)` |
 | 清理 | `PurgeMsgs(owner, convID, upToSeq) (int64, error)` |
 
-> P1 已落地上面的 `*Page` / `Get*` 系列；`Search*` / `Count*` 归 P2，`GetMsgFloor` / `PurgeMsgs` 归 P3。
+> P1 已落地 `*Page` / `Get*` 系列；P2 已落地 `Search*`（缓存 JSON 文本大小写不敏感子串匹配，
+> SQLite 用 `LOWER(data_json) LIKE`，Memory/IndexedDB 在 JSON 文本上 `includes`）与 `Count*`，
+> IndexedDB 的消息分页、单条直读、按 clientMsgID 直读、计数与搜索均已下推，
+> `DB_VERSION` 升至 2 并补 `messages.byClientMsgID` / `conversations.byLatestMsgSendTime` 索引（不重建 store）；
+> `GetMsgFloor` / `PurgeMsgs` 归 P3。
 
 存储实现要点：
 
@@ -199,13 +203,13 @@ gomobile 侧由 `Call/SyncCall` 的反射层覆盖，无需额外导出函数。
 |---|---|---|
 | P0（已完成） | `GetConversation`、`UnreadCount/UnreadTotal`、`GetHistoryMsgs/GetNewerMsgs` | 现有单测 |
 | P1（已完成） | `LocalDataMgr` 门面 + 会话/消息/好友/黑名单/群/成员**直读**与**分页** + Storage 扩展（Memory/SQLite，Idb 过渡实现） | Memory/SQLite 单测 + wasm 交叉编译通过 + 跨语言 `Local.*` 已注册 |
-| P2 | 搜索、`Stats`、IndexedDB 实现与 schema 升级 | wasm 自测页可翻页/搜索 |
+| P2（已完成） | 搜索、`Stats`、IndexedDB 下推与 schema 升级 | Memory/SQLite 同套搜索/计数/`Stats` 单测 + wasm 交叉编译通过 + 自测页验证 IDB 分页/搜索/计数 |
 | P3 | `PurgeMsgs` + floor 语义 + 同步引擎联动 + `ClearLocalData` | 清理后重连不回流、显式历史仍可拉 |
 
 ## 9. 风险与取舍
 
 - **接口膨胀**：用独立门面 + 前缀隔离；`Client` 旧方法保留兼容，后续版本收敛
 - **搜索性能**：SQLite pure-Go 驱动不保证 FTS5，v1 用 LIKE + 限定会话/条数；数据量大时再评估内存索引
-- **Total 代价**：IndexedDB 计数为逐条遍历，只对实体分页提供 `Total`，消息分页不给
+- **Total 代价**：IndexedDB 用 `store.count(range)` 计数；只对实体分页提供 `Total`，消息分页不给
 - **floor 一致性**：floor 只影响自动同步，不拦截显式历史请求；文档需明确二者差异
 - **多端语义**：本地清理只影响本机；其他设备/服务端数据不变，重装后仍可拉回（符合预期）

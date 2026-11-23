@@ -201,7 +201,7 @@ async function op(operation, argsJSON) { ... }
 
 ### 5.3 operation 枚举
 
-共 34 个 operation，按 store 分组：
+共 47 个 operation，按 store 分组（P2 新增分页/直读/搜索/计数类操作）：
 
 **元数据（seqs / versions / meta）**
 - `getMaxSeqs` / `setMaxSeqs`
@@ -215,8 +215,13 @@ async function op(operation, argsJSON) { ... }
 - `markMsgsRead` — 按精确 seq 列表置 `isRead=true`
 - `markMsgsReadUpTo` — 按 `seq <= hasReadSeq` 条件置 `isRead=true`（条件过滤）
 - `markMsgsRevoked` — 按精确 seq 列表置 `status=4`（`MsgStatusRevoked`，与 `pkg/model/const.go` 对齐）
+- `listMsgsPage` — 复合键 `IDBKeyRange` + `openCursor` 分页（desc/asc，返回 limit+1 条供 Go 判断 HasMore）
+- `getMsg` — 按 `[owner, conversationID, seq]` 主键直读
+- `getMsgByClientID` — 走 `byClientMsgID` 索引直读
+- `searchMsgs` — 限定单会话遍历 + `dataJSON` 子串匹配，seq 倒序后返回 limit+1 条
+- `countMsgs` — `store.count(range)`；`conversationID` 为空时统计 owner 全部消息
 
-**conversations / friends / blacks / groups / groupMembers** — 各自对应 `upsert*` / `delete*` / `list*`（list 完整 model，返回扁平 row 列表）和 `list*IDs`（只返回 ID 字符串数组，避免 Go 侧反序列化完整 model）
+**conversations / friends / blacks / groups / groupMembers** — 各自对应 `upsert*` / `delete*` / `list*`（list 完整 model，返回扁平 row 列表）和 `list*IDs`（只返回 ID 字符串数组，避免 Go 侧反序列化完整 model）；P2 另加 `searchConversations` / `searchFriends` / `searchGroups`（owner 范围遍历 + `dataJSON` 子串匹配）与 `countConversations` / `countFriends` / `countBlacks` / `countGroups` / `countGroupMembers`（`store.count(range)`）
 
 **生命周期**
 - `clearOwner` — 清掉指定 owner 在 seqs / versions / messages / conversations / friends / blacks / groups / groupMembers 里的全部记录，**保留 meta**（SDK 级数据跨账号共享）
@@ -337,7 +342,7 @@ wasm 单线程事件循环 → 所有 Go 方法调用在主 goroutine 串行执�
 | L1 | **条件 mark 用全量拉取+写回** | 消息量大时（>10000）慢 | 加 IndexedDB 索引 `[owner, conversationID, seq]`，用 `openCursor` 游标遍历只修改命中项 |
 | L2 | **db 连接无缓存** | `_dbPromise` 只缓存一次，但每次 op 都 `openDB()` | 实测轻量，暂时不动 |
 | L3 | **未封装为 Promise 风格** | JS 原生 Promise 在 Go 侧用 channel 阻塞，调试体验差 | wasm main.go 暴露一个 `dumpDB(operation)` 调试方法 |
-| L4 | **无 migration 机制** | DB_VERSION 硬编码 1，后续加新 store 时需 bump 版本 | 在 `idb_wrapper.js` `openDB()` 里加 `onupgradeneeded` 逻辑 |
+| L4 | ~~无 migration 机制~~ | DB_VERSION=2；`onupgradeneeded` 只创建缺失的 store/index（不重建），补 `messages.byClientMsgID` / `conversations.byLatestMsgSendTime` | ✅ P2 已完成 |
 | L5 | **`markMsgsReadUpTo` 条件过滤** | JS 侧 `seq <= hasReadSeq` 条件，Go 侧传 `hasReadSeq` 参数 | 已实现（L1 改善游标遍历） |
 | L6 | ~~真机浏览器测试~~ | 已通过端到端验证（见 §11） | ✅ 已完成 |
 
@@ -370,7 +375,7 @@ node -e "const h=require('http'),f=require('fs'),p=require('path');const root='.
 - DevTools → Application → IndexedDB → `goim_sdk`，应看到 9 个 store，`meta` 里有 `device_id`
 - 控制台可手动验证优雅退出：`goimSdk.shutdown(() => console.log('shutdown done'))`（执行后实例退出，需刷新页面重新加载）
 
-`cmd/wasm/index.html` 是自测/演示页，script 顺序：`idb_wrapper.js` → `../dist/wasm_exec.js` → 实例化 `../dist/goim.wasm`。
+`cmd/wasm/index.html` 是自测/演示页，script 顺序：`idb_wrapper.js` → `../../dist/wasm_exec.js` → 实例化 `../../dist/goim.wasm`（以项目根目录为静态服务根）。
 Node 侧自测脚本额外覆盖 2 项 shutdown 验证（页面不自动跑：`shutdown` 会结束 Go 运行时，实例不可再用）。
 
 ### 11.2 覆盖项（12 项，Node 全跑通过；浏览器覆盖前 10 项）

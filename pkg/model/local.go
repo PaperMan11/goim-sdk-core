@@ -46,6 +46,16 @@ type GroupMemberPage struct {
 	HasMore bool                   `json:"hasMore"`
 }
 
+// LocalDataStats 当前 owner 本地缓存条数统计（各表 COUNT）
+type LocalDataStats struct {
+	Conversations int64 `json:"conversations"`
+	Messages      int64 `json:"messages"`
+	Friends       int64 `json:"friends"`
+	Blacks        int64 `json:"blacks"`
+	Groups        int64 `json:"groups"`
+	GroupMembers  int64 `json:"groupMembers"`
+}
+
 // ConversationSeqs 单会话的本地/服务端 seq 边界（全部来自本地缓存与同步元数据）
 type ConversationSeqs struct {
 	ConversationID string `json:"conversationID"`

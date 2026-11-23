@@ -292,3 +292,124 @@ func memberIDs(items []*model.GroupMemberFullInfo) []string {
 	}
 	return out
 }
+
+// TestStorageLocalSearchAndCounts P2：搜索（大小写不敏感子串）与计数在 Memory/SQLite 上一致。
+func TestStorageLocalSearchAndCounts(t *testing.T) {
+	for name, stor := range newLocalStorages(t) {
+		t.Run(name, func(t *testing.T) {
+			const owner, conv = "u1", "si_a_b"
+			require.NoError(t, stor.UpsertConversations(owner, []*model.Conversation{
+				{ConversationID: conv, LatestMsgSendTime: 100,
+					MsgInfo: &model.MsgInfo{Content: "Hello World", SenderName: "Alice"}},
+				{ConversationID: "g_team", LatestMsgSendTime: 200,
+					MsgInfo: &model.MsgInfo{GroupName: "Team Chat"}},
+				{ConversationID: "g_other", LatestMsgSendTime: 50},
+			}))
+			require.NoError(t, stor.UpsertMsgs(owner, []*model.MsgData{
+				{ClientMsgID: "m1", ConversationID: conv, Seq: 1, Content: "Hello World"},
+				{ClientMsgID: "m2", ConversationID: conv, Seq: 2, Content: "another"},
+				{ClientMsgID: "m3", ConversationID: conv, Seq: 3, Content: "HELLO again"},
+				{ClientMsgID: "m4", ConversationID: "si_c2", Seq: 4, Content: "hello"},
+			}))
+			require.NoError(t, stor.UpsertFriends(owner, []*model.FriendInfo{
+				{FriendUser: &model.FriendUserInfo{UserID: "f1", Nickname: "Alice"}},
+				{Remark: "Bestie", FriendUser: &model.FriendUserInfo{UserID: "f2", Nickname: "Bob"}},
+			}))
+			require.NoError(t, stor.UpsertBlacks(owner, []*model.BlackInfo{
+				{BlackUserInfo: &model.PublicUserInfo{UserID: "bad"}},
+			}))
+			require.NoError(t, stor.UpsertGroups(owner, []*model.GroupInfo{
+				{GroupID: "g1", GroupName: "Alpha"},
+				{GroupID: "g2", GroupName: "Beta"},
+			}))
+			require.NoError(t, stor.UpsertGroupMembers(owner, "g1", []*model.GroupMemberFullInfo{
+				{GroupID: "g1", UserID: "m1"},
+				{GroupID: "g1", UserID: "m2"},
+			}))
+			require.NoError(t, stor.UpsertGroupMembers(owner, "g2", []*model.GroupMemberFullInfo{
+				{GroupID: "g2", UserID: "m3"},
+			}))
+
+			// 会话搜索：大小写不敏感，命中摘要内容
+			cpage, err := stor.SearchConversations(owner, "HELLO", 10)
+			require.NoError(t, err)
+			require.Equal(t, []string{conv}, convIDs(cpage.Items))
+			require.Equal(t, int64(1), cpage.Total)
+			require.False(t, cpage.HasMore)
+
+			// 空关键字 / 无命中：空页而非全量
+			cpage, err = stor.SearchConversations(owner, "", 10)
+			require.NoError(t, err)
+			require.Empty(t, cpage.Items)
+			require.Zero(t, cpage.Total)
+			cpage, err = stor.SearchConversations(owner, "missing", 10)
+			require.NoError(t, err)
+			require.Empty(t, cpage.Items)
+
+			// 消息搜索：限定会话、seq 倒序、limit 生效
+			mpage, err := stor.SearchMsgs(owner, conv, "hello", 10)
+			require.NoError(t, err)
+			require.Equal(t, []int64{3, 1}, msgSeqs(mpage.Items))
+			require.Equal(t, int64(1), mpage.OldestSeq)
+			require.Equal(t, int64(3), mpage.NewestSeq)
+			require.False(t, mpage.HasMore)
+
+			mpage, err = stor.SearchMsgs(owner, conv, "hello", 1)
+			require.NoError(t, err)
+			require.Equal(t, []int64{3}, msgSeqs(mpage.Items))
+			require.True(t, mpage.HasMore)
+
+			// 其他会话的同名消息不被命中
+			mpage, err = stor.SearchMsgs(owner, "si_c2", "hello", 10)
+			require.NoError(t, err)
+			require.Equal(t, []int64{4}, msgSeqs(mpage.Items))
+
+			// 好友搜索：昵称 / 备注
+			fpage, err := stor.SearchFriends(owner, "alice", 10)
+			require.NoError(t, err)
+			require.Equal(t, []string{"f1"}, friendIDs(fpage.Items))
+			fpage, err = stor.SearchFriends(owner, "BESTIE", 10)
+			require.NoError(t, err)
+			require.Equal(t, []string{"f2"}, friendIDs(fpage.Items))
+
+			// 群搜索：群名
+			gpage, err := stor.SearchGroups(owner, "alp", 10)
+			require.NoError(t, err)
+			require.Equal(t, []string{"g1"}, groupIDs(gpage.Items))
+
+			// 计数
+			n, err := stor.CountConversations(owner)
+			require.NoError(t, err)
+			require.Equal(t, int64(3), n)
+			n, err = stor.CountMsgs(owner, conv)
+			require.NoError(t, err)
+			require.Equal(t, int64(3), n)
+			n, err = stor.CountMsgs(owner, "")
+			require.NoError(t, err)
+			require.Equal(t, int64(4), n)
+			n, err = stor.CountFriends(owner)
+			require.NoError(t, err)
+			require.Equal(t, int64(2), n)
+			n, err = stor.CountBlacks(owner)
+			require.NoError(t, err)
+			require.Equal(t, int64(1), n)
+			n, err = stor.CountGroups(owner)
+			require.NoError(t, err)
+			require.Equal(t, int64(2), n)
+			n, err = stor.CountGroupMembers(owner, "g1")
+			require.NoError(t, err)
+			require.Equal(t, int64(2), n)
+			n, err = stor.CountGroupMembers(owner, "")
+			require.NoError(t, err)
+			require.Equal(t, int64(3), n)
+
+			// owner 隔离
+			cpage, err = stor.SearchConversations("u2", "hello", 10)
+			require.NoError(t, err)
+			require.Empty(t, cpage.Items)
+			n, err = stor.CountMsgs("u2", "")
+			require.NoError(t, err)
+			require.Zero(t, n)
+		})
+	}
+}

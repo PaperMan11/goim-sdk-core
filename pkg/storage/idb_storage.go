@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"syscall/js"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
@@ -725,8 +726,8 @@ func (s *IdbStorage) ListGroupMemberIDs(owner, groupID string) ([]string, error)
 
 // === 本地分页 / 单条查询（Local Data API）===
 //
-// P1 阶段沿用现有 list* 全量读取后在 Go 侧排序/切片（语义与 SQLite 一致）；
-// P2 再把分页下推到 IndexedDB 复合键 range，避免全量反序列化。
+// P2：消息分页/单条直读/按 clientMsgID 直读已下推到 IndexedDB 复合键与索引；
+// 实体分页仍复用 list*（数据量小，且置顶排序依赖 dataJSON 解析）。
 
 func (s *IdbStorage) ListConversationsPage(owner string, offset, limit int32) (*model.ConversationPage, error) {
 	all, err := s.ListConversations(owner)
@@ -767,65 +768,79 @@ func (s *IdbStorage) GetConversations(owner string, conversationIDs []string) ([
 }
 
 func (s *IdbStorage) ListMsgsPage(owner, conversationID string, seq int64, limit int32, desc bool) (*model.MsgPage, error) {
-	all, err := s.ListMsgsByConversation(owner, conversationID)
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.opJSONList("listMsgsPage", map[string]any{
+		"owner":          owner,
+		"conversationID": conversationID,
+		"seq":            seq,
+		"limit":          limit,
+		"desc":           desc,
+	})
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]*model.MsgData, 0, len(all))
-	for _, m := range all {
-		if m == nil {
-			continue
-		}
-		if desc {
-			if seq > 0 && m.Seq > seq {
-				continue
-			}
-		} else if seq > 0 && m.Seq <= seq {
-			continue
-		}
-		filtered = append(filtered, m)
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:limit]
 	}
-	if desc {
-		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Seq > filtered[j].Seq })
-	}
-	start, end, hasMore := pageSlice(len(filtered), 0, limit)
-	items := filtered[start:end]
-	page := &model.MsgPage{Items: items, HasMore: hasMore}
-	for _, m := range items {
-		if page.OldestSeq == 0 || m.Seq < page.OldestSeq {
-			page.OldestSeq = m.Seq
+	items := make([]*model.MsgData, 0, len(rows))
+	for _, r := range rows {
+		m := &model.MsgData{}
+		if err := dataFromRow(r, m); err != nil {
+			return nil, fmt.Errorf("storage: listMsgsPage: %w", err)
 		}
-		if m.Seq > page.NewestSeq {
-			page.NewestSeq = m.Seq
-		}
+		items = append(items, m)
 	}
-	return page, nil
+	return buildMsgPage(items, hasMore), nil
 }
 
 func (s *IdbStorage) GetMsg(owner, conversationID string, seq int64) (*model.MsgData, error) {
-	all, err := s.ListMsgsByConversation(owner, conversationID)
+	v, err := s.op("getMsg", map[string]any{
+		"owner":          owner,
+		"conversationID": conversationID,
+		"seq":            seq,
+	})
 	if err != nil {
 		return nil, err
 	}
-	for _, m := range all {
-		if m != nil && m.Seq == seq {
-			return m, nil
-		}
+	if v.IsNull() || v.IsUndefined() {
+		return nil, nil
 	}
-	return nil, nil
+	m := &model.MsgData{}
+	if err := dataFromRowJSON(v, m); err != nil {
+		return nil, fmt.Errorf("storage: getMsg: %w", err)
+	}
+	return m, nil
 }
 
 func (s *IdbStorage) GetMsgByClientID(owner, conversationID, clientMsgID string) (*model.MsgData, error) {
-	all, err := s.ListMsgsByConversation(owner, conversationID)
+	v, err := s.op("getMsgByClientID", map[string]any{
+		"owner":          owner,
+		"conversationID": conversationID,
+		"clientMsgID":    clientMsgID,
+	})
 	if err != nil {
 		return nil, err
 	}
-	for _, m := range all {
-		if m != nil && m.ClientMsgID == clientMsgID {
-			return m, nil
-		}
+	if v.IsNull() || v.IsUndefined() {
+		return nil, nil
 	}
-	return nil, nil
+	m := &model.MsgData{}
+	if err := dataFromRowJSON(v, m); err != nil {
+		return nil, fmt.Errorf("storage: getMsgByClientID: %w", err)
+	}
+	return m, nil
+}
+
+// dataFromRowJSON 把 JS 返回的 row 对象（js.Value）还原为 dataJSON 中的业务对象
+func dataFromRowJSON(v js.Value, dest any) error {
+	bs, err := stringifyJS(v)
+	if err != nil {
+		return err
+	}
+	return dataFromRow(json.RawMessage(bs), dest)
 }
 
 func (s *IdbStorage) ListFriendsPage(owner string, offset, limit int32) (*model.FriendPage, error) {
@@ -936,6 +951,173 @@ func (s *IdbStorage) GetGroupMember(owner, groupID, userID string) (*model.Group
 		}
 	}
 	return nil, nil
+}
+
+// === 本地搜索 / 计数（Local Data API P2）===
+//
+// JS 侧在 IndexedDB 上遍历 + includes 并返回命中行，Go 侧负责一致性排序与分页。
+
+func (s *IdbStorage) SearchConversations(owner, keyword string, limit int32) (*model.ConversationPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.ConversationPage{Items: []*model.Conversation{}, Total: 0}, nil
+	}
+	rows, err := s.opJSONList("searchConversations", map[string]any{
+		"owner":   owner,
+		"keyword": strings.ToLower(keyword),
+	})
+	if err != nil {
+		return nil, err
+	}
+	all := make([]*model.Conversation, 0, len(rows))
+	for _, r := range rows {
+		c := &model.Conversation{}
+		if err := dataFromRow(r, c); err != nil {
+			return nil, fmt.Errorf("storage: searchConversations: %w", err)
+		}
+		all = append(all, c)
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].IsPinned != all[j].IsPinned {
+			return all[i].IsPinned
+		}
+		return all[i].LatestMsgSendTime > all[j].LatestMsgSendTime
+	})
+	start, end, hasMore := pageSlice(len(all), 0, limit)
+	return &model.ConversationPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *IdbStorage) SearchMsgs(owner, conversationID, keyword string, limit int32) (*model.MsgPage, error) {
+	if limit <= 0 {
+		limit = msgSearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.MsgPage{Items: []*model.MsgData{}}, nil
+	}
+	rows, err := s.opJSONList("searchMsgs", map[string]any{
+		"owner":          owner,
+		"conversationID": conversationID,
+		"keyword":        strings.ToLower(keyword),
+		"limit":          limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:limit]
+	}
+	items := make([]*model.MsgData, 0, len(rows))
+	for _, r := range rows {
+		m := &model.MsgData{}
+		if err := dataFromRow(r, m); err != nil {
+			return nil, fmt.Errorf("storage: searchMsgs: %w", err)
+		}
+		items = append(items, m)
+	}
+	return buildMsgPage(items, hasMore), nil
+}
+
+func (s *IdbStorage) SearchFriends(owner, keyword string, limit int32) (*model.FriendPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.FriendPage{Items: []*model.FriendInfo{}, Total: 0}, nil
+	}
+	rows, err := s.opJSONList("searchFriends", map[string]any{
+		"owner":   owner,
+		"keyword": strings.ToLower(keyword),
+	})
+	if err != nil {
+		return nil, err
+	}
+	all := make([]*model.FriendInfo, 0, len(rows))
+	for _, r := range rows {
+		f := &model.FriendInfo{}
+		if err := dataFromRow(r, f); err != nil {
+			return nil, fmt.Errorf("storage: searchFriends: %w", err)
+		}
+		all = append(all, f)
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].IsPinned != all[j].IsPinned {
+			return all[i].IsPinned
+		}
+		return all[i].FriendUserID() < all[j].FriendUserID()
+	})
+	start, end, hasMore := pageSlice(len(all), 0, limit)
+	return &model.FriendPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+func (s *IdbStorage) SearchGroups(owner, keyword string, limit int32) (*model.GroupPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	if keyword == "" {
+		return &model.GroupPage{Items: []*model.GroupInfo{}, Total: 0}, nil
+	}
+	rows, err := s.opJSONList("searchGroups", map[string]any{
+		"owner":   owner,
+		"keyword": strings.ToLower(keyword),
+	})
+	if err != nil {
+		return nil, err
+	}
+	all := make([]*model.GroupInfo, 0, len(rows))
+	for _, r := range rows {
+		g := &model.GroupInfo{}
+		if err := dataFromRow(r, g); err != nil {
+			return nil, fmt.Errorf("storage: searchGroups: %w", err)
+		}
+		all = append(all, g)
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].GroupName != all[j].GroupName {
+			return all[i].GroupName < all[j].GroupName
+		}
+		return all[i].GroupID < all[j].GroupID
+	})
+	start, end, hasMore := pageSlice(len(all), 0, limit)
+	return &model.GroupPage{Items: all[start:end], Total: int64(len(all)), HasMore: hasMore}, nil
+}
+
+// idbCount 执行计数类 op 并转为 int64
+func (s *IdbStorage) idbCount(operation string, args map[string]any) (int64, error) {
+	v, err := s.op(operation, args)
+	if err != nil {
+		return 0, err
+	}
+	if v.IsNull() || v.IsUndefined() {
+		return 0, nil
+	}
+	return int64(v.Int()), nil
+}
+
+func (s *IdbStorage) CountConversations(owner string) (int64, error) {
+	return s.idbCount("countConversations", map[string]any{"owner": owner})
+}
+
+func (s *IdbStorage) CountMsgs(owner, conversationID string) (int64, error) {
+	return s.idbCount("countMsgs", map[string]any{"owner": owner, "conversationID": conversationID})
+}
+
+func (s *IdbStorage) CountFriends(owner string) (int64, error) {
+	return s.idbCount("countFriends", map[string]any{"owner": owner})
+}
+
+func (s *IdbStorage) CountBlacks(owner string) (int64, error) {
+	return s.idbCount("countBlacks", map[string]any{"owner": owner})
+}
+
+func (s *IdbStorage) CountGroups(owner string) (int64, error) {
+	return s.idbCount("countGroups", map[string]any{"owner": owner})
+}
+
+func (s *IdbStorage) CountGroupMembers(owner, groupID string) (int64, error) {
+	return s.idbCount("countGroupMembers", map[string]any{"owner": owner, "groupID": groupID})
 }
 
 // === 生命周期 ===

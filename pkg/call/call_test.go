@@ -62,6 +62,7 @@ func TestMethodTableCoverage(t *testing.T) {
 		"ConvMgr.GetAllConversations", "ThirdMgr.PartSize", "AuthMgr.ParseToken",
 		"FileUploader.Abort",
 		"Local.ListConversations", "Local.GetConversationSeqs", "Local.GetMsgByClientID",
+		"Local.SearchConversations", "Local.SearchMsgs", "Local.SearchFriends", "Local.SearchGroups", "Local.Stats",
 	} {
 		if !set[m] {
 			t.Errorf("missing manager method %q", m)

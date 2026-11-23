@@ -14,8 +14,10 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
@@ -135,6 +137,34 @@ type Storage interface {
 	ListGroupMembersPage(ownerUserID, groupID string, offset, limit int32) (*model.GroupMemberPage, error)
 	// GetGroupMember 单群成员直读（不存在返回 nil, nil）
 	GetGroupMember(ownerUserID, groupID, userID string) (*model.GroupMemberFullInfo, error)
+
+	// === 本地搜索 / 计数（Local Data API P2）===
+	//
+	// 搜索语义统一为「缓存 JSON 文本的大小写不敏感子串匹配」（SQLite LOWER(data_json) LIKE、
+	// IndexedDB/内存同样在 JSON 文本上 includes），结果排序与对应列表方法一致。
+	// limit<=0 时实体搜索取 50、消息搜索取 30。
+
+	// SearchConversations 会话搜索：匹配会话 ID / 用户 ID / 群 ID / 摘要（内容、群名、发送者昵称）等
+	SearchConversations(ownerUserID, keyword string, limit int32) (*model.ConversationPage, error)
+	// SearchMsgs 单会话消息搜索（按 seq 倒序）
+	SearchMsgs(ownerUserID, conversationID, keyword string, limit int32) (*model.MsgPage, error)
+	// SearchFriends 好友搜索（置顶优先 + userID 升序）
+	SearchFriends(ownerUserID, keyword string, limit int32) (*model.FriendPage, error)
+	// SearchGroups 群搜索（群名升序）
+	SearchGroups(ownerUserID, keyword string, limit int32) (*model.GroupPage, error)
+
+	// CountConversations 会话条数
+	CountConversations(ownerUserID string) (int64, error)
+	// CountMsgs 消息条数；conversationID 为空表示该 owner 全部消息（Stats 汇总用）
+	CountMsgs(ownerUserID, conversationID string) (int64, error)
+	// CountFriends 好友条数
+	CountFriends(ownerUserID string) (int64, error)
+	// CountBlacks 黑名单条数
+	CountBlacks(ownerUserID string) (int64, error)
+	// CountGroups 群条数
+	CountGroups(ownerUserID string) (int64, error)
+	// CountGroupMembers 群成员条数；groupID 为空表示该 owner 全部群成员（Stats 汇总用）
+	CountGroupMembers(ownerUserID, groupID string) (int64, error)
 
 	// === 生命周期 ===
 
@@ -853,6 +883,185 @@ func (s *MemoryStorage) GetGroupMember(owner, groupID, userID string) (*model.Gr
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.groupMembers[owner][groupID][userID], nil
+}
+
+// === 本地搜索 / 计数（Local Data API P2）===
+
+const (
+	entitySearchDefaultLimit int32 = 50
+	msgSearchDefaultLimit    int32 = 30
+)
+
+// jsonContainsKeyword 在 JSON 文本上做大小写不敏感子串匹配。
+// keyword 需已小写化；语义与 SQLite LOWER(data_json) LIKE、IndexedDB includes 对齐。
+func jsonContainsKeyword(v any, keyword string) bool {
+	if keyword == "" {
+		return false
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(b)), keyword)
+}
+
+// buildMsgPage 由已排序（seq 倒序）的消息切片构造 MsgPage 并填充 seq 边界
+func buildMsgPage(items []*model.MsgData, hasMore bool) *model.MsgPage {
+	page := &model.MsgPage{Items: items, HasMore: hasMore}
+	for _, m := range items {
+		if m == nil {
+			continue
+		}
+		if page.OldestSeq == 0 || m.Seq < page.OldestSeq {
+			page.OldestSeq = m.Seq
+		}
+		if m.Seq > page.NewestSeq {
+			page.NewestSeq = m.Seq
+		}
+	}
+	return page
+}
+
+func (s *MemoryStorage) SearchConversations(owner, keyword string, limit int32) (*model.ConversationPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	kw := strings.ToLower(keyword)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matched := make([]*model.Conversation, 0, len(s.convs[owner]))
+	for _, c := range s.convs[owner] {
+		if c != nil && jsonContainsKeyword(c, kw) {
+			matched = append(matched, c)
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		if matched[i].IsPinned != matched[j].IsPinned {
+			return matched[i].IsPinned
+		}
+		return matched[i].LatestMsgSendTime > matched[j].LatestMsgSendTime
+	})
+	start, end, hasMore := pageSlice(len(matched), 0, limit)
+	return &model.ConversationPage{Items: matched[start:end], Total: int64(len(matched)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) SearchMsgs(owner, conversationID, keyword string, limit int32) (*model.MsgPage, error) {
+	if limit <= 0 {
+		limit = msgSearchDefaultLimit
+	}
+	kw := strings.ToLower(keyword)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matched := make([]*model.MsgData, 0, len(s.msgs[owner]))
+	for _, m := range s.msgs[owner] {
+		if m == nil || m.ConversationID != conversationID {
+			continue
+		}
+		if jsonContainsKeyword(m, kw) {
+			matched = append(matched, m)
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool { return matched[i].Seq > matched[j].Seq })
+	start, end, hasMore := pageSlice(len(matched), 0, limit)
+	return buildMsgPage(matched[start:end], hasMore), nil
+}
+
+func (s *MemoryStorage) SearchFriends(owner, keyword string, limit int32) (*model.FriendPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	kw := strings.ToLower(keyword)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matched := make([]*model.FriendInfo, 0, len(s.friends[owner]))
+	for _, f := range s.friends[owner] {
+		if f != nil && jsonContainsKeyword(f, kw) {
+			matched = append(matched, f)
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		if matched[i].IsPinned != matched[j].IsPinned {
+			return matched[i].IsPinned
+		}
+		return matched[i].FriendUserID() < matched[j].FriendUserID()
+	})
+	start, end, hasMore := pageSlice(len(matched), 0, limit)
+	return &model.FriendPage{Items: matched[start:end], Total: int64(len(matched)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) SearchGroups(owner, keyword string, limit int32) (*model.GroupPage, error) {
+	if limit <= 0 {
+		limit = entitySearchDefaultLimit
+	}
+	kw := strings.ToLower(keyword)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matched := make([]*model.GroupInfo, 0, len(s.groups[owner]))
+	for _, g := range s.groups[owner] {
+		if g != nil && jsonContainsKeyword(g, kw) {
+			matched = append(matched, g)
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		if matched[i].GroupName != matched[j].GroupName {
+			return matched[i].GroupName < matched[j].GroupName
+		}
+		return matched[i].GroupID < matched[j].GroupID
+	})
+	start, end, hasMore := pageSlice(len(matched), 0, limit)
+	return &model.GroupPage{Items: matched[start:end], Total: int64(len(matched)), HasMore: hasMore}, nil
+}
+
+func (s *MemoryStorage) CountConversations(owner string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return int64(len(s.convs[owner])), nil
+}
+
+func (s *MemoryStorage) CountMsgs(owner, conversationID string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if conversationID != "" {
+		var n int64
+		for _, m := range s.msgs[owner] {
+			if m != nil && m.ConversationID == conversationID {
+				n++
+			}
+		}
+		return n, nil
+	}
+	return int64(len(s.msgs[owner])), nil
+}
+
+func (s *MemoryStorage) CountFriends(owner string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return int64(len(s.friends[owner])), nil
+}
+
+func (s *MemoryStorage) CountBlacks(owner string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return int64(len(s.blacks[owner])), nil
+}
+
+func (s *MemoryStorage) CountGroups(owner string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return int64(len(s.groups[owner])), nil
+}
+
+func (s *MemoryStorage) CountGroupMembers(owner, groupID string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if groupID != "" {
+		return int64(len(s.groupMembers[owner][groupID])), nil
+	}
+	var n int64
+	for _, members := range s.groupMembers[owner] {
+		n += int64(len(members))
+	}
+	return n, nil
 }
 
 // === 生命周期 ===

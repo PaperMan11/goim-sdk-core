@@ -25,13 +25,19 @@
 
 (function (global) {
   const DB_NAME = "goim_sdk";
-  const DB_VERSION = 1;
+  // v2：Local Data API P2 —— 补索引（messages 按 clientMsgID 直读、conversations 按时间排序），
+  // 仅创建缺失的 store/index，不重建已有 store。
+  const DB_VERSION = 2;
 
   const STORES = [
     { name: "seqs",          keyPath: ["owner"] },
     { name: "versions",      keyPath: ["owner", "entity"] },
-    { name: "messages",      keyPath: ["owner", "conversationID", "seq"] },
-    { name: "conversations", keyPath: ["owner", "conversationID"] },
+    { name: "messages",      keyPath: ["owner", "conversationID", "seq"], indexes: [
+        { name: "byClientMsgID", keyPath: ["owner", "conversationID", "clientMsgID"] },
+    ] },
+    { name: "conversations", keyPath: ["owner", "conversationID"], indexes: [
+        { name: "byLatestMsgSendTime", keyPath: ["owner", "latestMsgSendTime"] },
+    ] },
     { name: "friends",       keyPath: ["owner", "friendUserID"] },
     { name: "blacks",        keyPath: ["owner", "blackUserID"] },
     { name: "groups",        keyPath: ["owner", "groupID"] },
@@ -49,9 +55,18 @@
       const req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = (ev) => {
         const db = ev.target.result;
+        const tx = req.transaction;
         for (const s of STORES) {
+          let store;
           if (!db.objectStoreNames.contains(s.name)) {
-            db.createObjectStore(s.name, { keyPath: s.keyPath });
+            store = db.createObjectStore(s.name, { keyPath: s.keyPath });
+          } else {
+            store = tx.objectStore(s.name);
+          }
+          for (const idx of s.indexes || []) {
+            if (!store.indexNames.contains(idx.name)) {
+              store.createIndex(idx.name, idx.keyPath, { unique: !!idx.unique });
+            }
           }
         }
       };
@@ -96,6 +111,33 @@
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
+  }
+
+  // 游标顺序收集至多 max 条（用于复合键分页，避免 getAll 全量）
+  function collectCursor(req, max) {
+    return new Promise((resolve, reject) => {
+      const rows = [];
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) { resolve(rows); return; }
+        rows.push(cur.value);
+        if (rows.length >= max) { resolve(rows); return; }
+        cur.continue();
+      };
+    });
+  }
+
+  // owner 前缀范围（双/三主键 store 通用）
+  function ownerRange(owner) {
+    return IDBKeyRange.bound([owner, ""], [owner, "zzzzzzzz"]);
+  }
+
+  // 搜索：缓存 JSON 文本大小写不敏感子串匹配（与 SQLite LOWER(data_json) LIKE 一致）
+  function rowsMatching(rows, keyword) {
+    const kw = (keyword || "").toLowerCase();
+    if (!kw) return [];
+    return rows.filter((r) => (r.dataJSON || "").toLowerCase().includes(kw));
   }
 
   // —— 操作实现 ——
@@ -167,6 +209,69 @@
         return latest;
       });
     },
+    // 复合键分页：desc 取 seq<=seq（seq<=0 取最新），asc 取 seq>seq（seq<=0 从头）
+    async listMsgsPage(db, args) {
+      return runTx(db, "messages", "readonly", async (tx, s) => {
+        const limit = args.limit > 0 ? args.limit : 30;
+        let range, dir;
+        if (args.desc) {
+          range = IDBKeyRange.bound(
+            [args.owner, args.conversationID, -Infinity],
+            [args.owner, args.conversationID, args.seq > 0 ? args.seq : Infinity]
+          );
+          dir = "prev";
+        } else {
+          range = IDBKeyRange.bound(
+            [args.owner, args.conversationID, args.seq > 0 ? args.seq : -Infinity],
+            [args.owner, args.conversationID, Infinity],
+            args.seq > 0,
+            false
+          );
+          dir = "next";
+        }
+        return collectCursor(s.openCursor(range, dir), limit + 1);
+      });
+    },
+    async getMsg(db, args) {
+      return runTx(db, "messages", "readonly", async (tx, s) => {
+        const row = await reqPromise(s.get([args.owner, args.conversationID, args.seq]));
+        return row || null;
+      });
+    },
+    async getMsgByClientID(db, args) {
+      return runTx(db, "messages", "readonly", async (tx, s) => {
+        const rows = await reqPromise(s.index("byClientMsgID").getAll(
+          IDBKeyRange.only([args.owner, args.conversationID, args.clientMsgID])
+        ));
+        return rows.length ? rows[0] : null;
+      });
+    },
+    async searchMsgs(db, args) {
+      return runTx(db, "messages", "readonly", async (tx, s) => {
+        const rows = await reqPromise(s.getAll(IDBKeyRange.bound(
+          [args.owner, args.conversationID, -Infinity],
+          [args.owner, args.conversationID, Infinity]
+        )));
+        const matched = rowsMatching(rows, args.keyword);
+        matched.sort((a, b) => b.seq - a.seq);
+        const limit = args.limit > 0 ? args.limit : 30;
+        return matched.slice(0, limit + 1);
+      });
+    },
+    async countMsgs(db, args) {
+      return runTx(db, "messages", "readonly", async (tx, s) => {
+        const range = args.conversationID
+          ? IDBKeyRange.bound(
+              [args.owner, args.conversationID, -Infinity],
+              [args.owner, args.conversationID, Infinity]
+            )
+          : IDBKeyRange.bound(
+              [args.owner, "", -Infinity],
+              [args.owner, "zzzzzzzz", Infinity]
+            );
+        return reqPromise(s.count(range));
+      });
+    },
     async deleteMsgs(db, args) {
       return runTx(db, "messages", "readwrite", async (tx, s) => {
         for (const seq of args.seqs || []) s.delete([args.owner, args.conversationID, seq]);
@@ -213,6 +318,15 @@
         return reqPromise(s.getAll(IDBKeyRange.bound([args.owner, ""], [args.owner, "zzzzzzzz"])));
       });
     },
+    async searchConversations(db, args) {
+      return runTx(db, "conversations", "readonly", async (tx, s) => {
+        const rows = await reqPromise(s.getAll(ownerRange(args.owner)));
+        return rowsMatching(rows, args.keyword);
+      });
+    },
+    async countConversations(db, args) {
+      return runTx(db, "conversations", "readonly", (tx, s) => reqPromise(s.count(ownerRange(args.owner))));
+    },
 
     // ===== 好友 =====
     async upsertFriends(db, args) {
@@ -237,6 +351,15 @@
         return reqPromise(s.getAll(IDBKeyRange.bound([args.owner, ""], [args.owner, "zzzzzzzz"])));
       });
     },
+    async searchFriends(db, args) {
+      return runTx(db, "friends", "readonly", async (tx, s) => {
+        const rows = await reqPromise(s.getAll(ownerRange(args.owner)));
+        return rowsMatching(rows, args.keyword);
+      });
+    },
+    async countFriends(db, args) {
+      return runTx(db, "friends", "readonly", (tx, s) => reqPromise(s.count(ownerRange(args.owner))));
+    },
 
     // ===== 黑名单 =====
     async upsertBlacks(db, args) {
@@ -260,6 +383,9 @@
       return runTx(db, "blacks", "readonly", async (tx, s) => {
         return reqPromise(s.getAll(IDBKeyRange.bound([args.owner, ""], [args.owner, "zzzzzzzz"])));
       });
+    },
+    async countBlacks(db, args) {
+      return runTx(db, "blacks", "readonly", (tx, s) => reqPromise(s.count(ownerRange(args.owner))));
     },
 
     // ===== 群 =====
@@ -287,6 +413,15 @@
       return runTx(db, "groups", "readonly", async (tx, s) => {
         return reqPromise(s.getAll(IDBKeyRange.bound([args.owner, ""], [args.owner, "zzzzzzzz"])));
       });
+    },
+    async searchGroups(db, args) {
+      return runTx(db, "groups", "readonly", async (tx, s) => {
+        const rows = await reqPromise(s.getAll(ownerRange(args.owner)));
+        return rowsMatching(rows, args.keyword);
+      });
+    },
+    async countGroups(db, args) {
+      return runTx(db, "groups", "readonly", (tx, s) => reqPromise(s.count(ownerRange(args.owner))));
     },
 
     // ===== 群成员 =====
@@ -316,6 +451,20 @@
           [args.owner, args.groupID, ""],
           [args.owner, args.groupID, "zzzzzzzz"]
         )));
+      });
+    },
+    async countGroupMembers(db, args) {
+      return runTx(db, "groupMembers", "readonly", (tx, s) => {
+        const range = args.groupID
+          ? IDBKeyRange.bound(
+              [args.owner, args.groupID, ""],
+              [args.owner, args.groupID, "zzzzzzzz"]
+            )
+          : IDBKeyRange.bound(
+              [args.owner, "", ""],
+              [args.owner, "zzzzzzzz", "zzzzzzzz"]
+            );
+        return reqPromise(s.count(range));
       });
     },
 

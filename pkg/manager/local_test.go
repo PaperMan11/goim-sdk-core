@@ -205,6 +205,81 @@ func TestLocalDataMgr_UnreadAndRelations(t *testing.T) {
 	require.Nil(t, g)
 }
 
+func TestLocalDataMgr_SearchAndStats(t *testing.T) {
+	const owner, conv = "u1", "si_c1"
+	stor := storage.NewMemoryStorage()
+	require.NoError(t, stor.UpsertConversations(owner, []*model.Conversation{
+		{ConversationID: conv, LatestMsgSendTime: 100, MsgInfo: &model.MsgInfo{Content: "hello"}},
+		{ConversationID: "si_c2", LatestMsgSendTime: 50},
+	}))
+	require.NoError(t, stor.UpsertMsgs(owner, []*model.MsgData{
+		{ClientMsgID: "m1", ConversationID: conv, Seq: 1, Content: "hello"},
+		{ClientMsgID: "m2", ConversationID: conv, Seq: 2, Content: "hello world"},
+		{ClientMsgID: "m3", ConversationID: conv, Seq: 3, Content: "other"},
+		{ClientMsgID: "m4", ConversationID: "si_c2", Seq: 4, Content: "hello"},
+	}))
+	require.NoError(t, stor.UpsertFriends(owner, []*model.FriendInfo{
+		{FriendUser: &model.FriendUserInfo{UserID: "f1", Nickname: "Alice"}},
+	}))
+	require.NoError(t, stor.UpsertBlacks(owner, []*model.BlackInfo{
+		{BlackUserInfo: &model.PublicUserInfo{UserID: "bad"}},
+	}))
+	require.NoError(t, stor.UpsertGroups(owner, []*model.GroupInfo{{GroupID: "g1", GroupName: "Alpha"}}))
+	require.NoError(t, stor.UpsertGroupMembers(owner, "g1", []*model.GroupMemberFullInfo{
+		{GroupID: "g1", UserID: "m1"},
+		{GroupID: "g1", UserID: "m2"},
+	}))
+
+	m := NewLocalDataMgr(stor, func() string { return owner })
+
+	// 空关键字 → 参数错误
+	_, err := m.SearchConversations("  ", 10)
+	require.Error(t, err)
+	_, err = m.SearchMsgs(conv, "", 10)
+	require.Error(t, err)
+	_, err = m.SearchMsgs("", "hello", 10)
+	require.Error(t, err)
+	_, err = m.SearchFriends("", 10)
+	require.Error(t, err)
+	_, err = m.SearchGroups(" ", 10)
+	require.Error(t, err)
+
+	// 搜索：limit<=0 走默认值（实体 50 / 消息 30），结果正确
+	cpage, err := m.SearchConversations("hello", 0)
+	require.NoError(t, err)
+	require.Len(t, cpage.Items, 1)
+	require.Equal(t, conv, cpage.Items[0].ConversationID)
+
+	mpage, err := m.SearchMsgs(conv, "hello", 0)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 1}, localSeqs(mpage.Items))
+	require.False(t, mpage.HasMore)
+
+	fpage, err := m.SearchFriends("alice", 0)
+	require.NoError(t, err)
+	require.Len(t, fpage.Items, 1)
+	gpage, err := m.SearchGroups("alp", 0)
+	require.NoError(t, err)
+	require.Len(t, gpage.Items, 1)
+
+	// Stats：消息/群成员为全量口径
+	st, err := m.Stats()
+	require.NoError(t, err)
+	require.Equal(t, int64(2), st.Conversations)
+	require.Equal(t, int64(4), st.Messages)
+	require.Equal(t, int64(1), st.Friends)
+	require.Equal(t, int64(1), st.Blacks)
+	require.Equal(t, int64(1), st.Groups)
+	require.Equal(t, int64(2), st.GroupMembers)
+
+	// 未登录 → ErrNotLoggedIn
+	m2 := NewLocalDataMgr(stor, func() string { return "" })
+	_, err = m2.SearchConversations("hello", 10)
+	require.ErrorIs(t, err, ErrNotLoggedIn)
+	_, err = m2.Stats()
+	require.ErrorIs(t, err, ErrNotLoggedIn)
+}
+
 func TestLocalDataMgr_OwnerIsolation(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	require.NoError(t, stor.UpsertConversations("u1", []*model.Conversation{

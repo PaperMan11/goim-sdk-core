@@ -26,7 +26,7 @@
 
 <!-- 顺序敏感：idb_wrapper.js 先注册 goimIdb，wasm_exec.js 提供 Go 类 -->
 <script src="idb_wrapper.js"></script>
-<script src="../dist/wasm_exec.js"></script>
+<script src="../../dist/wasm_exec.js"></script>
 <script>
 const logEl = document.getElementById("log");
 const stepsEl = document.getElementById("steps");
@@ -83,7 +83,7 @@ function readIDB() {
 (async function run() {
   try {
     const go = new Go();
-    const inst = await WebAssembly.instantiateStreaming(fetch("../dist/goim.wasm"), go.importObject);
+    const inst = await WebAssembly.instantiateStreaming(fetch("../../dist/goim.wasm"), go.importObject);
     go.run(inst.instance); // 启动 Go 运行时（main 以 timer 保活），不 await 等它退出
     log("wasm 实例已启动，等待 goimSdk 注册…");
     await waitFor(() => window.goimSdk, 5000, "goimSdk");
@@ -147,6 +147,53 @@ function readIDB() {
       devRow ? "device_id = " + devRow.value : "meta 中未找到 device_id");
 
     window.__selftest.deviceID = devRow ? devRow.value : null;
+
+    // 8. P2 IndexedDB 下推：消息分页 / 搜索 / 计数（独立 owner，结尾清理）
+    const p2Owner = "__p2_selftest__";
+    const p2op = async (operation, args) => {
+      const res = JSON.parse(await goimIdb.op(operation, JSON.stringify(args)));
+      if (!res.ok) throw new Error(operation + ": " + res.error);
+      return res.data;
+    };
+    const p2MsgRow = (seq, content) => ({
+      owner: p2Owner, conversationID: "c1", seq, clientMsgID: "m" + seq,
+      dataJSON: JSON.stringify({ seq, conversationID: "c1", content }),
+    });
+    await p2op("upsertMsgs", {
+      owner: p2Owner,
+      rows: [1, 2, 3, 4, 5].map((i) => p2MsgRow(i, i === 2 ? "bye" : "hello " + i)),
+    });
+
+    const p2Count = await p2op("countMsgs", { owner: p2Owner, conversationID: "c1" });
+    record("IDB countMsgs", p2Count === 5, "count = " + p2Count);
+
+    // 降序分页返回 limit+1 条，供 Go 侧判断 HasMore
+    const p2Page1 = await p2op("listMsgsPage", { owner: p2Owner, conversationID: "c1", seq: 0, limit: 2, desc: true });
+    record("IDB 消息分页（最新）", p2Page1.length === 3 && p2Page1[0].seq === 5,
+      "seqs = " + p2Page1.map((r) => r.seq).join(","));
+    const p2Page2 = await p2op("listMsgsPage", { owner: p2Owner, conversationID: "c1", seq: 3, limit: 2, desc: true });
+    record("IDB 消息分页（seq<=3）", p2Page2.length === 3 && p2Page2[0].seq === 3,
+      "seqs = " + p2Page2.map((r) => r.seq).join(","));
+
+    const p2Search = await p2op("searchMsgs", { owner: p2Owner, conversationID: "c1", keyword: "HELLO", limit: 2 });
+    const p2SearchSeqs = p2Search.map((r) => r.seq);
+    record("IDB 消息搜索", p2SearchSeqs[0] === 5 && !p2SearchSeqs.includes(2),
+      "seqs = " + p2SearchSeqs.join(","));
+
+    await p2op("upsertConversations", {
+      owner: p2Owner,
+      rows: [{
+        owner: p2Owner, conversationID: "c1", latestMsgSendTime: 100,
+        dataJSON: JSON.stringify({ conversationID: "c1", msgInfo: { content: "hello" } }),
+      }],
+    });
+    const p2ConvCount = await p2op("countConversations", { owner: p2Owner });
+    record("IDB countConversations", p2ConvCount === 1, "count = " + p2ConvCount);
+    const p2ConvSearch = await p2op("searchConversations", { owner: p2Owner, keyword: "HELLO" });
+    record("IDB 会话搜索", p2ConvSearch.length === 1, "hit = " + p2ConvSearch.length);
+
+    await p2op("clearOwner", { owner: p2Owner });
+
     window.__selftest.done = true;
     summaryEl.className = window.__selftest.pass ? "pass" : "fail";
     summaryEl.textContent = window.__selftest.pass
