@@ -247,6 +247,33 @@ func (s *SQLiteStorage) mutateMsgRows(query func(*gorm.DB) *gorm.DB, mutate func
 	return nil
 }
 
+func (s *SQLiteStorage) PurgeMsgs(owner, conversationID string, upToSeq int64) (int64, error) {
+	if conversationID == "" || upToSeq <= 0 {
+		return 0, nil
+	}
+	res := s.db.Where("owner_user_id = ? AND conversation_id = ? AND seq <= ?", owner, conversationID, upToSeq).
+		Delete(&MessageRow{})
+	if res.Error != nil {
+		return 0, fmt.Errorf("storage: purge msgs: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
+func (s *SQLiteStorage) GetMsgFloor(owner, conversationID string) (int64, error) {
+	_, v, err := s.GetVersion(owner, fmt.Sprintf(EntityMsgFloorFmt, conversationID))
+	if err != nil {
+		return 0, err
+	}
+	return int64(v), nil
+}
+
+func (s *SQLiteStorage) SetMsgFloor(owner, conversationID string, seq int64) error {
+	if seq <= 0 {
+		return nil
+	}
+	return s.SetVersion(owner, fmt.Sprintf(EntityMsgFloorFmt, conversationID), "", uint64(seq))
+}
+
 func (s *SQLiteStorage) MarkMsgsRead(owner, conversationID string, seqs []int64) error {
 	if conversationID == "" || len(seqs) == 0 {
 		return nil

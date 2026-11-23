@@ -293,6 +293,74 @@ func memberIDs(items []*model.GroupMemberFullInfo) []string {
 	return out
 }
 
+// TestStorageLocalPurgeAndFloor P3：PurgeMsgs 删除条数 / owner 隔离 / floor 持久化与复用 versions。
+func TestStorageLocalPurgeAndFloor(t *testing.T) {
+	for name, stor := range newLocalStorages(t) {
+		t.Run(name, func(t *testing.T) {
+			const owner, conv = "u1", "si_c1"
+			require.NoError(t, stor.UpsertMsgs(owner, []*model.MsgData{
+				{ClientMsgID: "m1", ConversationID: conv, Seq: 1},
+				{ClientMsgID: "m2", ConversationID: conv, Seq: 2},
+				{ClientMsgID: "m3", ConversationID: conv, Seq: 3},
+				{ClientMsgID: "m4", ConversationID: conv, Seq: 4},
+				{ClientMsgID: "m5", ConversationID: conv, Seq: 5},
+				{ClientMsgID: "other", ConversationID: "si_c2", Seq: 6},
+			}))
+
+			// 无记录 floor = 0
+			floor, err := stor.GetMsgFloor(owner, conv)
+			require.NoError(t, err)
+			require.Zero(t, floor)
+
+			// 删除 seq<=3：返回 3；其余会话不受影响
+			n, err := stor.PurgeMsgs(owner, conv, 3)
+			require.NoError(t, err)
+			require.Equal(t, int64(3), n)
+			page, err := stor.ListMsgsPage(owner, conv, 0, 10, false)
+			require.NoError(t, err)
+			require.Equal(t, []int64{4, 5}, msgSeqs(page.Items))
+			other, err := stor.GetMsg(owner, "si_c2", 6)
+			require.NoError(t, err)
+			require.NotNil(t, other)
+
+			// 幂等：重复删除返回 0
+			n, err = stor.PurgeMsgs(owner, conv, 3)
+			require.NoError(t, err)
+			require.Zero(t, n)
+
+			// 删除到 5
+			n, err = stor.PurgeMsgs(owner, conv, 5)
+			require.NoError(t, err)
+			require.Equal(t, int64(2), n)
+			require.Zero(t, mustCountMsgs(t, stor, owner, conv))
+
+			// floor 写入 / 读取（复用 versions，entity=msgFloor:<convID>）
+			require.NoError(t, stor.SetMsgFloor(owner, conv, 10))
+			floor, err = stor.GetMsgFloor(owner, conv)
+			require.NoError(t, err)
+			require.Equal(t, int64(10), floor)
+			_, ver, err := stor.GetVersion(owner, "msgFloor:"+conv)
+			require.NoError(t, err)
+			require.Equal(t, uint64(10), ver)
+
+			// owner 隔离：其他 owner 的 floor 与消息都不受影响
+			floor, err = stor.GetMsgFloor("u2", conv)
+			require.NoError(t, err)
+			require.Zero(t, floor)
+			n, err = stor.PurgeMsgs("u2", conv, 99)
+			require.NoError(t, err)
+			require.Zero(t, n)
+		})
+	}
+}
+
+func mustCountMsgs(t *testing.T, stor Storage, owner, conv string) int64 {
+	t.Helper()
+	n, err := stor.CountMsgs(owner, conv)
+	require.NoError(t, err)
+	return n
+}
+
 // TestStorageLocalSearchAndCounts P2：搜索（大小写不敏感子串）与计数在 Memory/SQLite 上一致。
 func TestStorageLocalSearchAndCounts(t *testing.T) {
 	for name, stor := range newLocalStorages(t) {

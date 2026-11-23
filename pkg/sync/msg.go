@@ -101,12 +101,19 @@ func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 			localMin[convID] = svMin
 			minAdvanced = true
 		}
+		// 清理下界优先：PurgeMsgs / ClearLocalData 后 floor 可能高于本地游标，
+		// 自动同步不得把本机主动放弃的历史重新拉回（floor 读取失败按 0 处理，不阻断同步）
 		start := localMax[convID]
-		if start == 0 {
-			start = serverMin[convID] // 本地无该会话记录：从服务端 min 开始
-			if start > 0 {
-				start-- // 区间改为闭区间 [start, svMax]
+		if floor, ferr := e.stor.GetMsgFloor(e.owner, convID); ferr != nil {
+			if e.logger != nil {
+				e.logger.Warnf("sync: get msg floor of %s: %v (ignored)", convID, ferr)
 			}
+		} else if floor > start {
+			start = floor
+		}
+		// 全量回填下界同理：本地无记录时从 max(floor, serverMin-1) 开始
+		if svMin := serverMin[convID]; svMin > 0 && start < svMin-1 {
+			start = svMin - 1
 		}
 		if svMax <= start {
 			// 无缺口：仅 min 有前移时落盘一次（稳态零写盘）

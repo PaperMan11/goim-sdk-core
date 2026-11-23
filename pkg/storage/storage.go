@@ -15,6 +15,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ const (
 	EntityJoinGroups      = "joinGroups"
 	EntityConversations   = "conversations"
 	EntityGroupMembersFmt = "groupMembers:%s" // 群维度游标：fmt.Sprintf(EntityGroupMembersFmt, groupID)
+	EntityMsgFloorFmt     = "msgFloor:%s"     // 本地消息清理下界：fmt.Sprintf(EntityMsgFloorFmt, conversationID)
 )
 
 // Storage 本地持久化接口
@@ -60,6 +62,12 @@ type Storage interface {
 	GetLatestMsg(ownerUserID, conversationID string) (*model.MsgData, error)
 	// DeleteMsgs 按 seq 删除消息缓存（2102 删除通知实时应用）
 	DeleteMsgs(ownerUserID, conversationID string, seqs []int64) error
+	// PurgeMsgs 删除会话内 seq <= upToSeq 的消息缓存，返回删除条数（本地清理，不影响服务端）
+	PurgeMsgs(ownerUserID, conversationID string, upToSeq int64) (int64, error)
+	// GetMsgFloor 本机主动放弃的消息下界（entity=msgFloor:<convID>，version=floor）；无记录返回 0
+	GetMsgFloor(ownerUserID, conversationID string) (int64, error)
+	// SetMsgFloor 写入消息下界；只影响自动同步的 gap 起点，不拦截显式历史请求
+	SetMsgFloor(ownerUserID, conversationID string, seq int64) error
 	// MarkMsgsRead 按 seq 标记已读（2200 已读回执实时应用）
 	MarkMsgsRead(ownerUserID, conversationID string, seqs []int64) error
 	// MarkMsgsReadUpTo 标记 seq <= hasReadSeq 的消息已读（2200 整会话已读）
@@ -378,6 +386,39 @@ func (s *MemoryStorage) DeleteMsgs(owner, conversationID string, seqs []int64) e
 		}
 	}
 	return nil
+}
+
+func (s *MemoryStorage) PurgeMsgs(owner, conversationID string, upToSeq int64) (int64, error) {
+	if conversationID == "" || upToSeq <= 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for key, m := range s.msgs[owner] {
+		if m.ConversationID == conversationID && m.Seq <= upToSeq {
+			delete(s.msgs[owner], key)
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *MemoryStorage) GetMsgFloor(owner, conversationID string) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.versions[owner][fmt.Sprintf(EntityMsgFloorFmt, conversationID)]
+	if !ok {
+		return 0, nil
+	}
+	return int64(v.version), nil
+}
+
+func (s *MemoryStorage) SetMsgFloor(owner, conversationID string, seq int64) error {
+	if seq <= 0 {
+		return nil
+	}
+	return s.SetVersion(owner, fmt.Sprintf(EntityMsgFloorFmt, conversationID), "", uint64(seq))
 }
 
 func (s *MemoryStorage) MarkMsgsRead(owner, conversationID string, seqs []int64) error {

@@ -278,6 +278,18 @@
         return null;
       });
     },
+    // 本地清理：删除 seq <= upToSeq 的消息（复合键范围 getAllKeys → 逐条 delete），返回删除条数
+    async purgeMsgs(db, args) {
+      if (!args.conversationID || !(args.upToSeq > 0)) return 0;
+      return runTx(db, "messages", "readwrite", async (tx, s) => {
+        const keys = await reqPromise(s.getAllKeys(IDBKeyRange.bound(
+          [args.owner, args.conversationID, -Infinity],
+          [args.owner, args.conversationID, args.upToSeq]
+        )));
+        for (const k of keys) s.delete(k);
+        return keys.length;
+      });
+    },
     // —— mutate 类操作：读 → 修改 dataJSON → 写回 ——
     async markMsgsRead(db, args) { return mutateMsgs(db, args, (m) => { m.isRead = true; }); },
     async markMsgsReadUpTo(db, args) {

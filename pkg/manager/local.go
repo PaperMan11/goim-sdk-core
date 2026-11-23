@@ -68,6 +68,14 @@ type LocalDataMgr interface {
 	SearchGroups(keyword string, limit int32) (*model.GroupPage, error)
 	// Stats 当前 owner 本地缓存条数统计（不打网络请求）
 	Stats() (*model.LocalDataStats, error)
+
+	// —— 本地维护 ——
+	// PurgeMsgs 删除本地 seq<=upToSeq 的消息并记录 floor（本机清理，不影响服务端）；
+	// 返回删除条数。floor 防止自动同步把已清理的历史重新拉回，显式历史请求不受限。
+	PurgeMsgs(conversationID string, upToSeq int64) (int64, error)
+	// ClearLocalData 清空当前 owner 的全部本地缓存（不登出）；保留 SDK meta、同步游标与登录态，
+	// 并记录各会话消息 floor，避免重连后回流。
+	ClearLocalData() error
 }
 
 // DefaultLocalDataMgr LocalDataMgr 默认实现
@@ -472,4 +480,118 @@ func (m *DefaultLocalDataMgr) Stats() (*model.LocalDataStats, error) {
 		return nil, fmt.Errorf("local data: stats: count group members: %w", err)
 	}
 	return &st, nil
+}
+
+// —— 本地维护 ——
+
+func (m *DefaultLocalDataMgr) PurgeMsgs(conversationID string, upToSeq int64) (int64, error) {
+	if conversationID == "" || upToSeq <= 0 {
+		return 0, fmt.Errorf("local data: purge msgs: invalid conversationID or upToSeq")
+	}
+	owner, err := m.owner()
+	if err != nil {
+		return 0, err
+	}
+	// floor 先落盘再删消息：删除中途失败也不会在下次同步把已放弃的历史拉回
+	floor := upToSeq
+	if old, err := m.stor.GetMsgFloor(owner, conversationID); err != nil {
+		return 0, fmt.Errorf("local data: purge msgs: get floor: %w", err)
+	} else if old > floor {
+		floor = old
+	}
+	if err := m.stor.SetMsgFloor(owner, conversationID, floor); err != nil {
+		return 0, fmt.Errorf("local data: purge msgs: set floor: %w", err)
+	}
+	n, err := m.stor.PurgeMsgs(owner, conversationID, upToSeq)
+	if err != nil {
+		return 0, fmt.Errorf("local data: purge msgs: %w", err)
+	}
+	return n, nil
+}
+
+// ClearLocalData 清空当前 owner 本地缓存：先按会话写 floor（取同步游标与本地最新 seq 的
+// 较大者），再删除消息与实体表；seqs/versions 游标与 SDK meta 保留（不登出、不回流）。
+func (m *DefaultLocalDataMgr) ClearLocalData() error {
+	owner, err := m.owner()
+	if err != nil {
+		return err
+	}
+	maxSeqs, _, err := m.stor.GetMaxSeqs(owner)
+	if err != nil {
+		return fmt.Errorf("local data: clear: get max seqs: %w", err)
+	}
+	convIDs, err := m.stor.ListConversationIDs(owner)
+	if err != nil {
+		return fmt.Errorf("local data: clear: list conversation ids: %w", err)
+	}
+
+	floors := make(map[string]int64, len(maxSeqs)+len(convIDs))
+	for convID, seq := range maxSeqs {
+		if seq > 0 {
+			floors[convID] = seq
+		}
+	}
+	for _, convID := range convIDs {
+		if _, ok := floors[convID]; !ok {
+			floors[convID] = 0
+		}
+	}
+	// 显式历史请求/推送可能已写入超过同步游标的消息，floor 取本地最新 seq 兜底
+	for convID, floor := range floors {
+		latest, err := m.stor.GetLatestMsg(owner, convID)
+		if err != nil {
+			return fmt.Errorf("local data: clear: get latest msg %s: %w", convID, err)
+		}
+		if latest != nil && latest.Seq > floor {
+			floors[convID] = latest.Seq
+		}
+	}
+
+	var errs []error
+	for convID, floor := range floors {
+		if floor <= 0 {
+			continue
+		}
+		if err := m.stor.SetMsgFloor(owner, convID, floor); err != nil {
+			errs = append(errs, fmt.Errorf("local data: clear: set floor %s: %w", convID, err))
+			continue
+		}
+		if _, err := m.stor.PurgeMsgs(owner, convID, floor); err != nil {
+			errs = append(errs, fmt.Errorf("local data: clear: purge msgs %s: %w", convID, err))
+		}
+	}
+
+	if err := m.stor.DeleteConversations(owner, convIDs); err != nil {
+		errs = append(errs, fmt.Errorf("local data: clear: delete conversations: %w", err))
+	}
+	if ids, err := m.stor.ListFriendIDs(owner); err != nil {
+		errs = append(errs, fmt.Errorf("local data: clear: list friend ids: %w", err))
+	} else if err := m.stor.DeleteFriends(owner, ids); err != nil {
+		errs = append(errs, fmt.Errorf("local data: clear: delete friends: %w", err))
+	}
+	if ids, err := m.stor.ListBlackIDs(owner); err != nil {
+		errs = append(errs, fmt.Errorf("local data: clear: list black ids: %w", err))
+	} else if err := m.stor.DeleteBlacks(owner, ids); err != nil {
+		errs = append(errs, fmt.Errorf("local data: clear: delete blacks: %w", err))
+	}
+	groupIDs, err := m.stor.ListGroupIDs(owner)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("local data: clear: list group ids: %w", err))
+	} else {
+		if err := m.stor.DeleteGroups(owner, groupIDs); err != nil {
+			errs = append(errs, fmt.Errorf("local data: clear: delete groups: %w", err))
+		}
+		for _, groupID := range groupIDs {
+			ids, err := m.stor.ListGroupMemberIDs(owner, groupID)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("local data: clear: list group members %s: %w", groupID, err))
+				continue
+			}
+			if err := m.stor.DeleteGroupMembers(owner, groupID, ids); err != nil {
+				errs = append(errs, fmt.Errorf("local data: clear: delete group members %s: %w", groupID, err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
 }

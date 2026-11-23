@@ -732,6 +732,66 @@ func TestSeqSync_ResumeAfterBatchFailure(t *testing.T) {
 	}
 }
 
+// TestSeqSync_MsgFloorSkipsPurgedHistory 本地清理后 floor 优先于游标：自动同步不得
+// 把已放弃的历史拉回；本地无记录时从 max(floor, serverMin-1) 开始。
+func TestSeqSync_MsgFloorSkipsPurgedHistory(t *testing.T) {
+	msg := &mockMsgSource{
+		newestMax: map[string]int64{"conv1": 200, "conv2": 100},
+		newestMin: map[string]int64{"conv1": 1, "conv2": 1},
+		genFull:   true,
+	}
+	stor := storage.NewMemoryStorage()
+	// conv1 本地游标 100，清理 floor 150 → 从 151 开始
+	requireNoError(t, stor.SetMaxSeqs(testOwner, map[string]int64{"conv1": 100}, map[string]int64{"conv1": 1}))
+	requireNoError(t, stor.SetMsgFloor(testOwner, "conv1", 150))
+	// conv2 本地无记录，清理 floor 50 → 从 51 开始（而非 serverMin-1）
+	requireNoError(t, stor.SetMsgFloor(testOwner, "conv2", 50))
+
+	bus, chans := newTestBus(t, events.EventSeqSynced)
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	if err := engine.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	if len(msg.pulls) != 2 {
+		t.Fatalf("pull calls = %d, want 2", len(msg.pulls))
+	}
+	for _, r := range msg.pulls {
+		switch r.ConversationID {
+		case "conv1":
+			if r.Begin != 151 || r.End != 200 {
+				t.Errorf("conv1 range = [%d,%d], want [151,200]", r.Begin, r.End)
+			}
+		case "conv2":
+			if r.Begin != 51 || r.End != 100 {
+				t.Errorf("conv2 range = [%d,%d], want [51,100]", r.Begin, r.End)
+			}
+		}
+	}
+
+	// 仅 floor 之后的消息入库，清理区间不回流
+	msgs, err := stor.ListMsgsByConversation(testOwner, "conv1")
+	if err != nil {
+		t.Fatalf("ListMsgsByConversation: %v", err)
+	}
+	if len(msgs) != 50 || msgs[0].Seq != 151 {
+		t.Errorf("conv1 msgs = %d first=%d, want 50 first=151", len(msgs), msgs[0].Seq)
+	}
+	if maxSeqs, _, _ := stor.GetMaxSeqs(testOwner); maxSeqs["conv1"] != 200 {
+		t.Errorf("conv1 cursor = %d, want 200", maxSeqs["conv1"])
+	}
+	if got := drainEvents(chans[0], 5); got != 1 {
+		t.Errorf("EventSeqSynced count = %d, want 1", got)
+	}
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // === EntitySyncEngine 测试 ===
 
 // TestEntitySync_FriendsIncremental 增量应用：insert/update/delete + 游标写回 + 事件

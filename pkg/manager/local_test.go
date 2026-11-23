@@ -280,6 +280,108 @@ func TestLocalDataMgr_SearchAndStats(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotLoggedIn)
 }
 
+func TestLocalDataMgr_PurgeAndClear(t *testing.T) {
+	const owner, conv1, conv2 = "u1", "si_c1", "si_c2"
+	stor := storage.NewMemoryStorage()
+	require.NoError(t, stor.SetMaxSeqs(owner, map[string]int64{conv1: 10}, map[string]int64{conv1: 1}))
+	require.NoError(t, stor.UpsertConversations(owner, []*model.Conversation{
+		{ConversationID: conv1}, {ConversationID: conv2},
+	}))
+	require.NoError(t, stor.UpsertMsgs(owner, []*model.MsgData{
+		{ClientMsgID: "m1", ConversationID: conv1, Seq: 1},
+		{ClientMsgID: "m2", ConversationID: conv1, Seq: 2},
+		{ClientMsgID: "m3", ConversationID: conv1, Seq: 3},
+		{ClientMsgID: "m4", ConversationID: conv1, Seq: 4},
+		{ClientMsgID: "m5", ConversationID: conv1, Seq: 5},
+		{ClientMsgID: "m6", ConversationID: conv1, Seq: 6},
+		{ClientMsgID: "m7", ConversationID: conv1, Seq: 7},
+		{ClientMsgID: "m8", ConversationID: conv1, Seq: 8},
+		{ClientMsgID: "m9", ConversationID: conv1, Seq: 9},
+		{ClientMsgID: "m10", ConversationID: conv1, Seq: 10},
+		{ClientMsgID: "m11", ConversationID: conv1, Seq: 11},
+		{ClientMsgID: "m12", ConversationID: conv1, Seq: 12},
+		{ClientMsgID: "c2m1", ConversationID: conv2, Seq: 1},
+		{ClientMsgID: "c2m2", ConversationID: conv2, Seq: 2},
+		{ClientMsgID: "c2m3", ConversationID: conv2, Seq: 3},
+	}))
+	require.NoError(t, stor.UpsertFriends(owner, []*model.FriendInfo{{FriendUser: &model.FriendUserInfo{UserID: "f1"}}}))
+	require.NoError(t, stor.UpsertBlacks(owner, []*model.BlackInfo{{BlackUserInfo: &model.PublicUserInfo{UserID: "bad"}}}))
+	require.NoError(t, stor.UpsertGroups(owner, []*model.GroupInfo{{GroupID: "g1"}}))
+	require.NoError(t, stor.UpsertGroupMembers(owner, "g1", []*model.GroupMemberFullInfo{{GroupID: "g1", UserID: "m1"}}))
+	require.NoError(t, stor.SetMeta("device", "d1"))
+
+	m := NewLocalDataMgr(stor, func() string { return owner })
+
+	// 参数校验 / 未登录
+	_, err := m.PurgeMsgs("", 5)
+	require.Error(t, err)
+	_, err = m.PurgeMsgs(conv1, 0)
+	require.Error(t, err)
+	_, err = m.PurgeMsgs(conv1, -1)
+	require.Error(t, err)
+	nm := NewLocalDataMgr(stor, nil)
+	_, err = nm.PurgeMsgs(conv1, 5)
+	require.ErrorIs(t, err, ErrNotLoggedIn)
+	require.ErrorIs(t, nm.ClearLocalData(), ErrNotLoggedIn)
+
+	// 删除 seq<=5 → 5 条；floor=5
+	n, err := m.PurgeMsgs(conv1, 5)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), n)
+	floor, err := stor.GetMsgFloor(owner, conv1)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), floor)
+
+	// floor 只增不减：再次清到 3 不删消息、floor 保持 5
+	n, err = m.PurgeMsgs(conv1, 3)
+	require.NoError(t, err)
+	require.Zero(t, n)
+	floor, err = stor.GetMsgFloor(owner, conv1)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), floor)
+
+	// 继续清到 10：删除 6..10（5 条），floor=10
+	n, err = m.PurgeMsgs(conv1, 10)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), n)
+	floor, _ = stor.GetMsgFloor(owner, conv1)
+	require.Equal(t, int64(10), floor)
+
+	// 清空全部：floor 取本地最新 seq（conv1=12，conv2=3），实体与消息归零，SDK meta 保留
+	require.NoError(t, m.ClearLocalData())
+
+	st, err := m.Stats()
+	require.NoError(t, err)
+	require.Equal(t, &model.LocalDataStats{}, st)
+
+	floor, err = stor.GetMsgFloor(owner, conv1)
+	require.NoError(t, err)
+	require.Equal(t, int64(12), floor)
+	floor, err = stor.GetMsgFloor(owner, conv2)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), floor)
+
+	meta, err := stor.GetMeta("device")
+	require.NoError(t, err)
+	require.Equal(t, "d1", meta)
+
+	// owner 隔离：其他账号数据未受影响
+	require.NoError(t, stor.UpsertConversations("u2", []*model.Conversation{{ConversationID: "c9"}}))
+	require.NoError(t, stor.UpsertMsgs("u2", []*model.MsgData{{ClientMsgID: "x", ConversationID: "c9", Seq: 1}}))
+	require.NoError(t, m.ClearLocalData())
+	convs, err := stor.ListConversations("u2")
+	require.NoError(t, err)
+	require.Len(t, convs, 1)
+	require.Equal(t, int64(1), mustCountMsgs(t, stor, "u2", "c9"))
+}
+
+func mustCountMsgs(t *testing.T, stor storage.Storage, owner, conv string) int64 {
+	t.Helper()
+	n, err := stor.CountMsgs(owner, conv)
+	require.NoError(t, err)
+	return n
+}
+
 func TestLocalDataMgr_OwnerIsolation(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	require.NoError(t, stor.UpsertConversations("u1", []*model.Conversation{

@@ -201,7 +201,7 @@ async function op(operation, argsJSON) { ... }
 
 ### 5.3 operation 枚举
 
-共 47 个 operation，按 store 分组（P2 新增分页/直读/搜索/计数类操作）：
+共 48 个 operation，按 store 分组（P2 新增分页/直读/搜索/计数类操作，P3 新增 `purgeMsgs`）：
 
 **元数据（seqs / versions / meta）**
 - `getMaxSeqs` / `setMaxSeqs`
@@ -220,6 +220,7 @@ async function op(operation, argsJSON) { ... }
 - `getMsgByClientID` — 走 `byClientMsgID` 索引直读
 - `searchMsgs` — 限定单会话遍历 + `dataJSON` 子串匹配，seq 倒序后返回 limit+1 条
 - `countMsgs` — `store.count(range)`；`conversationID` 为空时统计 owner 全部消息
+- `purgeMsgs` — P3 本地清理：复合键范围 `[owner, conv, -Infinity]..[owner, conv, upToSeq]` 取 `getAllKeys` 后逐条删除，返回删除条数；floor 复用 `versions`（`msgFloor:<convID>`，仍走 `getVersion`/`setVersion`）
 
 **conversations / friends / blacks / groups / groupMembers** — 各自对应 `upsert*` / `delete*` / `list*`（list 完整 model，返回扁平 row 列表）和 `list*IDs`（只返回 ID 字符串数组，避免 Go 侧反序列化完整 model）；P2 另加 `searchConversations` / `searchFriends` / `searchGroups`（owner 范围遍历 + `dataJSON` 子串匹配）与 `countConversations` / `countFriends` / `countBlacks` / `countGroups` / `countGroupMembers`（`store.count(range)`）
 

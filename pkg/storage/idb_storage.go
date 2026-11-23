@@ -339,6 +339,39 @@ func (s *IdbStorage) DeleteMsgs(owner, conversationID string, seqs []int64) erro
 	return err
 }
 
+func (s *IdbStorage) PurgeMsgs(owner, conversationID string, upToSeq int64) (int64, error) {
+	if conversationID == "" || upToSeq <= 0 {
+		return 0, nil
+	}
+	v, err := s.op("purgeMsgs", map[string]any{
+		"owner":          owner,
+		"conversationID": conversationID,
+		"upToSeq":        upToSeq,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if v.IsNull() || v.IsUndefined() {
+		return 0, nil
+	}
+	return int64(v.Int()), nil
+}
+
+func (s *IdbStorage) GetMsgFloor(owner, conversationID string) (int64, error) {
+	_, v, err := s.GetVersion(owner, fmt.Sprintf(EntityMsgFloorFmt, conversationID))
+	if err != nil {
+		return 0, err
+	}
+	return int64(v), nil
+}
+
+func (s *IdbStorage) SetMsgFloor(owner, conversationID string, seq int64) error {
+	if seq <= 0 {
+		return nil
+	}
+	return s.SetVersion(owner, fmt.Sprintf(EntityMsgFloorFmt, conversationID), "", uint64(seq))
+}
+
 func (s *IdbStorage) MarkMsgsRead(owner, conversationID string, seqs []int64) error {
 	if conversationID == "" || len(seqs) == 0 {
 		return nil

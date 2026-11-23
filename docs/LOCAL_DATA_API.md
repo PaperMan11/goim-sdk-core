@@ -1,8 +1,9 @@
 # 本地数据能力 API 设计（Local Data API）
 
-> 状态：P1/P2 已实现（`Client.Local()` 门面 + 会话/消息/好友/黑名单/群/群成员直读、分页、搜索与
-> `Stats` 统计；Storage 三实现：Memory/SQLite 完整，IndexedDB 消息分页/直读/计数/搜索已下推，DB 升至 v2）。
-> P3（`PurgeMsgs` / floor / 同步联动）仍为设计。
+> 状态：P1/P2/P3 已实现（`Client.Local()` 门面 + 会话/消息/好友/黑名单/群/群成员直读、分页、搜索、
+> `Stats` 统计与本地清理；Storage 三实现：Memory/SQLite 完整，IndexedDB 消息分页/直读/计数/搜索/清理已下推，
+> DB 升至 v2）。`PurgeMsgs` / floor 坐标复用 `versions`（`entity=msgFloor:<convID>`），
+> `SeqSyncEngine` 的 gap 起点已按 `max(localMax, floor)` 收敛。
 
 ## 1. 背景与现状
 
@@ -164,8 +165,8 @@ type MsgPage struct {
 > P1 已落地 `*Page` / `Get*` 系列；P2 已落地 `Search*`（缓存 JSON 文本大小写不敏感子串匹配，
 > SQLite 用 `LOWER(data_json) LIKE`，Memory/IndexedDB 在 JSON 文本上 `includes`）与 `Count*`，
 > IndexedDB 的消息分页、单条直读、按 clientMsgID 直读、计数与搜索均已下推，
-> `DB_VERSION` 升至 2 并补 `messages.byClientMsgID` / `conversations.byLatestMsgSendTime` 索引（不重建 store）；
-> `GetMsgFloor` / `PurgeMsgs` 归 P3。
+> `DB_VERSION` 升至 2 并补 `messages.byClientMsgID` / `conversations.byLatestMsgSendTime` 索引（不重建 store）。
+> P3 已落地 `GetMsgFloor` / `SetMsgFloor`（复用 `versions`）、`PurgeMsgs`（Memory/SQLite/IndexedDB 三实现）。
 
 存储实现要点：
 
@@ -204,7 +205,7 @@ gomobile 侧由 `Call/SyncCall` 的反射层覆盖，无需额外导出函数。
 | P0（已完成） | `GetConversation`、`UnreadCount/UnreadTotal`、`GetHistoryMsgs/GetNewerMsgs` | 现有单测 |
 | P1（已完成） | `LocalDataMgr` 门面 + 会话/消息/好友/黑名单/群/成员**直读**与**分页** + Storage 扩展（Memory/SQLite，Idb 过渡实现） | Memory/SQLite 单测 + wasm 交叉编译通过 + 跨语言 `Local.*` 已注册 |
 | P2（已完成） | 搜索、`Stats`、IndexedDB 下推与 schema 升级 | Memory/SQLite 同套搜索/计数/`Stats` 单测 + wasm 交叉编译通过 + 自测页验证 IDB 分页/搜索/计数 |
-| P3 | `PurgeMsgs` + floor 语义 + 同步引擎联动 + `ClearLocalData` | 清理后重连不回流、显式历史仍可拉 |
+| P3（已完成） | `PurgeMsgs` + floor 语义 + 同步引擎联动 + `ClearLocalData` | 清理后重连不回流、显式历史仍可拉 |
 
 ## 9. 风险与取舍
 
