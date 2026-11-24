@@ -258,7 +258,8 @@ func (m *DefaultLocalDataMgr) unreadCountFor(owner, conversationID string, conv 
 		}
 	}
 	for _, mm := range msgs {
-		if mm != nil && mm.Seq > hasReadSeq && mm.Status != model.MsgStatusRevoked {
+		// 未读条件：seq 超过已读上限、未撤回、且不是自己发送的消息
+		if mm != nil && mm.Seq > hasReadSeq && mm.Status != model.MsgStatusRevoked && mm.SendID != owner {
 			unread++
 		}
 	}
