@@ -358,9 +358,10 @@ func (m *DefaultMsgMgr) MarkConversationAsRead(ctx context.Context, conversation
 
 func (m *DefaultMsgMgr) GetConversationsHasReadAndMaxSeq(ctx context.Context, conversationIDs []string, returnPinned bool) (map[string]*model.SeqInfo, []string, error) {
 	req := struct {
+		UserID          string   `json:"userID"`
 		ConversationIDs []string `json:"conversationIDs"`
 		ReturnPinned    bool     `json:"returnPinned"`
-	}{ConversationIDs: conversationIDs, ReturnPinned: returnPinned}
+	}{UserID: m.senderID, ConversationIDs: conversationIDs, ReturnPinned: returnPinned}
 	// 服务端 GetConversationsHasReadAndMaxSeqResp：{seqs: {convID → Seqs}, pinnedConversationIDs}
 	var resp struct {
 		Seqs                  map[string]*model.SeqInfo `json:"seqs"`
