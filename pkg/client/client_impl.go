@@ -223,6 +223,8 @@ func NewClient(cfg *ClientConfig) Client {
 
 	// 发送成功回调：维护会话本地摘要（服务端会话 DTO 不含摘要）
 	c.msg.SetOnSent(c.applySentConversationSummary)
+	// 本人已读上报成功：同步本地消息缓存 IsRead（Local.UnreadCount 依赖它）
+	c.msg.SetOnReadMarked(c.applySelfReadMark)
 
 	// 本地数据能力门面（依赖 storage + 运行期当前 owner）
 	c.local = manager.NewLocalDataMgr(stor, c.currentOwner)
@@ -411,6 +413,11 @@ func (c *DefaultClient) runSyncFlow(ctx context.Context, owner string) error {
 	}
 	if err := c.runEntitySync(ctx, owner); err != nil {
 		return fmt.Errorf("entity sync: %w", err)
+	}
+	// 会话已落库后同步服务端已读游标（未读推导以它为准）；
+	// 失败只降级为本地推导，不阻断整轮同步
+	if err := c.refreshReadSeqs(ctx, owner); err != nil {
+		c.logger.Warnf("sync: refresh read seqs failed, owner=%s, error=%v", owner, err.Error())
 	}
 	return nil
 }
@@ -981,13 +988,29 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 			c.logger.Warnf("dispatchNotification: unmarshal mark-as-read tips failed, error=%v", err.Error())
 		}
 		convID := notificationConvID(tip.ConversationID, mm.ConversationID)
-		c.applyMsgCache("mark read", convID, func(owner string) error {
-			if len(tip.Seqs) > 0 {
-				return c.storage.MarkMsgsRead(owner, convID, tip.Seqs)
-			}
-			// 整会话已读：标记 hasReadSeq 及之前的消息
-			return c.storage.MarkMsgsReadUpTo(owner, convID, tip.HasReadSeq)
-		})
+		// 只有「本人」的已读（其它端/其他设备）才落到本地消息缓存的 IsRead。
+		// 对方读了我的消息时，服务端也会广播该 tips，但 HasReadSeq 是对方的
+		// 阅读游标；若照此回写，会把我未读的入向消息一并标为已读，
+		// 表现为「还没点开该会话，消息就全部已读」。
+		if tip.MarkAsReadUserID == c.currentOwner() {
+			c.applyMsgCache("mark read", convID, func(owner string) error {
+				if len(tip.Seqs) > 0 {
+					if err := c.storage.MarkMsgsRead(owner, convID, tip.Seqs); err != nil {
+						return err
+					}
+				} else if err := c.storage.MarkMsgsReadUpTo(owner, convID, tip.HasReadSeq); err != nil {
+					return err
+				}
+				// 已读游标取本端与 tips 的较大值
+				readSeq := tip.HasReadSeq
+				for _, seq := range tip.Seqs {
+					if seq > readSeq {
+						readSeq = seq
+					}
+				}
+				return c.saveReadSeq(owner, convID, readSeq)
+			})
+		}
 		publish(events.EventMarkAsRead, tip)
 
 	// —— 用户 / 状态（用户资料无本地缓存，仅事件）——
@@ -1083,6 +1106,12 @@ func (c *DefaultClient) persistPushMsg(mm *model.MsgData) {
 	owner := c.currentOwner()
 	if owner == "" || mm == nil || mm.Seq <= 0 || mm.ConversationID == "" {
 		return
+	}
+	// 本端已读是本地状态：实时推送到达的他人消息对本端必然未读。
+	// 服务端推送的 IsRead 可能是发送者视角（发送即已读），直接采信会把
+	// 新消息 seq 计入 hasReadSeq，导致 Local.UnreadCount 本地推导为 0。
+	if mm.SendID != owner {
+		mm.IsRead = false
 	}
 	if err := c.storage.UpsertMsgs(owner, []*model.MsgData{mm}); err != nil {
 		c.logger.Warnf("client: persist pushed msg, conv=%s, seq=%d, error=%v",
@@ -1186,6 +1215,97 @@ func (c *DefaultClient) applyMsgCache(name, conversationID string, fn func(owner
 	}
 	if err := fn(owner); err != nil {
 		c.logger.Warnf("client: apply %s to msg cache, conv=%s, error=%v", name, conversationID, err.Error())
+	}
+}
+
+// applySelfReadMark 本人已读上报成功后回写本地：消息 IsRead + 会话已读游标
+//
+// 游标是 Local.UnreadCount 的主依据，消息 IsRead 是游标缺失时的离线兜底；
+// 两者不同步会出现「读过刷新后又有未读」。
+func (c *DefaultClient) applySelfReadMark(conversationID string, hasReadSeq int64, seqs []int64) {
+	c.applyMsgCache("self mark read", conversationID, func(owner string) error {
+		readSeq := hasReadSeq
+		for _, seq := range seqs {
+			if seq > readSeq {
+				readSeq = seq
+			}
+		}
+		if readSeq <= 0 {
+			return nil
+		}
+		// 已读上限是连续的：≤readSeq 的消息都视为已读，无需再逐条标记 seqs
+		if err := c.storage.MarkMsgsReadUpTo(owner, conversationID, readSeq); err != nil {
+			return err
+		}
+		return c.saveReadSeq(owner, conversationID, readSeq)
+	})
+}
+
+// saveReadSeq 持久化会话已读游标（只前进不回退），供 Local.UnreadCount 使用
+func (c *DefaultClient) saveReadSeq(owner, conversationID string, seq int64) error {
+	if owner == "" || conversationID == "" || seq <= 0 {
+		return nil
+	}
+	entity := fmt.Sprintf(storage.EntityReadSeqFmt, conversationID)
+	_, cur, err := c.storage.GetVersion(owner, entity)
+	if err != nil {
+		return err
+	}
+	if uint64(seq) <= cur {
+		return nil
+	}
+	return c.storage.SetVersion(owner, entity, "", uint64(seq))
+}
+
+// refreshReadSeqs 同步服务端记录的会话已读游标
+//
+// 未读数以服务端 hasReadSeq 为基准，换机/重装后本地没有已读标记也能算对；
+// 放在实体同步之后执行，保证会话列表已落库。
+func (c *DefaultClient) refreshReadSeqs(ctx context.Context, owner string) error {
+	conversationIDs, err := c.allConversationIDs(owner)
+	if err != nil {
+		return fmt.Errorf("refresh read seqs: list conversations: %w", err)
+	}
+	const batch = 100
+	for start := 0; start < len(conversationIDs); start += batch {
+		end := start + batch
+		if end > len(conversationIDs) {
+			end = len(conversationIDs)
+		}
+		seqs, _, err := c.msg.GetConversationsHasReadAndMaxSeq(ctx, conversationIDs[start:end], false)
+		if err != nil {
+			return fmt.Errorf("refresh read seqs: %w", err)
+		}
+		for conversationID, info := range seqs {
+			if info == nil || info.HasReadSeq <= 0 {
+				continue
+			}
+			if err := c.saveReadSeq(owner, conversationID, info.HasReadSeq); err != nil {
+				return fmt.Errorf("refresh read seqs: save %s: %w", conversationID, err)
+			}
+		}
+	}
+	return nil
+}
+
+// allConversationIDs 本地会话列表的全部 ID（分页收集）
+func (c *DefaultClient) allConversationIDs(owner string) ([]string, error) {
+	const pageSize = 200
+	out := make([]string, 0, pageSize)
+	for offset := int32(0); ; {
+		page, err := c.storage.ListConversationsPage(owner, offset, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, conv := range page.Items {
+			if conv != nil && conv.ConversationID != "" {
+				out = append(out, conv.ConversationID)
+			}
+		}
+		offset += pageSize
+		if !page.HasMore || int64(offset) >= page.Total {
+			return out, nil
+		}
 	}
 }
 

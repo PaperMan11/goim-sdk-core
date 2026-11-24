@@ -370,7 +370,8 @@ func TestPushDeleteAppliesToCache(t *testing.T) {
 	}
 }
 
-// TestPushMarkAsReadAppliesToCache 2200 已读回执应实时标记本地缓存（seqs 列表 + hasReadSeq 兜底）
+// TestPushMarkAsReadAppliesToCache 2200 已读回执：
+// 只有本人的已读（多端同步）才回写本地 IsRead；对方读了我的消息不应清我的未读
 func TestPushMarkAsReadAppliesToCache(t *testing.T) {
 	cli, m := newTestClient(t)
 	loginTestClient(cli, "me")
@@ -378,7 +379,7 @@ func TestPushMarkAsReadAppliesToCache(t *testing.T) {
 	seedMsg(t, cli, "me", "si_c2c_test", 2, "m2")
 	seedMsg(t, cli, "me", "si_c2c_test", 3, "m3")
 
-	done := make(chan struct{}, 2)
+	done := make(chan struct{}, 3)
 	ch, unsub := cli.Subscribe(events.EventMarkAsRead)
 	defer unsub()
 	go func() {
@@ -387,19 +388,8 @@ func TestPushMarkAsReadAppliesToCache(t *testing.T) {
 		}
 	}()
 
-	// 第一条：仅标记 seq=2 已读
+	// 第一条：对方（alice）已读，hasReadSeq=3 —— 不得回写本地 IsRead
 	data, err := proto.Marshal(pushEnvelope(notificationMsg(t,
-		pbconstant.HasReadReceipt,
-		&pbsdk.MarkAsReadTips{MarkAsReadUserID: "alice", ConversationID: "si_c2c_test", Seqs: []int64{2}},
-		0)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
-	waitForSubscribe(t, done)
-
-	// 第二条：seqs 为空 + hasReadSeq=3 → 标记 ≤3 全部已读
-	data, err = proto.Marshal(pushEnvelope(notificationMsg(t,
 		pbconstant.HasReadReceipt,
 		&pbsdk.MarkAsReadTips{MarkAsReadUserID: "alice", ConversationID: "si_c2c_test", HasReadSeq: 3},
 		0)))
@@ -409,20 +399,98 @@ func TestPushMarkAsReadAppliesToCache(t *testing.T) {
 	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
 	waitForSubscribe(t, done)
 
-	msgs, err := cli.storage.ListMsgsByConversation("me", "si_c2c_test")
+	for _, seq := range []int64{1, 2, 3} {
+		if msg := msgBySeq(t, cli, "si_c2c_test", seq); msg.IsRead {
+			t.Fatalf("peer receipt must not mark seq=%d read", seq)
+		}
+	}
+
+	// 第二条：本人另一端的已读，仅标记 seq=2
+	data, err = proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.HasReadReceipt,
+		&pbsdk.MarkAsReadTips{MarkAsReadUserID: "me", ConversationID: "si_c2c_test", Seqs: []int64{2}},
+		0)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	bySeq := map[int64]*model.MsgData{}
-	for _, msg := range msgs {
-		bySeq[msg.Seq] = msg
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+	waitForSubscribe(t, done)
+
+	if msgBySeq(t, cli, "si_c2c_test", 1).IsRead || !msgBySeq(t, cli, "si_c2c_test", 2).IsRead {
+		t.Fatal("seqs receipt: want seq1 unread, seq2 read")
 	}
+
+	// 第三条：本人另一端的整会话已读，hasReadSeq=3 → 标记 ≤3 全部已读
+	data, err = proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.HasReadReceipt,
+		&pbsdk.MarkAsReadTips{MarkAsReadUserID: "me", ConversationID: "si_c2c_test", HasReadSeq: 3},
+		0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+	waitForSubscribe(t, done)
+
 	for _, seq := range []int64{1, 2, 3} {
-		if msg := bySeq[seq]; msg == nil || !msg.IsRead {
-			t.Fatalf("seq=%d should be marked read, got %+v", seq, msg)
+		if msg := msgBySeq(t, cli, "si_c2c_test", seq); !msg.IsRead {
+			t.Fatalf("self receipt should mark seq=%d read", seq)
 		}
 	}
 }
+
+// msgBySeq 取本地缓存中指定 seq 的消息（测试辅助）
+func msgBySeq(t *testing.T, cli *DefaultClient, conversationID string, seq int64) *model.MsgData {
+	t.Helper()
+	msgs, err := cli.storage.ListMsgsByConversation("me", conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range msgs {
+		if msg.Seq == seq {
+			return msg
+		}
+	}
+	t.Fatalf("msg seq=%d not found in %s", seq, conversationID)
+	return nil
+}
+
+// TestApplySelfReadMarkClearsUnread 本人已读上报成功后的本地回写，
+// 必须让 Local.UnreadCount 归零（否则宿主刷新后会重新算出未读）
+func TestApplySelfReadMarkClearsUnread(t *testing.T) {
+	cli, _ := newTestClient(t)
+	loginTestClient(cli, "me")
+	for seq := int64(1); seq <= 3; seq++ {
+		seedMsg(t, cli, "me", "si_self_read", seq, "m")
+	}
+
+	before, err := cli.Local().UnreadCount("si_self_read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != 3 {
+		t.Fatalf("unread before = %d, want 3", before)
+	}
+
+	cli.applySelfReadMark("si_self_read", 2, nil)
+
+	after, err := cli.Local().UnreadCount("si_self_read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != 1 {
+		t.Fatalf("unread after hasReadSeq=2: got %d, want 1", after)
+	}
+
+	cli.applySelfReadMark("si_self_read", 3, nil)
+	final, err := cli.Local().UnreadCount("si_self_read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final != 0 {
+		t.Fatalf("unread after hasReadSeq=3: got %d, want 0", final)
+	}
+}
+
 
 // TestPushNotificationTriggersEntitySync 实体类通知（1204 好友添加）应去抖触发
 // 实体增量同步，把变更实时拉入本地缓存（无需等待重连）

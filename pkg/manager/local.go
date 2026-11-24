@@ -249,6 +249,14 @@ func (m *DefaultLocalDataMgr) unreadCountFor(owner, conversationID string, conv 
 		return 0, nil
 	}
 	var hasReadSeq, unread int64
+	// 服务端记录的已读游标优先：换机/重装后本地没有已读标记也能算出正确未读
+	_, serverReadSeq, err := m.stor.GetVersion(owner, fmt.Sprintf(storage.EntityReadSeqFmt, conversationID))
+	if err != nil {
+		return 0, fmt.Errorf("local data: unread count: get read seq: %w", err)
+	}
+	if int64(serverReadSeq) > hasReadSeq {
+		hasReadSeq = int64(serverReadSeq)
+	}
 	for _, mm := range msgs {
 		if mm == nil {
 			continue

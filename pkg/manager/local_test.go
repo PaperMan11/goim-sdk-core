@@ -205,6 +205,29 @@ func TestLocalDataMgr_UnreadAndRelations(t *testing.T) {
 	require.Nil(t, g)
 }
 
+// TestLocalDataMgr_UnreadUsesServerReadSeq 未读以服务端已读游标为基准：
+// 换机/重装后本地没有 IsRead 标记也能算出正确未读
+func TestLocalDataMgr_UnreadUsesServerReadSeq(t *testing.T) {
+	const owner = "u1"
+	stor := storage.NewMemoryStorage()
+	require.NoError(t, stor.UpsertMsgs(owner, []*model.MsgData{
+		{ClientMsgID: "m1", ConversationID: "si_c1", Seq: 1, SendID: "u2"},
+		{ClientMsgID: "m2", ConversationID: "si_c1", Seq: 2, SendID: "u2"},
+		{ClientMsgID: "m3", ConversationID: "si_c1", Seq: 3, SendID: "u2"},
+	}))
+
+	m := NewLocalDataMgr(stor, func() string { return owner })
+	n, err := m.UnreadCount("si_c1")
+	require.NoError(t, err)
+	require.Equal(t, int64(3), n)
+
+	// 服务端记录已读至 seq2（如在另一台设备读过），本地消息全部为未读
+	require.NoError(t, stor.SetVersion(owner, fmt.Sprintf(storage.EntityReadSeqFmt, "si_c1"), "", 2))
+	n, err = m.UnreadCount("si_c1")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+}
+
 func TestLocalDataMgr_SearchAndStats(t *testing.T) {
 	const owner, conv = "u1", "si_c1"
 	stor := storage.NewMemoryStorage()

@@ -32,6 +32,7 @@ const (
 	EntityConversations   = "conversations"
 	EntityGroupMembersFmt = "groupMembers:%s" // 群维度游标：fmt.Sprintf(EntityGroupMembersFmt, groupID)
 	EntityMsgFloorFmt     = "msgFloor:%s"     // 本地消息清理下界：fmt.Sprintf(EntityMsgFloorFmt, conversationID)
+	EntityReadSeqFmt      = "readSeq:%s"      // 服务端/本地确认的会话已读游标：fmt.Sprintf(EntityReadSeqFmt, conversationID)
 )
 
 // Storage 本地持久化接口

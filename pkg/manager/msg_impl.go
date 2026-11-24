@@ -39,6 +39,10 @@ type DefaultMsgMgr struct {
 
 	// 发送成功回调（client 层注入，用于维护会话本地摘要）
 	onSent func(msg *model.MsgData, resp *model.SendMsgResp)
+
+	// 本人已读上报成功回调（client 层注入，用于同步本地消息缓存的 IsRead，
+	// 否则 Local.UnreadCount 会在刷新后从陈旧缓存重新算出未读）
+	onReadMarked func(conversationID string, hasReadSeq int64, seqs []int64)
 }
 
 // NewMsgMgr 构造 MsgMgr
@@ -51,6 +55,11 @@ func (m *DefaultMsgMgr) SetSenderID(userID string) { m.senderID = userID }
 // SetOnSent 注入发送成功回调（msg 为本次发送入参，resp 为服务端回包）
 func (m *DefaultMsgMgr) SetOnSent(fn func(msg *model.MsgData, resp *model.SendMsgResp)) {
 	m.onSent = fn
+}
+
+// SetOnReadMarked 注入本人已读上报成功回调（只在上报成功后触发）
+func (m *DefaultMsgMgr) SetOnReadMarked(fn func(conversationID string, hasReadSeq int64, seqs []int64)) {
+	m.onReadMarked = fn
 }
 
 // —— WS 发送 / 拉取 ——
@@ -338,6 +347,11 @@ func (m *DefaultMsgMgr) MarkConversationAsRead(ctx context.Context, conversation
 	}{ConversationID: conversationID, UserID: m.senderID, HasReadSeq: hasReadSeq, Seqs: seqs}
 	if err := m.http.Post(ctx, "/msg/mark_conversation_as_read", req, nil); err != nil {
 		return fmt.Errorf("mark conversation as read: %w", err)
+	}
+	// 上报成功后同步本地缓存：Local.UnreadCount 由本地 IsRead 推导，
+	// 不回写会导致「内存里置 0、刷新后又算出未读」
+	if m.onReadMarked != nil {
+		m.onReadMarked(conversationID, hasReadSeq, seqs)
 	}
 	return nil
 }
