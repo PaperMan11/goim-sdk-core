@@ -1,39 +1,41 @@
 package model
 
-// SessionType
+import pbconstant "github.com/PaperMan11/goim/pkg/protocol/constant"
+
+// SessionType（引用协议 constant.SingleChatType / ReadGroupChatType）
 const (
-	SessionTypeC2C   = 1 // 单聊
-	SessionTypeGroup = 3 // 读扩散群聊
+	SessionTypeC2C   = pbconstant.SingleChatType    // 单聊
+	SessionTypeGroup = pbconstant.ReadGroupChatType // 读扩散群聊
 )
 
-// MsgFrom
+// MsgFrom（引用协议 constant.UserMsgType / SysMsgType）
 const (
-	MsgFromUser   = 100 // 用户消息
-	MsgFromSystem = 200 // 系统通知
+	MsgFromUser   = pbconstant.UserMsgType // 用户消息
+	MsgFromSystem = pbconstant.SysMsgType  // 系统通知
 )
 
-// RecvMsgOpt / GlobalRecvMsgOpt
+// RecvMsgOpt / GlobalRecvMsgOpt（引用协议 constant.ReceiveMessage 等）
 const (
-	RecvMsg          = 0 // 接收
-	NotRecvMsg       = 1 // 不接收
-	RecvMsgNotNotify = 2 // 接收不推送
+	RecvMsg          = pbconstant.ReceiveMessage          // 接收
+	NotRecvMsg       = pbconstant.NotReceiveMessage       // 不接收
+	RecvMsgNotNotify = pbconstant.ReceiveNotNotifyMessage // 接收不推送
 )
 
-// RoleLevel (群成员角色，对齐服务端 constant.GroupOrdinaryUsers/GroupAdmin/GroupOwner)
+// RoleLevel（群成员角色，引用协议 constant.GroupOrdinaryUsers/GroupAdmin/GroupOwner）
 const (
-	RoleMember = 20  // GroupOrdinaryUsers 群普通成员
-	RoleAdmin  = 60  // GroupAdmin 群管理员
-	RoleOwner  = 100 // GroupOwner 群主
+	RoleMember = pbconstant.GroupOrdinaryUsers // 群普通成员
+	RoleAdmin  = pbconstant.GroupAdmin         // 群管理员
+	RoleOwner  = pbconstant.GroupOwner         // 群主
 )
 
-// GroupStatus (群状态，对应 GroupInfo.Status)
+// GroupStatus（群状态，引用协议 constant.Group*）
 const (
-	GroupOk              = 0 // 正常
-	GroupBanChat         = 1 // 禁止发言
-	GroupStatusDismissed = 2 // 已解散
-	GroupStatusMuted     = 3 // 已禁言
-	GroupBaned           = 3 // 已封禁（服务端历史字段，与 Muted 值相同）
-	GroupBanPrivateChat  = 4 // 禁止私聊
+	GroupOk              = pbconstant.GroupOk              // 正常
+	GroupBanChat         = pbconstant.GroupBanChat         // 禁止发言
+	GroupStatusDismissed = pbconstant.GroupStatusDismissed // 已解散
+	GroupStatusMuted     = pbconstant.GroupStatusMuted     // 已禁言
+	GroupBaned           = pbconstant.GroupBaned           // 已封禁（服务端历史字段，与 Muted 值相同）
+	GroupBanPrivateChat  = pbconstant.GroupBanPrivateChat  // 禁止私聊
 )
 
 // GroupIsBanChat 检查群组是否被禁言
@@ -46,85 +48,84 @@ func GroupIsBanPrivateChat(status int32) bool {
 	return status == GroupBanPrivateChat
 }
 
-// GroupType (群类型，对应 GroupInfo.GroupType)
+// GroupType（群类型，引用协议 constant.NormalGroup 等）
 const (
-	NormalGroup  = 0 // 普通群
-	SuperGroup   = 1 // 超级群
-	WorkingGroup = 2 // 工作群
+	NormalGroup  = pbconstant.NormalGroup  // 普通群
+	SuperGroup   = pbconstant.SuperGroup   // 超级群
+	WorkingGroup = pbconstant.WorkingGroup // 工作群
 )
 
-// JoinSource (入群来源，对应 GroupMemberFullInfo.JoinSource / JoinGroup 请求 joinSource)
+// JoinSource（入群来源，引用协议 constant.JoinBy*）
 const (
-	JoinByAdmin      = 1 // 管理员添加
-	JoinByInvitation = 2 // 邀请加入
-	JoinBySearch     = 3 // 搜索加入
-	JoinByQRCode     = 4 // 扫码加入
+	JoinByAdmin      = pbconstant.JoinByAdmin      // 管理员添加
+	JoinByInvitation = pbconstant.JoinByInvitation // 邀请加入
+	JoinBySearch     = pbconstant.JoinBySearch     // 搜索加入
+	JoinByQRCode     = pbconstant.JoinByQRCode     // 扫码加入
 )
 
-// GroupResponse (群组申请响应)
+// GroupResponse（群组申请响应，引用协议 constant.GroupResponseAgree/Refuse）
 const (
-	GroupResponseAgree  = 1  // 同意
-	GroupResponseRefuse = -1 // 拒绝
+	GroupResponseAgree  = pbconstant.GroupResponseAgree  // 同意
+	GroupResponseRefuse = pbconstant.GroupResponseRefuse // 拒绝
 )
 
-// GroupSearchPosition (群搜索位置)
+// GroupSearchPosition（群搜索位置，引用协议 constant.GroupSearchPosition*）
 const (
-	GroupSearchPositionHead = 1 // 头部
-	GroupSearchPositionAny  = 2 // 任意位置
+	GroupSearchPositionHead = pbconstant.GroupSearchPositionHead // 头部
+	GroupSearchPositionAny  = pbconstant.GroupSearchPositionAny  // 任意位置
 )
 
-// GroupRPCBatchSize (群组 RPC 消息批量大小)
+// GroupRPCBatchSize（群组 RPC 消息批量大小，引用协议 constant.GroupRPC*Size）
 const (
-	GroupRPCRecvSize = 30
-	GroupRPCSendSize = 30
+	GroupRPCRecvSize = pbconstant.GroupRPCRecvSize
+	GroupRPCSendSize = pbconstant.GroupRPCSendSize
 )
 
-// NeedVerification (群入群验证方式，对应 GroupInfo.NeedVerification)
+// NeedVerification（群入群验证方式，引用协议 constant.ApplyNeedVerificationInviteDirectly 等）
 const (
-	ApplyNeedVerificationInviteDirectly = 0 // 申请需要验证，邀请直接加入
-	AllNeedVerification                 = 1 // 所有人都需要验证
-	Directly                            = 2 // 直接加入，无需验证
+	ApplyNeedVerificationInviteDirectly = pbconstant.ApplyNeedVerificationInviteDirectly // 申请需要验证，邀请直接加入
+	AllNeedVerification                 = pbconstant.AllNeedVerification                 // 所有人都需要验证
+	Directly                            = pbconstant.Directly                            // 直接加入，无需验证
 )
 
-// PullOrder
+// PullOrder（SDK 拉取排序，协议无对应常量）
 const (
 	PullOrderAsc  = 0 // 升序
 	PullOrderDesc = 1 // 降序
 )
 
-// TokenStatus
+// TokenStatus（引用协议 constant.NormalToken 等）
 const (
-	NormalToken  = 0
-	InValidToken = 1
-	KickedToken  = 2
-	ExpiredToken = 3
+	NormalToken  = pbconstant.NormalToken  // 正常
+	InValidToken = pbconstant.InValidToken // 无效
+	KickedToken  = pbconstant.KickedToken  // 被踢
+	ExpiredToken = pbconstant.ExpiredToken // 过期
 )
 
-// HandleResult (好友申请/入群申请)
+// HandleResult（好友/入群申请处理结果，引用协议 constant.FriendResponse*）
 const (
-	HandleResultUnprocessed = 0
-	HandleResultApproved    = 1
-	HandleResultRejected    = -1
+	HandleResultUnprocessed = pbconstant.FriendResponseNotHandle // 未处理
+	HandleResultApproved    = pbconstant.FriendResponseAgree     // 同意
+	HandleResultRejected    = pbconstant.FriendResponseRefuse    // 拒绝
 )
 
-// Message status（对齐 goim docs/protocol-message.md §1：
-// 1 发送中 / 2 发送成功 / 3 发送失败 / 4 已删除 / 5 已过滤）
+// Message status（引用协议 constant.MsgStatus*，对齐 docs/protocol-message.md §1）
 const (
-	MsgStatusSending  int32 = 1
-	MsgStatusSuccess  int32 = 2
-	MsgStatusFailed   int32 = 3
-	MsgStatusDeleted  int32 = 4
-	MsgStatusFiltered int32 = 5
+	MsgStatusSending  int32 = pbconstant.MsgStatusSending     // 发送中
+	MsgStatusSuccess  int32 = pbconstant.MsgStatusSendSuccess // 发送成功
+	MsgStatusFailed   int32 = pbconstant.MsgStatusSendFailed  // 发送失败
+	MsgStatusDeleted  int32 = pbconstant.MsgStatusHasDeleted  // 已删除
+	MsgStatusFiltered int32 = pbconstant.MsgStatusFiltered    // 已过滤
 )
 
 // MsgStatusRevoked 撤回通知的本地缓存标记，语义等同于已删除（UI 展示「已撤回」）
 const MsgStatusRevoked = MsgStatusDeleted
 
-// ContentTypeRevoke 撤回消息（对齐 docs/protocol-message.md §2 的 111 Revoke）。
+// ContentTypeRevoke 撤回消息（引用协议常量 constant.Revoke，协议调整时自动跟随）。
 // 仅用于会话摘要：最新一条被撤回时摘要改写为该类型，宿主据此展示「已撤回」。
-const ContentTypeRevoke int32 = 111
+const ContentTypeRevoke int32 = pbconstant.Revoke
 
-// DeleteSyncOpt flag
+// DeleteSyncOpt flag（SDK 本地开关，协议无对应常量）
 const (
 	SyncSelf  = true
 	SyncOther = false
