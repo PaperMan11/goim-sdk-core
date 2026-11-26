@@ -50,8 +50,21 @@ func MsgInfoFromMsg(m *MsgData) *MsgInfo {
 	}
 }
 
-// Conversation 会话完整信息（字段与 JSON tag 对齐服务端 conversation.Conversation）
-// 带「SDK 本地」标注的字段为客户端缓存扩展，服务端不返回
+// SummaryInfoFromMsg 会话摘要构造：最新消息被撤回（status=4）时统一改写为
+// 111 Revoke 类型，会话列表据此展示「已撤回」而不是原文；其余消息按原文构造。
+func SummaryInfoFromMsg(m *MsgData) *MsgInfo {
+	info := MsgInfoFromMsg(m)
+	if info == nil {
+		return nil
+	}
+	if m.Status == MsgStatusDeleted {
+		info.ContentType = ContentTypeRevoke
+		info.Content = ""
+	}
+	return info
+}
+
+// Conversation 会话完整信息（字段与 JSON tag 对齐服务端 conversation.Conversation）// 带「SDK 本地」标注的字段为客户端缓存扩展，服务端不返回
 type Conversation struct {
 	OwnerUserID           string `json:"ownerUserID,omitempty"`
 	ConversationID        string `json:"conversationID,omitempty"`

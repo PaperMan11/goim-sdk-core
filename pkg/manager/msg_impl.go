@@ -207,20 +207,25 @@ func (m *DefaultMsgMgr) PullMsgBySeq(ctx context.Context, userID string, seqRang
 		return nil, fmt.Errorf("unmarshal pull msg resp: %w", err)
 	}
 
-	result := make(map[string]*model.PullMsgsResult, len(pullResp.Msgs))
-	for convID, pbMsgs := range pullResp.Msgs {
-		msgs := fromProtoMsgList(pbMsgs.Msgs)
-		// 服务端 proto MsgData 无 conversation_id 字段，按响应 map key 回填，
-		// 否则入库后 conversation_id 为空，既查不到也破坏唯一索引
-		for _, mm := range msgs {
-			mm.ConversationID = convID
-		}
-		result[convID] = &model.PullMsgsResult{
-			Msgs:   msgs,
-			IsEnd:  pbMsgs.IsEnd,
-			EndSeq: convert.ToString(pbMsgs.EndSeq),
+	result := make(map[string]*model.PullMsgsResult, len(pullResp.Msgs)+len(pullResp.NotificationMsgs))
+	appendPull := func(source map[string]*pbsdk.PullMsgs) {
+		for convID, pbMsgs := range source {
+			msgs := fromProtoMsgList(pbMsgs.Msgs)
+			// 服务端 proto MsgData 无 conversation_id 字段，按响应 map key 回填，
+			// 否则入库后 conversation_id 为空，既查不到也破坏唯一索引
+			for _, mm := range msgs {
+				mm.ConversationID = convID
+			}
+			result[convID] = &model.PullMsgsResult{
+				Msgs:   msgs,
+				IsEnd:  pbMsgs.IsEnd,
+				EndSeq: convert.ToString(pbMsgs.EndSeq),
+			}
 		}
 	}
+	appendPull(pullResp.Msgs)
+	// 撤回/删除等状态通知落在独立通知会话（n_），与聊天消息一样按 seq 增量补拉。
+	appendPull(pullResp.NotificationMsgs)
 	return result, nil
 }
 

@@ -71,7 +71,8 @@ type DefaultClient struct {
 	entitySyncPending map[sdkSync.EntityKind]struct{} // 去抖窗口内累积的待同步实体类型
 	syncRunMu         sync.Mutex
 
-	// 会话摘要写入串行化：推送与发送回调可能并发，避免读改写互相覆盖
+	// 会话摘要写入串行化：推送、发送回调与后台 SeqSyncEngine 补拉通知可能并发，
+	// 避免读改写互相覆盖。同步引擎通过注入的 refreshSummary 共用这把锁。
 	convSummaryMu sync.Mutex
 }
 
@@ -407,7 +408,7 @@ func (c *DefaultClient) runSyncFlow(ctx context.Context, owner string) error {
 	c.syncRunMu.Lock()
 	defer c.syncRunMu.Unlock()
 
-	seqSync := sdkSync.NewSeqSyncEngine(c.msg, c.storage, owner, c.bus, c.logger)
+	seqSync := sdkSync.NewSeqSyncEngine(c.msg, c.storage, owner, c.bus, c.logger, c.refreshSummary)
 	if err := seqSync.Sync(ctx); err != nil {
 		return fmt.Errorf("seq sync: %w", err)
 	}
@@ -968,6 +969,7 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 			c.applyMsgCache("mark revoked", convID, func(owner string) error {
 				return c.storage.MarkMsgsRevoked(owner, convID, []int64{tip.Seq})
 			})
+			c.applyConversationSummary(nil, convID)
 		}
 		publish(events.EventRevokeMsg, tip)
 	case pbconstant.DeleteMsgsNotification: // 2102
@@ -980,6 +982,7 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 			c.applyMsgCache("delete msgs", convID, func(owner string) error {
 				return c.storage.DeleteMsgs(owner, convID, tip.Seqs)
 			})
+			c.applyConversationSummary(nil, convID)
 		}
 		publish(events.EventDeleteMsgs, tip)
 	case pbconstant.HasReadReceipt: // 2200
@@ -1138,28 +1141,85 @@ func (c *DefaultClient) applySentConversationSummary(msg *model.MsgData, resp *m
 		out.ServerMsgID = resp.ServerMsgID
 		out.SendTime = resp.SendTime
 	}
-	c.updateConversationSummary(&out, conversationID)
+	c.applyConversationSummary(&out, conversationID)
 }
 
-// applyConversationSummary 收到推送消息后更新会话摘要并发布会话变更事件
+// applyConversationSummary 消息变化统一入口：发送 / 接收 / 撤回 / 删除后维护会话摘要，
+// 完成后发布 EventConversationUpdate，宿主监听事件重读本地会话即可，无需自己维护摘要。
+//
+//   - msg != nil（发送成功 / 实时收到）：直接用该消息推进摘要。发送消息本地不入消息缓存
+//     （seq 由服务端分配），无法从缓存重算；比当前摘要更早的乱序消息不回退摘要。
+//   - msg == nil（撤回 / 删除后）：本地消息缓存已变更，按本地最新一条重算——最新一条被
+//     撤回 → 摘要改写为 111 Revoke；被删除 → 回退到上一条（本地已无消息则清空）。
 func (c *DefaultClient) applyConversationSummary(msg *model.MsgData, conversationID string) {
-	if msg == nil || conversationID == "" || manager.IsNotificationConversation(conversationID) {
+	owner := c.currentOwner()
+	if owner == "" || conversationID == "" || manager.IsNotificationConversation(conversationID) {
 		return
 	}
-	c.updateConversationSummary(msg, conversationID)
-}
 
-// updateConversationSummary 用消息维护本地会话摘要（MsgInfo + latestMsgSendTime），
-// 完成后发布 EventConversationUpdate，让宿主（如 Web 会话列表）从本地缓存刷新。
-func (c *DefaultClient) updateConversationSummary(msg *model.MsgData, conversationID string) {
-	owner := c.currentOwner()
-	if owner == "" {
+	if msg == nil {
+		// 撤回/删除：按本地最新消息重算（refreshSummary 内部加锁）
+		c.refreshSummary(owner, conversationID)
 		return
 	}
 
 	c.convSummaryMu.Lock()
 	defer c.convSummaryMu.Unlock()
+	c.updateConversationSummary(owner, msg, conversationID)
+}
 
+// refreshSummary 会话摘要重算实现（撤回/删除后按本地最新消息回退摘要），
+// 同时注入给 SeqSyncEngine——补拉通知路径复用同一实现、同一把写锁。
+//
+// 会话摘要的事实源是本地消息缓存：最新一条被撤回 → 摘要改写为 111 Revoke；
+// 被删除 → 回退到上一条（本地已无消息则清空）。宿主只需监听
+// EventConversationUpdate 重新读取本地会话，不需要自己维护摘要。
+func (c *DefaultClient) refreshSummary(owner, conversationID string) {
+	if owner == "" || conversationID == "" {
+		return
+	}
+	c.convSummaryMu.Lock()
+	defer c.convSummaryMu.Unlock()
+	c.refreshConversationSummaryLocked(owner, conversationID)
+}
+
+// refreshConversationSummaryLocked 重算并落盘会话摘要；调用方需持有 convSummaryMu。
+func (c *DefaultClient) refreshConversationSummaryLocked(owner, conversationID string) {
+	conv, err := c.storage.GetConversation(owner, conversationID)
+	if err != nil {
+		c.logger.Warnf("client: refresh conversation summary, get conv error=%v", err.Error())
+		return
+	}
+	if conv == nil {
+		return
+	}
+	latest, err := c.storage.GetLatestMsg(owner, conversationID)
+	if err != nil {
+		c.logger.Warnf("client: refresh conversation summary, get latest msg error=%v", err.Error())
+		return
+	}
+	conv.MsgInfo = model.SummaryInfoFromMsg(latest)
+	conv.LatestMsgSendTime = 0
+	if latest != nil {
+		conv.LatestMsgSendTime = latest.SendTime
+	}
+	if err := c.storage.UpsertConversations(owner, []*model.Conversation{conv}); err != nil {
+		c.logger.Warnf("client: refresh conversation summary, conv=%s, error=%v", conversationID, err.Error())
+		return
+	}
+	c.bus.Publish(events.EventConversationUpdate, events.Event{
+		Type: events.EventConversationUpdate,
+		Payload: &events.ConversationUpdateTips{
+			UserID:             owner,
+			ConversationIDList: []string{conversationID},
+		},
+		Timestamp: timex.UnixMilli(),
+	})
+}
+
+// updateConversationSummary 用消息维护本地会话摘要（MsgInfo + latestMsgSendTime）；
+// 调用方需持有 convSummaryMu。
+func (c *DefaultClient) updateConversationSummary(owner string, msg *model.MsgData, conversationID string) {
 	conv, err := c.storage.GetConversation(owner, conversationID)
 	if err != nil {
 		c.logger.Warnf("client: update conversation summary, get conv error=%v", err.Error())

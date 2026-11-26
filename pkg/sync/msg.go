@@ -13,9 +13,13 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	pbconstant "github.com/PaperMan11/goim/pkg/protocol/constant"
+	pbsdk "github.com/PaperMan11/goim/pkg/protocol/sdkws"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
@@ -44,6 +48,11 @@ type MsgSource interface {
 	PullMsgBySeq(ctx context.Context, userID string, seqRanges []*model.SeqRange, order int32) (map[string]*model.PullMsgsResult, error)
 }
 
+// SummaryRefresher 会话摘要重算回调（撤回/删除后按本地最新消息回退摘要）。
+// 由调用方（客户端）注入，负责并发串行化与事件发布，保证补拉通知路径与
+// 客户端推送/发送路径共用同一把写锁。
+type SummaryRefresher func(owner, conversationID string)
+
 // SeqSyncEngine 消息 seq 同步引擎
 type SeqSyncEngine struct {
 	msg    MsgSource
@@ -51,11 +60,14 @@ type SeqSyncEngine struct {
 	owner  string
 	bus    *eventbus.EventBus
 	logger logger.Logger
+	// refreshSummary 会话摘要重算回调，由客户端注入；nil 表示跳过重算（单测）
+	refreshSummary SummaryRefresher
 }
 
-// NewSeqSyncEngine 构造消息同步引擎
-func NewSeqSyncEngine(msg MsgSource, stor storage.Storage, owner string, bus *eventbus.EventBus, l logger.Logger) *SeqSyncEngine {
-	return &SeqSyncEngine{msg: msg, stor: stor, owner: owner, bus: bus, logger: l}
+// NewSeqSyncEngine 构造消息同步引擎。refreshSummary 为会话摘要重算回调
+// （可为 nil，表示不重算）。
+func NewSeqSyncEngine(msg MsgSource, stor storage.Storage, owner string, bus *eventbus.EventBus, l logger.Logger, refreshSummary SummaryRefresher) *SeqSyncEngine {
+	return &SeqSyncEngine{msg: msg, stor: stor, owner: owner, bus: bus, logger: l, refreshSummary: refreshSummary}
 }
 
 // Sync 执行 gap 拉取：
@@ -68,7 +80,9 @@ func NewSeqSyncEngine(msg MsgSource, stor storage.Storage, owner string, bus *ev
 //     缺口前重拉；耗尽仍缺跳过并告警（视为已删/永久缺失）；补拉请求失败则游标停在
 //     缺口前，留待下次同步
 //  5. 单会话失败不中断其余会话（错误聚合返回，已成功会话进度已持久化）
-//  6. Publish(EventSeqSynced)（仅全部会话成功，"数据已就绪"语义不变）
+//  6. 补拉到的撤回/删除通知实时应用到本地消息缓存；摘要重算推迟到该会话同步
+//     结束后统一执行（每会话一次），避免用中间态反复刷写
+//  7. Publish(EventSeqSynced)（仅全部会话成功，"数据已就绪"语义不变）
 func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 	serverMax, serverMin, err := e.msg.NewestSeq(ctx)
 	if err != nil {
@@ -126,6 +140,11 @@ func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 			continue
 		}
 
+		// 本会话补拉到的撤回/删除通知所影响的会话：同步完成后统一重算摘要，
+		// 批内/缺口补拉可能重复收到同一会话的多条通知，逐条刷新既浪费写盘，
+		// 也会用未同步完的中间态覆盖摘要
+		affected := make(map[string]struct{})
+
 		next := start + 1
 		for next <= svMax {
 			batchStart := next // 本批起始 seq（防御分支用：拉取后游标必须越过它）
@@ -155,6 +174,7 @@ func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("sync: upsert msgs %s: %w", convID, err))
 				break
 			}
+			e.applyNotificationMsgs(convID, pr.Msgs, affected)
 			last := pr.Msgs[len(pr.Msgs)-1].Seq
 			got := make(map[int64]struct{}, len(pr.Msgs))
 			for _, m := range pr.Msgs {
@@ -170,7 +190,7 @@ func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 					errs = append(errs, fmt.Errorf("conversation %s: %w", convID, err))
 					break
 				}
-				hole, rerr := e.fillHole(ctx, convID, got, hole, last)
+				hole, rerr := e.fillHole(ctx, convID, got, hole, last, affected)
 				if rerr != nil {
 					// 补拉失败（未知状态不跳过）：游标已停在缺口前，本会话剩余
 					// 批次留待下次同步；已入库消息下轮幂等重拉
@@ -201,6 +221,12 @@ func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 				next = end + 1
 			}
 		}
+
+		// 本会话同步结束（消息已全部入库、撤回/删除状态已应用）后再重算摘要，
+		// 保证摘要基于完整的最新本地消息，且每个受影响会话只写一次
+		for conv := range affected {
+			e.refreshConversationSummary(conv)
+		}
 	}
 
 	// 尾部落盘：min 前移未被批内落盘覆盖时（如全部会话无 gap、或失败会话的 min 前移）
@@ -229,7 +255,7 @@ func (e *SeqSyncEngine) Sync(ctx context.Context) error {
 // 放弃，返回剩余的首个缺口 seq（调用方跳过，游标越过缺口推进）。
 // 补拉请求/入库失败返回错误——未知状态不跳过，调用方将游标停在缺口前留待下次同步。
 // got 为本批已收到的 seq 集合，补拉结果原地累积其中。
-func (e *SeqSyncEngine) fillHole(ctx context.Context, convID string, got map[int64]struct{}, hole, last int64) (int64, error) {
+func (e *SeqSyncEngine) fillHole(ctx context.Context, convID string, got map[int64]struct{}, hole, last int64, affected map[string]struct{}) (int64, error) {
 	for attempt := 0; attempt < gapHoleRetries; attempt++ {
 		time.Sleep(gapHoleRetryDelay)
 		result, err := e.msg.PullMsgBySeq(ctx, e.owner, []*model.SeqRange{{
@@ -249,6 +275,7 @@ func (e *SeqSyncEngine) fillHole(ctx context.Context, convID string, got map[int
 		if err := e.stor.UpsertMsgs(e.owner, pr.Msgs); err != nil {
 			return hole, err
 		}
+		e.applyNotificationMsgs(convID, pr.Msgs, affected)
 		for _, m := range pr.Msgs {
 			got[m.Seq] = struct{}{}
 		}
@@ -268,4 +295,71 @@ func firstHole(got map[int64]struct{}, begin, end int64) int64 {
 		}
 	}
 	return 0
+}
+
+// applyNotificationMsgs 把同步补拉到的通知会话消息应用到本地缓存。
+// 通知会话（n_）里的撤回/删除 tips 是持久化的状态变更，游标推进本身不会改变
+// 聊天消息状态，必须在入库后补做标记并向上层发布事件，否则掉线期间错过的撤回会一直生效。
+// affected 累积受影响的原会话，由调用方在该会话同步完成后再统一重算摘要。
+func (e *SeqSyncEngine) applyNotificationMsgs(convID string, msgs []*model.MsgData, affected map[string]struct{}) {
+	for _, m := range msgs {
+		switch m.ContentType {
+		case pbconstant.MsgRevokeNotification:
+			tip := &pbsdk.RevokeMsgTips{}
+			if err := json.Unmarshal([]byte(notificationDetail(m.Content)), tip); err != nil {
+				continue
+			}
+			conv := tip.ConversationID
+			if conv == "" {
+				conv = convID
+			}
+			if tip.Seq > 0 {
+				if err := e.stor.MarkMsgsRevoked(e.owner, conv, []int64{tip.Seq}); err != nil && e.logger != nil {
+					e.logger.Warnf("sync: mark revoked %s seq %d: %v", conv, tip.Seq, err)
+				}
+				affected[conv] = struct{}{}
+			}
+			if e.bus != nil {
+				e.bus.Publish(events.EventRevokeMsg, tip)
+			}
+		case pbconstant.DeleteMsgsNotification:
+			tip := &pbsdk.DeleteMsgsTips{}
+			if err := json.Unmarshal([]byte(notificationDetail(m.Content)), tip); err != nil {
+				continue
+			}
+			conv := tip.ConversationID
+			if conv == "" {
+				conv = convID
+			}
+			if len(tip.Seqs) > 0 {
+				if err := e.stor.DeleteMsgs(e.owner, conv, tip.Seqs); err != nil && e.logger != nil {
+					e.logger.Warnf("sync: delete msgs %s: %v", conv, err)
+				}
+				affected[conv] = struct{}{}
+			}
+			if e.bus != nil {
+				e.bus.Publish(events.EventDeleteMsgs, tip)
+			}
+		}
+	}
+}
+
+// refreshConversationSummary 撤回/删除后重算会话摘要；实现由客户端注入，
+// 锁与事件发布都在注入方，避免同步引擎与客户端各持一把锁。
+func (e *SeqSyncEngine) refreshConversationSummary(conversationID string) {
+	if e.owner == "" || e.refreshSummary == nil {
+		return
+	}
+	e.refreshSummary(e.owner, conversationID)
+}
+
+// notificationDetail 取出 NotificationElem.detail；兼容直接存 tips 的旧数据。
+func notificationDetail(content string) string {
+	var elem struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(content), &elem); err == nil && elem.Detail != "" {
+		return elem.Detail
+	}
+	return content
 }

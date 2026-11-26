@@ -120,6 +120,10 @@ const (
 // MsgStatusRevoked 撤回通知的本地缓存标记，语义等同于已删除（UI 展示「已撤回」）
 const MsgStatusRevoked = MsgStatusDeleted
 
+// ContentTypeRevoke 撤回消息（对齐 docs/protocol-message.md §2 的 111 Revoke）。
+// 仅用于会话摘要：最新一条被撤回时摘要改写为该类型，宿主据此展示「已撤回」。
+const ContentTypeRevoke int32 = 111
+
 // DeleteSyncOpt flag
 const (
 	SyncSelf  = true

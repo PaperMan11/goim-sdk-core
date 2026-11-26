@@ -318,7 +318,7 @@ func TestSeqSync_GapPull(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	bus, chans := newTestBus(t, events.EventSeqSynced)
 
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestSeqSync_UpToDate(t *testing.T) {
 	}
 	bus, chans := newTestBus(t, events.EventSeqSynced)
 
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestSeqSync_EmptyRange(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	bus, _ := newTestBus(t, events.EventSeqSynced)
 
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestSeqSync_HoleRetryFill(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	bus, chans := newTestBus(t, events.EventSeqSynced)
 
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestSeqSync_HoleSkippedAfterRetries(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	bus, chans := newTestBus(t, events.EventSeqSynced)
 
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestSeqSync_HoleRetryError(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	bus, chans := newTestBus(t, events.EventSeqSynced)
 
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err == nil {
 		t.Fatal("Sync error = nil, want hole retry error")
 	}
@@ -580,7 +580,7 @@ func TestSeqSync_NonAdvancingCursorGuard(t *testing.T) {
 	stor := storage.NewMemoryStorage()
 	bus, chans := newTestBus(t, events.EventSeqSynced)
 
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v（mock 50 次安全阀触发 = 防御未生效死循环）", err)
 	}
@@ -618,7 +618,7 @@ func TestSeqSync_ConversationFailureIsolation(t *testing.T) {
 	}
 	stor := storage.NewMemoryStorage()
 	bus, chans := newTestBus(t, events.EventSeqSynced)
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 
 	// 第一次：convB 失败，convA/convC 正常完成
 	err := engine.Sync(context.Background())
@@ -692,7 +692,7 @@ func TestSeqSync_ResumeAfterBatchFailure(t *testing.T) {
 	}
 	stor := storage.NewMemoryStorage()
 	bus, chans := newTestBus(t, events.EventSeqSynced)
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 
 	// 第一次：第 2 批失败（第 1 批已入库、游标已落盘）
 	if err := engine.Sync(context.Background()); err == nil {
@@ -748,7 +748,7 @@ func TestSeqSync_MsgFloorSkipsPurgedHistory(t *testing.T) {
 	requireNoError(t, stor.SetMsgFloor(testOwner, "conv2", 50))
 
 	bus, chans := newTestBus(t, events.EventSeqSynced)
-	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{})
+	engine := NewSeqSyncEngine(msg, stor, testOwner, bus, &logger.NopLogger{}, nil)
 	if err := engine.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
