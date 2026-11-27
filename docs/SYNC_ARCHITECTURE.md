@@ -105,7 +105,7 @@ graph TB
 
 重同步链路：transport 重连回调 → `startBackgroundSync`（新一轮，取消旧轮）→ 同一后台链路 `[Data-backed]`。
 
-实时链路：2001 推送 → `persistPushMsg` 入库（不推进游标）→ 消息类通知改缓存 / 实体类通知走去抖旁路 `[Data-backed]`。推送与 gap 拉取共用 upsert 幂等路径，两条链路并发无一致性问题 `[Expert judgment]`（依据：`pkg/storage` UpsertMsgs 按 (owner, client_msg_id) 主键幂等）。
+实时链路：2001 推送 → `persistPushMsg` 入库（不推进游标）→ 消息类通知改缓存 / 实体类通知走去抖旁路 `[Data-backed]`。撤回/删除通知（2101/2102）落在独立通知会话 `n_`，聊天会话 seq 不推进；离线期间错过的 tips 由后台同步下拉 `n_` 补齐。推送与 gap 拉取共用 upsert 幂等路径，两条链路并发无一致性问题 `[Expert judgment]`（依据：`pkg/storage` UpsertMsgs 按 (owner, client_msg_id) 主键幂等）。
 
 ### 2.4 技术选型与理由
 
@@ -149,9 +149,9 @@ graph TB
 
 | 要素 | 内容 |
 |---|---|
-| 职责 | 按会话对比服务端与本地 seq 游标，分批拉取缺口消息入库并推进游标 |
+| 职责 | 按会话对比服务端与本地 seq 游标，分批拉取缺口消息入库并推进游标；通知会话（`n_`）的 2101/2102 tips 入库后就地应用撤回/删除 |
 | 输入 | ctx、owner；经 MsgSource 接口访问 NewestSeq（WS 1001）/ PullMsgBySeq（WS 1002） |
-| 输出 | 缺口消息入库、seq 游标前移、EventSeqSynced（全部会话成功时） |
+| 输出 | 缺口消息入库、seq 游标前移、`n_` tips 应用撤回/删除并发布 EventRevokeMsg/EventDeleteMsgs、EventSeqSynced（全部会话成功时） |
 | 依赖 | MsgSource 最小接口、storage 读写、eventbus |
 | 边界 | 会话级失败隔离：单会话失败记录错误继续其余会话；不做实体同步 |
 
@@ -176,7 +176,7 @@ graph TB
 | 依赖 | syncRunMu（与后台同步互斥）、EntitySyncEngine.SyncKinds |
 | 边界 | 不改 SyncState、不发 Sync 生命周期事件；失败仅告警，由游标增量最终收敛 |
 
-消息类通知（2101/2102/2200）走 `applyMsgCache` 直接改写消息缓存，与实体旁路无关 `[Data-backed]`。
+消息类通知（2101/2102/2200）走 `applyMsgCache` 直接改写消息缓存，与实体旁路无关 `[Data-backed]`。撤回/删除 tips 由服务端持久化在独立通知会话 `n_<会话>`；实时推送与离线同步（`PullMsgBySeq` 合并 `NotificationMsgs`）两条路径最终都调用 `applyNotificationMsgs`/`applyMsgCache`，按 tips 携带的原会话 ID 就地更新，不新增消息气泡。
 
 ### 3.6 存储层游标
 

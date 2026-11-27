@@ -753,16 +753,20 @@ pkg/storage/
 
 ```
 初始化（登录后 / 重连后）:
-  1. NewestSeq(WS 1001) → 服务端 maxSeq/minSeq（按会话）
+  1. NewestSeq(WS 1001) → 服务端 maxSeq/minSeq（按会话，含每个聊天会话对应的 n_ 通知会话）
   2. 与 Storage.local_seqs 对比 → 缺口 = [localMax+1, serverMax]
   3. gap > 0 → PullMsgBySeqList(WS 1002) 分批拉取（每批 ≤100 seq）
-     → messages 表 upsert → local_seqs 逐批落盘（commit-last：游标写在入库后，
-     失败重试只重拉未完成批次/会话）
-  4. 单会话失败不中断其余会话（错误聚合返回）；全部成功才 Publish(EventSeqSynced)
+     → 合并响应中的 msgs 与 notificationMsgs → messages 表 upsert
+     → local_seqs 逐批落盘（commit-last：游标写在入库后，
+       失败重试只重拉未完成批次/会话）
+  4. n_ 通知会话中的 2101/2102 tips → 解析后按 tips 的原会话 ID 就地标记撤回/删除，
+     并发布 EventRevokeMsg / EventDeleteMsgs（服务端已把通知移出聊天会话 seq）
+  5. 单会话失败不中断其余会话（错误聚合返回）；全部成功才 Publish(EventSeqSynced)
 
 运行时:
   WS 2001 推送 MsgData → seq > localMax → 直接入库 + local_seqs 前移
   （EventNewMsg 由 PushHandler 派发，Phase 4 已做；引擎只管持久化与游标）
+  2101/2102 推送 → 按 tips 就地更新，不产生新消息气泡
 
 重连后:
   OnReconnected → 重新走初始化流程做 gap 拉取（不再整库丢弃，§3.D 旧方案废弃）
@@ -843,6 +847,7 @@ build / vet / 全量 go test ./pkg/... 全绿（含修复 hash 包缺失 test.tx
 | 推送路径落库 | handleMessagePush 先 persistPushMsg 再派发 EventNewMsg；**推送不推进游标**（推送可丢/乱序，游标仅由 gap 拉取推进） |
 | 通知触发定向增量 | 实体类 Tips（1201-1210/1501-1515/1303 等）→ ~500ms 防抖合并 → 仅拉对应实体类别增量（E3.10） |
 | 通知缓存应用修复 | 撤回/删除/已读优先用 tips 携带的原会话 ID，禁用通知信封自身的 n_ 前缀会话 ID（E3 缺陷修复） |
+| 撤回/删除离线补拉 | 服务端 `GetMaxSeq` 含 `n_` 通知会话；`PullMsgBySeq` 合并 `notificationMsgs`；同步入库后应用 tips 并发布事件（2026-11-27） |
 | 通知 payload 类型化 | dispatchNotification 全部 decodeTip 到 pbsdk.*Tips 具体类型；model/events 全量对齐服务端 protobuf |
 | 发送端写入路径 | 单一权威写入：仅经服务端回显推送落库，发送成功不直接写本地（服务端 write-through 后 1003 ack 即提交信号） |
 | 批内缺口有界补拉 | SeqSync 拉取批内 seq 不连续（并发落库乱序窗口）时游标停在缺口前补拉，耗尽跳过告警（R12 收口） |
