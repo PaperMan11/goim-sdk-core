@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/events"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/safego"
 )
 
 // EventPayload 跨语言导出的事件载荷（gomobile 可绑定：全基本类型）
@@ -46,6 +47,8 @@ func (d *Dispatcher) Subscribe(eventType int32, onEvent func(eventJSON string)) 
 	ch, unsub := c.Subscribe(events.EventType(eventType))
 
 	go func() {
+		// onEvent 是跨语言回调（JS/Native），panic 必须降级，否则 wasm 进程死亡
+		defer safego.Recover("call.subscribe", d.warnf)
 		for {
 			select {
 			case <-ctx.Done():
@@ -98,6 +101,8 @@ func (d *Dispatcher) bindCallback() {
 	ch, unsub := cli.SubscribeAll()
 	go func() {
 		defer unsub()
+		// cb.OnEvent 是跨语言回调（wasm 场景直通宿主 JS），panic 必须降级
+		defer safego.Recover("call.bindCallback", d.warnf)
 		for {
 			select {
 			case <-ctx.Done():

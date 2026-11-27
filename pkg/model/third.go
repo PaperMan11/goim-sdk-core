@@ -45,11 +45,11 @@ type PartSizeResp struct {
 // InitiateMultipartUploadReq 分片上传初始化请求
 type InitiateMultipartUploadReq struct {
 	Hash        string `json:"hash,omitempty"`        // 文件 hash（可选，用于幂等/校验）
-	Size        int64  `json:"size"`                 // 文件总大小（字节）
-	PartSize    int64  `json:"partSize"`             // 分片大小（字节）
-	MaxParts    int32  `json:"maxParts"`             // 最大分片数
+	Size        int64  `json:"size"`                  // 文件总大小（字节）
+	PartSize    int64  `json:"partSize"`              // 分片大小（字节）
+	MaxParts    int32  `json:"maxParts"`              // 最大分片数
 	Cause       string `json:"cause,omitempty"`       // 上传原因（如 sendMsg）
-	Name        string `json:"name"`                 // 对象 key（S3 object key）
+	Name        string `json:"name"`                  // 对象 key（S3 object key）
 	ContentType string `json:"contentType,omitempty"` // MIME 类型
 	URLPrefix   string `json:"urlPrefix,omitempty"`   // 可选 URL 前缀，与 AccessURL 对齐
 }
@@ -70,10 +70,10 @@ type InitiateMultipartUploadResp struct {
 
 // AuthSignReq 续签请求（预签名 URL 过期后调用，或提前申请多片签名）
 type AuthSignReq struct {
-	UploadID   string   `json:"uploadID"`
+	UploadID    string  `json:"uploadID"`
 	PartNumbers []int32 `json:"partNumbers"`
-	Name       string   `json:"name,omitempty"`
-	URLPrefix  string   `json:"urlPrefix,omitempty"`
+	Name        string  `json:"name,omitempty"`
+	URLPrefix   string  `json:"urlPrefix,omitempty"`
 }
 
 // AuthSignResp 续签响应（含新的预签名 URL + 分片签名）

@@ -335,7 +335,7 @@ func (u *DefaultFileUploader) uploadMultipart(ctx context.Context, reader io.Rea
 			opts.OnProgress(added+int64(len(completedParts))*partSize, opts.Size)
 		}
 		return nil
-	})
+	}, u.logger.Warnf)
 
 	// 收集本次 PUT 成功的分片
 	var nowDone []model.CompletedPart

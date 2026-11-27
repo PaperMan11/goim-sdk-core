@@ -35,6 +35,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/manager"
 	"github.com/PaperMan11/goim-sdk-core/pkg/model"
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/safego"
 )
 
 // Dispatcher 反射分发器（全局单例，由 NewDispatcher 构造）
@@ -190,6 +191,9 @@ func (d *Dispatcher) Close() {
 //	gomobile 导出：iOS onSuccess (String)->Void；Android (String)->Unit
 func (d *Dispatcher) Call(method string, argsJSON string, onSuccess func(string), onError func(int32, string)) {
 	go func() {
+		// onSuccess/onError 是跨语言回调；invoke 虽有 middleware recover，
+		// 回调本身抛出的异常仍会杀进程，这里整体兜底
+		defer safego.Recover("dispatcher.call", d.warnf)
 		result, err := d.invoke(method, argsJSON)
 		if err != nil {
 			code, msg := NormalizeError(err)
@@ -212,6 +216,7 @@ func (d *Dispatcher) SyncCall(method string, argsJSON string) (string, error) {
 func (d *Dispatcher) MessageCall(method string, argsJSON string,
 	onSuccess func(string), onError func(int32, string), onProgress func(int32)) {
 	go func() {
+		defer safego.Recover("dispatcher.messageCall", d.warnf)
 		result, err := d.invoke(method, argsJSON)
 		if err != nil {
 			code, msg := NormalizeError(err)

@@ -5,6 +5,8 @@
 // from net.Listeners, or scanning input from a closable io.Reader.
 package run
 
+import "github.com/PaperMan11/goim-sdk-core/pkg/utils/safego"
+
 // Group collects actors (functions) and runs them concurrently.
 // When one actor (function) returns, all actors are interrupted.
 // The zero value of a Group is useful.
@@ -37,10 +39,12 @@ func (g *Group) Run() error {
 	}
 
 	// Run each actor.
+	// 经 safego.Call 包装：actor panic 转为 error 退出（保证一定向 errors 发送，
+	// 否则 Run 会永久阻塞），group「首个退出者中断其余」的语义完整保留。
 	errors := make(chan error, len(g.actors))
 	for _, a := range g.actors {
 		go func(a actor) {
-			errors <- a.execute()
+			errors <- safego.Call("run.group.actor", a.execute)
 		}(a)
 	}
 

@@ -491,7 +491,6 @@ func TestApplySelfReadMarkClearsUnread(t *testing.T) {
 	}
 }
 
-
 // TestPushNotificationTriggersEntitySync 实体类通知（1204 好友添加）应去抖触发
 // 实体增量同步，把变更实时拉入本地缓存（无需等待重连）
 func TestPushNotificationTriggersEntitySync(t *testing.T) {

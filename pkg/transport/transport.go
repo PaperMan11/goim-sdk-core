@@ -6,6 +6,7 @@ import (
 
 	"github.com/PaperMan11/goim-sdk-core/pkg/logger"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/run"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/safego"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 )
 
@@ -207,6 +208,8 @@ func (b *baseTransport) startActors(actors ...func(ctx context.Context)) {
 	b.groupWg.Add(1)
 	go func() {
 		defer b.groupWg.Done()
+		// actor panic 会沿 group.Run 冒泡杀死进程（wasm 下致命），这里兜底降级为日志
+		defer safego.Recover("transport.actors", b.logger.Warnf)
 		if err := b.group.Run(); err != nil {
 			b.logger.Warnf("transport actors group exited, err=%v", err)
 		}
@@ -259,7 +262,8 @@ func (b *baseTransport) actorsExited() {
 	if b.OnDisconnected != nil {
 		b.OnDisconnected()
 	}
-	go b.runReconnectLoop()
+	// 重连循环 panic 不能杀进程（wasm 下进程死亡 = SDK 静默失效）
+	safego.Go("transport.reconnectLoop", b.logger.Warnf, b.runReconnectLoop)
 }
 
 // routeMessage 统一消息路由入口（readLoop 调用，所有权移交给 router）

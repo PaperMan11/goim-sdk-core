@@ -150,6 +150,21 @@ func closeLogSink(l logger.Logger) {
 	}
 }
 
+// warnf 输出 panic 兜底等告警：优先走 Init 构建的日志出口；SetClient 场景
+// 没有该出口时直接转发宿主回调，避免 panic 仅落到 stderr 而线上不可见。
+func (d *Dispatcher) warnf(format string, args ...interface{}) {
+	d.mu.RLock()
+	sink := d.logSink
+	d.mu.RUnlock()
+	if sink != nil {
+		sink.Warnf(format, args...)
+		return
+	}
+	if cb := d.currentLogCallback(); cb != nil {
+		cb.OnLog(logger.LevelWarn, fmt.Sprintf(format, args...))
+	}
+}
+
 // currentLogCallback 读取当前注册的日志回调（写入时动态读取，兼容 Init 后注册）
 func (d *Dispatcher) currentLogCallback() LogCallback {
 	d.mu.RLock()

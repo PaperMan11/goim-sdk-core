@@ -21,7 +21,9 @@ type stubWSTransport struct {
 func (s *stubWSTransport) Connect(ctx context.Context) error { return nil }
 func (s *stubWSTransport) Disconnect() error                 { return nil }
 func (s *stubWSTransport) IsConnected() bool                 { return true }
-func (s *stubWSTransport) Status() transport.TransportStatus { return transport.TransportStatusConnected }
+func (s *stubWSTransport) Status() transport.TransportStatus {
+	return transport.TransportStatusConnected
+}
 func (s *stubWSTransport) SendRequest(ctx context.Context, req *transport.Request) error {
 	return nil
 }

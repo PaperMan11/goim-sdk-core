@@ -14,15 +14,15 @@ import (
 //   - SDK 不持有 RustFS AccessKey/SecretKey，预签名 URL 由服务端鉴权后签发
 //
 // 典型上传流程（Multipart，App 层）：
-//   1. PartSize(ctx, size) → 推荐分片大小
-//   2. InitiateMultipartUpload(ctx, req) → uploadID + 预签名 URL 列表
-//   3. 并发 PUT 分片到各自预签名 URL（SDK 可选封装 FileUploader）
-//   4. CompleteMultipartUpload(ctx, req) → 最终下载 URL
+//  1. PartSize(ctx, size) → 推荐分片大小
+//  2. InitiateMultipartUpload(ctx, req) → uploadID + 预签名 URL 列表
+//  3. 并发 PUT 分片到各自预签名 URL（SDK 可选封装 FileUploader）
+//  4. CompleteMultipartUpload(ctx, req) → 最终下载 URL
 //
 // 典型上传流程（FormData 小文件，App 层）：
-//   1. InitiateFormData(ctx, req) → 预签名表单字段
-//   2. FormData POST 到指定 URL
-//   3. CompleteFormData(ctx, req) → 最终下载 URL
+//  1. InitiateFormData(ctx, req) → 预签名表单字段
+//  2. FormData POST 到指定 URL
+//  3. CompleteFormData(ctx, req) → 最终下载 URL
 //
 // 下载：AccessURL(ctx, req) → 预签名下载 URL（HTTP GET）
 type ThirdMgr interface {

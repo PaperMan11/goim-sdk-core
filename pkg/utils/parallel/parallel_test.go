@@ -16,7 +16,7 @@ func TestRun_AllSuccess(t *testing.T) {
 	err := Run(tasks, 4, func(i int) error {
 		atomic.AddInt32(&count, 1)
 		return nil
-	})
+	}, t.Logf)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -36,7 +36,7 @@ func TestRun_FirstErrorReturnedButOthersStillRun(t *testing.T) {
 			return sentinel
 		}
 		return nil
-	})
+	}, t.Logf)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("expected sentinel error, got %v", err)
 	}
@@ -52,7 +52,7 @@ func TestRun_ZeroConcurrence(t *testing.T) {
 	err := Run(tasks, 0, func(i int) error {
 		atomic.AddInt32(&count, 1)
 		return nil
-	})
+	}, t.Logf)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestRun_ZeroConcurrence(t *testing.T) {
 }
 
 func TestRun_EmptyTasks(t *testing.T) {
-	err := Run([]int{}, 4, func(i int) error { return nil })
+	err := Run([]int{}, 4, func(i int) error { return nil }, t.Logf)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRun_ConcurrencyLimit(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		atomic.AddInt32(&active, -1)
 		return nil
-	})
+	}, t.Logf)
 	if atomic.LoadInt32(&maxActive) > 4 {
 		t.Fatalf("concurrency exceeded limit 4, got %d", atomic.LoadInt32(&maxActive))
 	}
@@ -90,7 +90,7 @@ func TestRun_ConcurrencyLimit(t *testing.T) {
 
 func TestRun_NoTasks(t *testing.T) {
 	// nil slice 也应该安全
-	err := Run(nil, 4, func(i int) error { return nil })
+	err := Run(nil, 4, func(i int) error { return nil }, t.Logf)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}

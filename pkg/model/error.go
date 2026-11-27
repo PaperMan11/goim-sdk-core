@@ -17,25 +17,25 @@ const (
 	ErrCodeSecretNotChangedError int32 = 1050
 
 	// 1101-1102: 用户
-	ErrCodeUserIDNotFoundError int32 = 1101
+	ErrCodeUserIDNotFoundError    int32 = 1101
 	ErrCodeRegisteredAlreadyError int32 = 1102
 
 	// 1201-1210: 群组
-	ErrCodeGroupIDNotFoundError   int32 = 1201
-	ErrCodeGroupIDExisted         int32 = 1202
-	ErrCodeNotInGroupYetError     int32 = 1203
-	ErrCodeDismissedAlreadyError  int32 = 1204
-	ErrCodeGroupNotFoundError     int32 = 1207
-	ErrCodeGroupMutedError        int32 = 1208
-	ErrCodeGroupMemberMutedError  int32 = 1209
-	ErrCodeGroupDismissedError    int32 = 1210
+	ErrCodeGroupIDNotFoundError  int32 = 1201
+	ErrCodeGroupIDExisted        int32 = 1202
+	ErrCodeNotInGroupYetError    int32 = 1203
+	ErrCodeDismissedAlreadyError int32 = 1204
+	ErrCodeGroupNotFoundError    int32 = 1207
+	ErrCodeGroupMutedError       int32 = 1208
+	ErrCodeGroupMemberMutedError int32 = 1209
+	ErrCodeGroupDismissedError   int32 = 1210
 
 	// 1301-1305: 关系链
-	ErrCodeCanNotAddYourselfError int32 = 1301
-	ErrCodeBlockedByPeer          int32 = 1302
-	ErrCodeNotPeersFriend         int32 = 1303
+	ErrCodeCanNotAddYourselfError   int32 = 1301
+	ErrCodeBlockedByPeer            int32 = 1302
+	ErrCodeNotPeersFriend           int32 = 1303
 	ErrCodeRelationshipAlreadyError int32 = 1304
-	ErrCodeFriendRequestHandled   int32 = 1305
+	ErrCodeFriendRequestHandled     int32 = 1305
 
 	// 1401-1404: 消息
 	ErrCodeMessageHasReadDisable int32 = 1401
@@ -44,13 +44,13 @@ const (
 	ErrCodeMsgAlreadyRevoke      int32 = 1404
 
 	// 1501-1507: Token
-	ErrCodeTokenExpiredError      int32 = 1501
-	ErrCodeTokenInvalidError      int32 = 1502
-	ErrCodeTokenMalformedError    int32 = 1503
-	ErrCodeTokenNotValidYetError  int32 = 1504
-	ErrCodeTokenUnknownError      int32 = 1505
-	ErrCodeTokenKickedError       int32 = 1506
-	ErrCodeTokenNotExistError     int32 = 1507
+	ErrCodeTokenExpiredError     int32 = 1501
+	ErrCodeTokenInvalidError     int32 = 1502
+	ErrCodeTokenMalformedError   int32 = 1503
+	ErrCodeTokenNotValidYetError int32 = 1504
+	ErrCodeTokenUnknownError     int32 = 1505
+	ErrCodeTokenKickedError      int32 = 1506
+	ErrCodeTokenNotExistError    int32 = 1507
 
 	// 1601-1605: 连接
 	ErrCodeConnOverMaxNumLimit int32 = 1601

@@ -19,6 +19,7 @@ import (
 	"github.com/PaperMan11/goim-sdk-core/pkg/transport"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/convert"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/eventbus"
+	"github.com/PaperMan11/goim-sdk-core/pkg/utils/safego"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/timex"
 	"github.com/PaperMan11/goim-sdk-core/pkg/utils/uuidx"
 
@@ -453,6 +454,9 @@ func (c *DefaultClient) startBackgroundSync(owner string) {
 	})
 
 	go func() {
+		// panic 兜底：后台同步 panic 若杀死进程，wasm 下所有排队回调会抛
+		// "Go program has already exited"，SDK 整体静默失效
+		defer safego.Recover("client.backgroundSync", c.logger.Warnf)
 		err := c.runSyncFlow(ctx, owner)
 
 		c.mu.Lock()
@@ -781,6 +785,8 @@ func (c *DefaultClient) onEvent(et events.EventType, fn func(events.Event)) {
 	ch, unsub := c.Subscribe(et)
 	go func() {
 		defer unsub()
+		// fn 链路最终会调到跨语言回调（JS/Native），panic 必须降级为日志
+		defer safego.Recover("client.onEvent", c.logger.Warnf)
 		for ev := range ch {
 			fn(ev)
 		}
@@ -828,8 +834,8 @@ func (c *DefaultClient) handleKick(resp *transport.Response) {
 		Timestamp:  timex.UnixMilli(),
 	})
 
-	// 异步断开，不阻塞 readLoop
-	go c.Disconnect()
+	// 异步断开，不阻塞 readLoop（panic 兜底：readLoop 上下文里 panic 会杀整个进程）
+	safego.Go("client.disconnect", c.logger.Warnf, func() { _ = c.Disconnect() })
 }
 
 // handleBackgroundStatus 处理后台状态变更推送（WSSetBackgroundStatus=2004）
