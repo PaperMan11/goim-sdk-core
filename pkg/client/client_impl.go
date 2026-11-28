@@ -1041,6 +1041,7 @@ func (c *DefaultClient) dispatchNotification(msgData *pbsdk.MsgData, mm *model.M
 		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.FriendDeletedNotification: // 1205
 		decodeTip(events.EventFriendDeleted, &pbsdk.FriendDeletedTips{})
+		c.triggerEntitySync(sdkSync.KindFriend)
 	case pbconstant.FriendRemarkSetNotification,
 		pbconstant.FriendInfoUpdatedNotification,
 		pbconstant.FriendsInfoUpdateNotification: // 1206 / 1209 / 1210

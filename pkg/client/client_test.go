@@ -552,6 +552,69 @@ func TestPushNotificationTriggersEntitySync(t *testing.T) {
 	}
 }
 
+// TestPushFriendDeletedNotificationTriggersEntitySync 1205 好友删除通知应触发好友增量同步，
+// 请求增量接口并将服务端返回的删除项应用到本地缓存。
+func TestPushFriendDeletedNotificationTriggersEntitySync(t *testing.T) {
+	var friendRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		write := func(data interface{}) {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 0, "msg": "", "data": data})
+		}
+		switch r.URL.Path {
+		case "/relation/get_incremental_friends":
+			friendRequests.Add(1)
+			write(map[string]interface{}{
+				"versionID": "fv1", "version": 1,
+				"delete": []string{"bob"},
+			})
+		default:
+			write(map[string]interface{}{})
+		}
+	}))
+	defer srv.Close()
+
+	m := newMockTransport()
+	cli := NewClient(&ClientConfig{BaseURL: srv.URL, Transport: m}).(*DefaultClient)
+	loginTestClient(cli, "u1")
+	if err := cli.storage.UpsertFriends("u1", []*model.FriendInfo{{
+		OwnerUserID: "u1",
+		FriendUser:  &model.FriendUserInfo{UserID: "bob"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	synced := make(chan struct{}, 1)
+	ch, unsub := cli.Subscribe(events.EventFriendListSynced)
+	defer unsub()
+	go func() {
+		for range ch {
+			synced <- struct{}{}
+		}
+	}()
+
+	data, err := proto.Marshal(pushEnvelope(notificationMsg(t,
+		pbconstant.FriendDeletedNotification,
+		&pbsdk.FromToUserID{FromUserID: "u1", ToUserID: "bob"},
+		9)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.router.Route(&transport.Response{ReqIdentifier: transport.WSPushMsg, Data: data})
+	waitForSubscribe(t, synced)
+
+	if got := friendRequests.Load(); got != 1 {
+		t.Fatalf("friends incremental requested %d times, want 1", got)
+	}
+	friends, err := cli.storage.ListFriends("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(friends) != 0 {
+		t.Fatalf("friend cache not deleted by notification-triggered sync: %+v", friends)
+	}
+}
+
 // TestTargetedEntitySync 定向增量同步：通知只拉对应实体类型的增量，
 // 去抖窗口内未变更的类型不发请求（每次突发 5 个增量请求 → 1 个）
 func TestTargetedEntitySync(t *testing.T) {

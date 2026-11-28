@@ -8,8 +8,6 @@ package integration
 //   - 断言目标为本地 SQLite 缓存（newTestClientWithStorage 注入的同一 Storage 句柄）
 //   - 通知触发的定向增量同步有约 500ms 去抖（client_impl.go triggerEntitySync），
 //     事件到达 ≠ 缓存已更新，缓存断言统一用 require.Eventually 收敛（同 E3.5/E3.10 模式）
-//   - 1205 FriendDeleted 不触发自动同步（dispatchNotification 未挂 triggerEntitySync），
-//     好友删除断言走 Logout(false) 重登的游标增量补齐（计划三步法第三步：重登增量补齐）
 
 import (
 	"context"
@@ -119,7 +117,7 @@ func findConv(stor storage.Storage, owner, conversationID string) *model.Convers
 	return nil
 }
 
-// TestE4_FriendIncrementalSync E4.1 好友：首拉 → 通知触发增量 insert → 删除重登补齐 delete
+// TestE4_FriendIncrementalSync E4.1 好友：首拉 → 通知触发增量 insert/delete
 func TestE4_FriendIncrementalSync(t *testing.T) {
 	ca, eca := newTestClient(t, "A")
 	cb, ecb, storB := newTestClientWithStorage(t, "B")
@@ -142,11 +140,11 @@ func TestE4_FriendIncrementalSync(t *testing.T) {
 	require.Eventually(t, func() bool { return hasFriend(storB, u2, u3) },
 		storeWaitTimeout, 200*time.Millisecond, "B friend cache should insert u3")
 
-	// 增量 delete：u1 删除 u2（1205 不触发自动同步）→ B 重登走游标增量补齐
+	// 增量 delete：u1 删除 u2 → B 收 1205 触发好友增量同步
 	require.NoError(t, ca.Rel().DeleteFriend(context.Background(), u1, u2), "delete friend")
 	waitAny(t, events.EventFriendDeleted, eventTimeout, eca, ecb)
-	reloginAndSync(t, cb, ecb, u2, false)
-	require.False(t, hasFriend(storB, u2, u1), "u1 should be deleted from B friend cache after relogin incremental")
+	require.Eventually(t, func() bool { return !hasFriend(storB, u2, u1) },
+		storeWaitTimeout, 200*time.Millisecond, "B friend cache should delete u1 via notification-triggered sync")
 	require.True(t, hasFriend(storB, u2, u3), "u3 should remain in B friend cache")
 }
 
